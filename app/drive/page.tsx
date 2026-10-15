@@ -4,6 +4,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { useLanguage } from "@/lib/LanguageProvider";
 
+const TruckMap = dynamic(() => import("./TruckMap"), {
+  ssr: false,
+});
+
 type Driver = {
   id: string;
   company_id: string | null;
@@ -2966,13 +2970,32 @@ useEffect(() => {
             )}
           </div>
 
+          
+          <div className="mt-5 overflow-hidden rounded-xl border border-slate-200 bg-white">
+            <div className="border-b border-slate-200 px-4 py-3">
+              <h3 className="text-sm font-bold text-slate-900">
+                {isES ? "Mapa en vivo del camión" : "Live Truck Map"}
+              </h3>
+              <p className="mt-1 text-xs text-slate-500">
+                {lastLocation
+                  ? isES
+                    ? "Mostrando la última ubicación GPS recibida."
+                    : "Showing the latest GPS location received."
+                  : isES
+                    ? "Esperando la primera ubicación GPS."
+                    : "Waiting for the first GPS location."}
+              </p>
+            </div>
+
+            <TruckMap lastLocation={lastLocation} />
+          </div>
+
           <div className="mt-4">
             <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold text-slate-700">
               {gpsTracking ? text.gpsActive : text.gpsNotActive}
             </div>
           </div>
-        </div>
-
+         </div>
         <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <div>
             <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">

@@ -451,7 +451,12 @@ const isDriveBlocked = (
   const [gpsStatus, setGpsStatus] = useState(text.gpsNotActive);
   const [gpsDatabaseError, setGpsDatabaseError] = useState(false);
 
+ 
   const [lastLocation, setLastLocation] = useState<GPSLocation | null>(null);
+
+  const [navigationStop, setNavigationStop] =
+  useState<SequenceStop | null>(null);
+
 
   const [documentModalOpen, setDocumentModalOpen] = useState(false);
   const [documentType, setDocumentType] = useState("POD");
@@ -2158,11 +2163,19 @@ useEffect(() => {
       const result = await response.json().catch(() => null);
 
       if (!response.ok) {
-        console.error("GPS DATABASE ERROR:", result);
-        setGpsDatabaseError(true);
-        setGpsStatus(text.gpsSyncError);
-        return false;
-      }
+  const responseText = await response.clone().text();
+
+  console.error("GPS API HTTP ERROR:", {
+    status: response.status,
+    statusText: response.statusText,
+    body: responseText,
+    result,
+  });
+
+  setGpsDatabaseError(true);
+  setGpsStatus(text.gpsSyncError);
+  return false;
+}
 
       setGpsDatabaseError(false);
       setGpsStatus(text.gpsActive);
@@ -2226,10 +2239,15 @@ useEffect(() => {
         if (!gpsSaved) return;
 
         try {
-          await processSequenceArrival(location);
-        } catch (sequenceError) {
-          console.error("SEQUENCE ENGINE GPS ERROR:", sequenceError);
-        }
+  await processSequenceArrival(location);
+
+  if (gpsWatchId.current === null) return;
+
+  const nextStop = await getCurrentSequenceStop(loadId);
+  setNavigationStop(nextStop);
+} catch (sequenceError) {
+  console.error("SEQUENCE ENGINE GPS ERROR:", sequenceError);
+}
       },
       (error) => {
         console.error("GPS ERROR CODE:", error.code);
@@ -2987,7 +3005,10 @@ useEffect(() => {
               </p>
             </div>
 
-            <TruckMap lastLocation={lastLocation} />
+            <TruckMap
+  lastLocation={lastLocation}
+  destination={navigationStop}
+/>
           </div>
 
           <div className="mt-4">

@@ -429,9 +429,17 @@ export default function DriverPage() {
   const [userRole, setUserRole] = useState("");
   const [authUserId, setAuthUserId] = useState("");
 
-  const [driverWorkStatus, setDriverWorkStatus] = useState<
-    "off_duty" | "hold" | "available" | "on_duty" | "driving"
-  >("off_duty");
+  
+const [driverWorkStatus, setDriverWorkStatus] = useState<
+  "off_duty" | "hold" | "available" | "on_duty" | "driving"
+>("off_duty");
+
+const isDriveBlocked = (
+  status: "off_duty" | "hold" | "available" | "on_duty" | "driving"
+): boolean => {
+  return status === "off_duty" || status === "hold";
+};
+
 
   const [authReady, setAuthReady] = useState(false);
 
@@ -648,10 +656,10 @@ export default function DriverPage() {
 
     const location = lastLocation
       ? JSON.stringify({
-          latitude: lastLocation.lat,
-          longitude: lastLocation.lng,
-          accuracy: lastLocation.accuracy,
-        })
+        latitude: lastLocation.lat,
+        longitude: lastLocation.lng,
+        accuracy: lastLocation.accuracy,
+      })
       : null;
 
     const { error } = await supabase.from("hos_events").insert({
@@ -851,24 +859,47 @@ export default function DriverPage() {
         }
       }
     };
-
-    document.addEventListener("visibilitychange", handleVisibilityChange);
+    
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [driverWorkStatus]);
 
-  useEffect(() => {
-    if (!selectedDriver?.status) return;
+  
+useEffect(() => {
+  const rawStatus = selectedDriver?.status;
 
-    const normalizedStatus = String(selectedDriver.status).trim().toLowerCase();
+  if (!rawStatus) return;
 
-    if (["off_duty", "hold", "available", "on_duty", "driving"].includes(normalizedStatus)) {
-      setDriverWorkStatus(
-        normalizedStatus as "off_duty" | "hold" | "available" | "on_duty" | "driving"
-      );
-    }
-  }, [selectedDriver?.id, selectedDriver?.status]);
+  const normalizedStatus = String(rawStatus)
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+
+  const validStatuses = [
+    "off_duty",
+    "hold",
+    "available",
+    "on_duty",
+    "driving",
+  ] as const;
+
+  type DriverWorkStatus = (typeof validStatuses)[number];
+
+  const isValidStatus = (
+    status: string
+  ): status is DriverWorkStatus => {
+    return validStatuses.some((validStatus) => validStatus === status);
+  };
+
+  if (!isValidStatus(normalizedStatus)) {
+    console.warn("DRIVE: estado de conductor no reconocido:", rawStatus);
+    return;
+  }
+
+  setDriverWorkStatus(normalizedStatus);
+}, [selectedDriver?.id, selectedDriver?.status]);
+
 
   useEffect(() => {
     void loadInitialData();
@@ -918,10 +949,10 @@ export default function DriverPage() {
           currentDrivers.map((driver) =>
             String(driver.id) === receivedDriverId
               ? {
-                  ...driver,
-                  status: updatedDriver.status ?? driver.status,
-                  current_load_id: updatedDriver.current_load_id,
-                }
+                ...driver,
+                status: updatedDriver.status ?? driver.status,
+                current_load_id: updatedDriver.current_load_id,
+              }
               : driver
           )
         );
@@ -1037,7 +1068,7 @@ export default function DriverPage() {
       }
     );
 
-  channel.on(
+    channel.on(
       "postgres_changes",
       {
         event: "*",
@@ -1055,7 +1086,7 @@ export default function DriverPage() {
       if (!isActive) return;
       if (err || status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
         console.error("DRIVE REALTIME CONNECTION FAILED:", { status, error: err });
-        
+
         // Intentar reconexión limpia tras un fallo de red o socket cerrado (1006)
         setTimeout(() => {
           if (!isActive) return;
@@ -1092,8 +1123,8 @@ export default function DriverPage() {
 
     const savedCurrentLoad = currentDriver?.current_load_id
       ? driverLoadsForEffect.find(
-          (load) => String(load.id) === String(currentDriver.current_load_id)
-        )
+        (load) => String(load.id) === String(currentDriver.current_load_id)
+      )
       : null;
 
     if (savedCurrentLoad) {
@@ -1368,13 +1399,13 @@ export default function DriverPage() {
   }
 
   async function startDrive(): Promise<boolean> {
-    if (!selectedDriver) {
-      showMessage(text.selectDriverFirst);
+    if (!selectedLoad) {
+      showMessage(text.selectLoadFirst);
       return false;
     }
 
-    if (!selectedLoad) {
-      showMessage(text.selectLoadFirst);
+    if (!selectedDriver) {
+      showMessage(text.selectDriverFirst);
       return false;
     }
 
@@ -1388,6 +1419,17 @@ export default function DriverPage() {
         isES
           ? "El estado del GPS no está sincronizado. Detén el GPS e inténtalo nuevamente."
           : "GPS state is not synchronized. Stop GPS and try again."
+      );
+      return false;
+    }
+
+    if (
+      latestHosEvent?.event_type?.trim().toLowerCase() === "home time"
+    ) {
+      showMessage(
+        isES
+          ? "No puedes iniciar la conducción mientras tu estado HOS sea Home Time."
+          : "You cannot start driving while your HOS status is Home Time."
       );
       return false;
     }
@@ -1487,7 +1529,7 @@ export default function DriverPage() {
       const driverId = selectedDriverId;
       const loadId = selectedLoadId;
 
-     const { data: loadRecord, error: loadCheckError } = await supabase
+      const { data: loadRecord, error: loadCheckError } = await supabase
         .from("loads")
         .select("id, driver_id, status")
         .eq("id", loadId)
@@ -1530,7 +1572,7 @@ export default function DriverPage() {
       // 👇 Ahora sí, usamos la variable declarada arriba correctamente
       if (distanceMiles <= arrivalRadiusMiles && stopStatus === "pending") {
         console.log("¡Llegaste al punto de recogida! Actualizando estado a 'at_pickup'...");
-        
+
         const { data: arrivedStop, error: arriveError } = await supabase
           .from("load_stops")
           .update({ status: "at_pickup" })
@@ -1597,13 +1639,13 @@ export default function DriverPage() {
         }
 
         // 🔍 BÚSQUEDA ACTUAL DE LA CARGA (Cámbiala para que ignore las canceladas)
-const { data: loadRecord, error: loadCheckError } = await supabase
-  .from("loads")
-  .select("id, driver_id, status")
-  .eq("id", loadId)
-  .eq("driver_id", driverId)
-  .neq("status", "cancelled") // 👈 ¡Agrega esta línea para descartar canceladas automáticamente!
-  .maybeSingle();
+        const { data: loadRecord, error: loadCheckError } = await supabase
+          .from("loads")
+          .select("id, driver_id, status")
+          .eq("id", loadId)
+          .eq("driver_id", driverId)
+          .neq("status", "cancelled") // 👈 ¡Agrega esta línea para descartar canceladas automáticamente!
+          .maybeSingle();
 
         if (loadCheckError || !loadRecord) {
           console.error("SEQUENCE ENGINE - PICKUP TRANSIT ERROR:", loadCheckError);
@@ -1989,12 +2031,10 @@ const { data: loadRecord, error: loadCheckError } = await supabase
 
         showMessage(
           isES
-            ? `Delivery #${currentStop.stop_order} completado. Próxima parada: ${
-                nextStop.stop_type === "pickup" ? "Pickup" : "Delivery"
-              } #${nextStop.stop_order}.`
-            : `Delivery #${currentStop.stop_order} completed. Next stop: ${
-                nextStop.stop_type === "pickup" ? "Pickup" : "Delivery"
-              } #${nextStop.stop_order}.`
+            ? `Delivery #${currentStop.stop_order} completado. Próxima parada: ${nextStop.stop_type === "pickup" ? "Pickup" : "Delivery"
+            } #${nextStop.stop_order}.`
+            : `Delivery #${currentStop.stop_order} completed. Next stop: ${nextStop.stop_type === "pickup" ? "Pickup" : "Delivery"
+            } #${nextStop.stop_order}.`
         );
 
         return true;
@@ -2329,8 +2369,8 @@ const { data: loadRecord, error: loadCheckError } = await supabase
 
   const driveElapsedMs =
     latestStatusNormalized === "driving" &&
-    latestHosTimestamp !== null &&
-    Number.isFinite(latestHosTimestamp)
+      latestHosTimestamp !== null &&
+      Number.isFinite(latestHosTimestamp)
       ? Math.max(0, clockNow - latestHosTimestamp)
       : 0;
 
@@ -2463,28 +2503,28 @@ const { data: loadRecord, error: loadCheckError } = await supabase
             "accounting",
             "maintenance",
           ].includes(userRole) && (
-            <div className="w-full lg:w-72">
-              <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-slate-500">
-                {text.activeDriver}
-              </label>
+              <div className="w-full lg:w-72">
+                <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  {text.activeDriver}
+                </label>
 
-              <select
-                value={selectedDriverId}
-                onChange={(e) => {
-                  const driverId = e.target.value;
-                  setSelectedDriverId(driverId);
-                  localStorage.setItem("project-logistics-admin-selected-driver", driverId);
-                }}
-                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-medium text-slate-900 outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-100"
-              >
-                {drivers.map((driver) => (
-                  <option key={driver.id} value={driver.id}>
-                    {driver.full_name}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
+                <select
+                  value={selectedDriverId}
+                  onChange={(e) => {
+                    const driverId = e.target.value;
+                    setSelectedDriverId(driverId);
+                    localStorage.setItem("project-logistics-admin-selected-driver", driverId);
+                  }}
+                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-medium text-slate-900 outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-100"
+                >
+                  {drivers.map((driver) => (
+                    <option key={driver.id} value={driver.id}>
+                      {driver.full_name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
         </div>
       </section>
 
@@ -2552,11 +2592,10 @@ const { data: loadRecord, error: loadCheckError } = await supabase
                       await setHosStatus("Off Duty");
                       stopGpsTracking();
                     }}
-                    className={`rounded-xl border px-3 py-2 text-xs font-semibold transition ${
-                      driverWorkStatus === "off_duty"
-                        ? "border-slate-900 bg-slate-900 text-white"
-                        : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
-                    }`}
+                    className={`rounded-xl border px-3 py-2 text-xs font-semibold transition ${driverWorkStatus === "off_duty"
+                      ? "border-slate-900 bg-slate-900 text-white"
+                      : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                      }`}
                   >
                     {isES ? "Tiempo en casa" : "Home Time"}
                   </button>
@@ -2568,11 +2607,10 @@ const { data: loadRecord, error: loadCheckError } = await supabase
                       await setHosStatus("Sleeper");
                       stopGpsTracking();
                     }}
-                    className={`rounded-xl border px-3 py-2 text-xs font-semibold transition ${
-                      driverWorkStatus === "hold"
-                        ? "border-slate-900 bg-slate-900 text-white"
-                        : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
-                    }`}
+                    className={`rounded-xl border px-3 py-2 text-xs font-semibold transition ${driverWorkStatus === "hold"
+                      ? "border-slate-900 bg-slate-900 text-white"
+                      : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                      }`}
                   >
                     Hold
                   </button>
@@ -2584,11 +2622,10 @@ const { data: loadRecord, error: loadCheckError } = await supabase
                       await setHosStatus("Off Duty");
                       stopGpsTracking();
                     }}
-                    className={`rounded-xl border px-3 py-2 text-xs font-semibold transition ${
-                      driverWorkStatus === "available"
-                        ? "border-slate-900 bg-slate-900 text-white"
-                        : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
-                    }`}
+                    className={`rounded-xl border px-3 py-2 text-xs font-semibold transition ${driverWorkStatus === "available"
+                      ? "border-slate-900 bg-slate-900 text-white"
+                      : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                      }`}
                   >
                     {isES ? "Disponible" : "Available"}
                   </button>
@@ -2709,7 +2746,10 @@ const { data: loadRecord, error: loadCheckError } = await supabase
             </select>
           </div>
 
-          {selectedLoad ? (
+          {selectedLoad &&
+            driverWorkStatus !== "off_duty" &&
+            driverWorkStatus !== "hold" &&
+            latestHosEvent?.event_type?.trim().toLowerCase() !== "home time" ? (
             <div className="mt-6">
               <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
                 <div>
@@ -2740,9 +2780,8 @@ const { data: loadRecord, error: loadCheckError } = await supabase
                 />
                 <InfoBox
                   title={text.destination}
-                  value={`${selectedLoad.destination_city || "—"}, ${
-                    selectedLoad.destination_state || "—"
-                  }`}
+                  value={`${selectedLoad.destination_city || "—"}, ${selectedLoad.destination_state || "—"
+                    }`}
                 />
                 <InfoBox title={text.miles} value={`${selectedLoad.miles ?? 0} mi`} />
                 <InfoBox title={text.rate} value={formatMoney(selectedLoad.rate)} />
@@ -2752,10 +2791,10 @@ const { data: loadRecord, error: loadCheckError } = await supabase
                   value={
                     selectedLoad.pickup_unlocked
                       ? selectedLoad.pickup_address ||
-                        `${selectedLoad.origin_city || "—"}, ${selectedLoad.origin_state || "—"}`
+                      `${selectedLoad.origin_city || "—"}, ${selectedLoad.origin_state || "—"}`
                       : isES
-                      ? "Dirección de Pickup bloqueada"
-                      : "Pickup address locked"
+                        ? "Dirección de Pickup bloqueada"
+                        : "Pickup address locked"
                   }
                 />
                 <InfoBox title={text.delivery} value={formatDate(selectedLoad.delivery_date)} />
@@ -2763,31 +2802,43 @@ const { data: loadRecord, error: loadCheckError } = await supabase
                   title={isES ? "Dirección de Delivery" : "Delivery Address"}
                   value={
                     selectedLoad.delivery_address ||
-                    `${selectedLoad.destination_city || "—"}, ${
-                      selectedLoad.destination_state || "—"
+                    `${selectedLoad.destination_city || "—"}, ${selectedLoad.destination_state || "—"
                     }`
                   }
                 />
               </div>
 
-<div className="mt-6 grid grid-cols-2 gap-2 sm:grid-cols-3">
-                <PrimaryButton
-                  label="START DRIVE"
-                  active={driverWorkStatus === "driving" && normalizeLoadStatus(selectedLoad.status) === "assigned"}
-                  onClick={() => {
-                    void startDrive();
-                  }}
-                />
+              <div className="mt-6 grid grid-cols-2 gap-2 sm:grid-cols-3">
+               <PrimaryButton
+  label="START DRIVE"
+  active={
+    driverWorkStatus === "driving" &&
+    normalizeLoadStatus(selectedLoad.status) === "assigned"
+  }
+  disabled={
+    latestHosEvent?.event_type?.trim().toLowerCase() === "home time" ||
+    isDriveBlocked(driverWorkStatus)
+  }
+  onClick={() => {
+    if (
+      latestHosEvent?.event_type?.trim().toLowerCase() === "home time" ||
+      isDriveBlocked(driverWorkStatus)
+    ) {
+      return;
+    }
+
+    void startDrive();
+  }}
+/>
 
                 <button
                   type="button"
                   disabled
-                  className={`min-h-10 cursor-default rounded-xl border px-3 py-2 text-xs font-semibold transition disabled:opacity-100 ${
-                    normalizeLoadStatus(selectedLoad.status) === "at_pickup" ||
+                  className={`min-h-10 cursor-default rounded-xl border px-3 py-2 text-xs font-semibold transition disabled:opacity-100 ${normalizeLoadStatus(selectedLoad.status) === "at_pickup" ||
                     (selectedLoad.status && selectedLoad.status.toLowerCase().includes("pickup"))
-                      ? "border-amber-500 bg-amber-100 text-amber-900 shadow-sm font-bold animate-pulse"
-                      : "border-slate-200 bg-white text-slate-500"
-                  }`}
+                    ? "border-amber-500 bg-amber-100 text-amber-900 shadow-sm font-bold animate-pulse"
+                    : "border-slate-200 bg-white text-slate-500"
+                    }`}
                 >
                   AT PICKUP
                 </button>
@@ -2795,11 +2846,10 @@ const { data: loadRecord, error: loadCheckError } = await supabase
                 <button
                   type="button"
                   disabled
-                  className={`min-h-10 cursor-default rounded-xl border px-3 py-2 text-xs font-semibold transition disabled:opacity-100 ${
-                    normalizeLoadStatus(selectedLoad.status) === "in_transit"
-                      ? "border-blue-500 bg-blue-100 text-blue-900 shadow-sm font-bold"
-                      : "border-slate-200 bg-white text-slate-500"
-                  }`}
+                  className={`min-h-10 cursor-default rounded-xl border px-3 py-2 text-xs font-semibold transition disabled:opacity-100 ${normalizeLoadStatus(selectedLoad.status) === "in_transit"
+                    ? "border-blue-500 bg-blue-100 text-blue-900 shadow-sm font-bold"
+                    : "border-slate-200 bg-white text-slate-500"
+                    }`}
                 >
                   START TRIP
                 </button>
@@ -2807,11 +2857,10 @@ const { data: loadRecord, error: loadCheckError } = await supabase
                 <button
                   type="button"
                   disabled
-                  className={`min-h-10 cursor-default rounded-xl border px-3 py-2 text-xs font-semibold transition disabled:opacity-100 ${
-                    normalizeLoadStatus(selectedLoad.status) === "at_delivery"
-                      ? "border-purple-500 bg-purple-100 text-purple-900 shadow-sm font-bold animate-pulse"
-                      : "border-slate-200 bg-white text-slate-500"
-                  }`}
+                  className={`min-h-10 cursor-default rounded-xl border px-3 py-2 text-xs font-semibold transition disabled:opacity-100 ${normalizeLoadStatus(selectedLoad.status) === "at_delivery"
+                    ? "border-purple-500 bg-purple-100 text-purple-900 shadow-sm font-bold animate-pulse"
+                    : "border-slate-200 bg-white text-slate-500"
+                    }`}
                 >
                   AT DELIVERY
                 </button>
@@ -2854,34 +2903,31 @@ const { data: loadRecord, error: loadCheckError } = await supabase
             </div>
 
             <span
-              className={`rounded-full border px-3 py-1.5 text-xs font-bold ${
-                gpsTracking
-                  ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                  : "border-slate-200 bg-slate-50 text-slate-500"
-              }`}
+              className={`rounded-full border px-3 py-1.5 text-xs font-bold ${gpsTracking
+                ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                : "border-slate-200 bg-slate-50 text-slate-500"
+                }`}
             >
               {gpsTracking ? text.live : text.off}
             </span>
           </div>
 
           <div
-            className={`mt-5 rounded-xl border p-5 ${
-              gpsTracking
-                ? gpsDatabaseError
-                  ? "border-amber-200 bg-amber-50"
-                  : "border-emerald-200 bg-emerald-50"
-                : "border-slate-200 bg-slate-50"
-            }`}
+            className={`mt-5 rounded-xl border p-5 ${gpsTracking
+              ? gpsDatabaseError
+                ? "border-amber-200 bg-amber-50"
+                : "border-emerald-200 bg-emerald-50"
+              : "border-slate-200 bg-slate-50"
+              }`}
           >
             <div className="flex items-center gap-3">
               <span
-                className={`h-3 w-3 rounded-full ${
-                  gpsTracking
-                    ? gpsDatabaseError
-                      ? "animate-pulse bg-amber-500"
-                      : "animate-pulse bg-emerald-500"
-                    : "bg-slate-400"
-                }`}
+                className={`h-3 w-3 rounded-full ${gpsTracking
+                  ? gpsDatabaseError
+                    ? "animate-pulse bg-amber-500"
+                    : "animate-pulse bg-emerald-500"
+                  : "bg-slate-400"
+                  }`}
               />
 
               <div className="font-bold text-slate-900">{gpsStatus}</div>
@@ -2947,11 +2993,10 @@ const { data: loadRecord, error: loadCheckError } = await supabase
             ].map((status) => (
               <div
                 key={status.value}
-                className={`rounded-xl border px-3 py-3 text-center text-sm font-bold transition ${
-                  latestStatusNormalized === status.value.toLowerCase()
-                    ? "border-slate-900 bg-slate-900 text-white"
-                    : "border-slate-200 bg-white text-slate-700"
-                }`}
+                className={`rounded-xl border px-3 py-3 text-center text-sm font-bold transition ${latestStatusNormalized === status.value.toLowerCase()
+                  ? "border-slate-900 bg-slate-900 text-white"
+                  : "border-slate-200 bg-white text-slate-700"
+                  }`}
               >
                 {status.label}
               </div>
@@ -3200,9 +3245,8 @@ const { data: loadRecord, error: loadCheckError } = await supabase
                 type="button"
                 onClick={() => void uploadDocument()}
                 disabled={uploadingDocument}
-                className={`rounded-xl px-4 py-2.5 text-sm font-bold text-white ${
-                  uploadingDocument ? "cursor-not-allowed bg-slate-400" : "bg-slate-900 hover:bg-slate-800"
-                }`}
+                className={`rounded-xl px-4 py-2.5 text-sm font-bold text-white ${uploadingDocument ? "cursor-not-allowed bg-slate-400" : "bg-slate-900 hover:bg-slate-800"
+                  }`}
               >
                 {uploadingDocument ? text.uploading : text.upload}
               </button>
@@ -3275,24 +3319,29 @@ function ClockBox({
   );
 }
 
+
 function PrimaryButton({
   label,
   onClick,
   active = false,
+  disabled = false,
 }: {
   label: string;
   onClick: () => void;
   active?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className={`rounded-xl border px-4 py-2.5 text-sm font-bold transition ${
-        active
+      disabled={disabled}
+      className={`rounded-xl border px-4 py-2.5 text-sm font-bold transition ${disabled
+        ? "cursor-not-allowed border-slate-200 bg-slate-200 text-slate-400 opacity-70"
+        : active
           ? "border-slate-900 bg-slate-900 text-white"
           : "border-slate-200 bg-white text-slate-900 hover:bg-slate-50"
-      }`}
+        }`}
     >
       {label}
     </button>
@@ -3312,11 +3361,10 @@ function SecondaryButton({
     <button
       type="button"
       onClick={onClick}
-      className={`rounded-xl border px-4 py-2.5 text-sm font-bold transition ${
-        active
-          ? "border-slate-900 bg-slate-900 text-white"
-          : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
-      }`}
+      className={`rounded-xl border px-4 py-2.5 text-sm font-bold transition ${active
+        ? "border-slate-900 bg-slate-900 text-white"
+        : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+        }`}
     >
       {label}
     </button>

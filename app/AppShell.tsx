@@ -30,11 +30,11 @@ export default function AppShell({
         error: authError,
       } = await supabase.auth.getUser();
 
+      if (!active) return;
+
       if (authError || !user) {
-        if (active) {
-          setUserRole(null);
-          setRoleLoaded(true);
-        }
+        setUserRole(null);
+        setRoleLoaded(true);
         return;
       }
 
@@ -58,10 +58,13 @@ export default function AppShell({
 
     void loadRole();
 
+    // Usamos el listener de auth de manera segura sin re-disparar bucles de carga
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange(() => {
-      void loadRole();
+    } = supabase.auth.onAuthStateChange((event) => {
+      if (event === "SIGNED_IN" || event === "SIGNED_OUT") {
+        void loadRole();
+      }
     });
 
     return () => {

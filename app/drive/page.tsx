@@ -1566,21 +1566,34 @@ useEffect(() => {
       const stopType = String(currentStop.stop_type ?? "").trim().toLowerCase();
       const stopStatus = String(currentStop.status ?? "").trim().toLowerCase();
 
-      const distanceMiles = calculateDistanceMiles(
-        location.lat,
-        location.lng,
-        currentStop.latitude,
-        currentStop.longitude
-      );
+     
+const distanceMiles = calculateDistanceMiles(
+  location.lat,
+  location.lng,
+  currentStop.latitude,
+  currentStop.longitude
+);
 
-      // 🛡️ Declaramos el radio PRIMERO para poder usarlo abajo sin errores
-      const arrivalRadiusMiles = 0.1;
+const arrivalRadiusMiles = 0.1;
 
-      if (!Number.isFinite(distanceMiles) || distanceMiles < 0) return false;
+console.log("SEQUENCE ARRIVAL DEBUG:", {
+  loadId,
+  stopId: currentStop.id,
+  stopOrder: currentStop.stop_order,
+  stopType,
+  stopStatus,
+  driverLat: location.lat,
+  driverLng: location.lng,
+  stopLat: currentStop.latitude,
+  stopLng: currentStop.longitude,
+  distanceMiles,
+  arrivalRadiusMiles,
+});
 
-      // 👇 Ahora sí, usamos la variable declarada arriba correctamente
-      if (distanceMiles <= arrivalRadiusMiles && stopStatus === "pending") {
-        console.log("¡Llegaste al punto de recogida! Actualizando estado a 'at_pickup'...");
+if (!Number.isFinite(distanceMiles) || distanceMiles < 0) return false;
+
+if (distanceMiles <= arrivalRadiusMiles && stopStatus === "pending") {
+  console.log("¡Llegaste al punto de recogida! Actualizando estado a 'at_pickup'...");
 
         const { data: arrivedStop, error: arriveError } = await supabase
           .from("load_stops")
@@ -1809,85 +1822,135 @@ useEffect(() => {
     }
   }
 
-  async function updateLoadStatus(status: string): Promise<boolean> {
-    if (!selectedLoad) {
-      showMessage(text.selectLoadFirst);
-      return false;
-    }
+ 
+async function updateLoadStatus(status: string): Promise<boolean> {
+  if (!selectedLoad) {
+    showMessage(text.selectLoadFirst);
+    return false;
+  }
 
-    if (!selectedDriverId) {
-      showMessage(isES ? "No hay un conductor seleccionado." : "No driver is selected.");
-      return false;
-    }
+  if (!selectedDriverId) {
+    showMessage(
+      isES
+        ? "No hay un conductor seleccionado."
+        : "No driver is selected."
+    );
+    return false;
+  }
 
-    const loadId = selectedLoad.id;
-    const driverId = selectedDriverId;
+  const loadId = selectedLoad.id;
+  const driverId = selectedDriverId;
 
-    const rawStatus = String(status).trim().toLowerCase();
-    const normalizedStatus = rawStatus === "done" ? "delivered" : normalizeLoadStatus(rawStatus);
+  const rawStatus = String(status).trim().toLowerCase();
+  const normalizedStatus =
+    rawStatus === "done"
+      ? "delivered"
+      : normalizeLoadStatus(rawStatus);
 
-    if (normalizedStatus !== "delivered") {
+  if (normalizedStatus !== "delivered") {
+    showMessage(
+      isES
+        ? "Las llegadas y el inicio del viaje son controlados automáticamente por GPS."
+        : "Arrivals and trip start are controlled automatically by GPS."
+    );
+    return false;
+  }
+
+  try {
+    const { data: stopData, error: stopError } = await supabase
+      .from("load_stops")
+      .select(
+        "id, load_id, stop_order, stop_type, address, city, state, scheduled_date, scheduled_time, status"
+      )
+      .eq("load_id", loadId)
+      .order("stop_order", { ascending: true });
+
+    if (stopError || !stopData || stopData.length === 0) {
+      console.error("DONE - LOAD STOPS ERROR:", stopError);
+
       showMessage(
         isES
-          ? "Las llegadas y el inicio del viaje son controlados automáticamente por GPS."
-          : "Arrivals and trip start are controlled automatically by GPS."
+          ? "No se pudieron cargar las paradas de la carga."
+          : "Could not load the stops for this load."
       );
       return false;
     }
 
-    try {
-      const { data: stopData, error: stopError } = await supabase
-        .from("load_stops")
-        .select("id, load_id, stop_order, stop_type, address, city, state, scheduled_date, scheduled_time, status")
-        .eq("load_id", loadId)
-        .order("stop_order", { ascending: true });
+    const stops = stopData.map((stop) => ({
+      ...stop,
+      stop_order: Number(stop.stop_order),
+      stop_type: String(stop.stop_type ?? "")
+        .trim()
+        .toLowerCase(),
+      status: String(stop.status ?? "pending")
+        .trim()
+        .toLowerCase(),
+    }));
 
-      if (stopError || !stopData || stopData.length === 0) {
-        console.error("DONE - LOAD STOPS ERROR:", stopError);
-        showMessage(
-          isES
-            ? "No se pudieron cargar las paradas de la carga."
-            : "Could not load the stops for this load."
-        );
-        return false;
-      }
+    const finishedStatuses = [
+      "completed",
+      "complete",
+      "delivered",
+      "cancelled",
+      "canceled",
+    ];
 
-      const stops = stopData.map((stop) => ({
-        ...stop,
-        stop_order: Number(stop.stop_order),
-        stop_type: String(stop.stop_type ?? "").trim().toLowerCase(),
-        status: String(stop.status ?? "pending").trim().toLowerCase(),
-      }));
+    const currentStopIndex = stops.findIndex(
+      (stop) => !finishedStatuses.includes(stop.status)
+    );
 
-      const finishedStatuses = ["completed", "complete", "delivered", "cancelled", "canceled"];
+    if (currentStopIndex === -1) {
+      showMessage(
+        isES
+          ? "Todas las paradas ya están completadas."
+          : "All stops are already completed."
+      );
+      return false;
+    }
 
-      const currentStopIndex = stops.findIndex((stop) => !finishedStatuses.includes(stop.status));
+    const currentStop = stops[currentStopIndex];
 
-      if (currentStopIndex === -1) {
-        showMessage(
-          isES ? "Todas las paradas ya están completadas." : "All stops are already completed."
-        );
-        return false;
-      }
+    const isPickup = currentStop.stop_type === "pickup";
+    const isDelivery = currentStop.stop_type === "delivery";
 
-      const currentStop = stops[currentStopIndex];
+    if (!isPickup && !isDelivery) {
+      showMessage(
+        isES
+          ? "El tipo de parada no es válido."
+          : "The stop type is invalid."
+      );
+      return false;
+    }
 
-      if (currentStop.stop_type !== "delivery" || currentStop.status !== "at_delivery") {
-        showMessage(
-          isES
-            ? "DONE solamente puede completar un Delivery que ya fue alcanzado por GPS."
-            : "DONE can only complete a Delivery that has already been reached by GPS."
-        );
-        return false;
-      }
+    const stopReached =
+      (isPickup && currentStop.status === "at_pickup") ||
+      (isDelivery && currentStop.status === "at_delivery");
 
-      const { data: currentDocuments, error: documentsError } = await supabase
+    if (!stopReached) {
+      showMessage(
+        isES
+          ? "La parada actual debe ser alcanzada por GPS antes de pulsar DONE."
+          : "The current stop must be reached by GPS before pressing DONE."
+      );
+      return false;
+    }
+
+    // El POD es obligatorio solamente para Delivery.
+    if (isDelivery) {
+      const {
+        data: currentDocuments,
+        error: documentsError,
+      } = await supabase
         .from("documents")
         .select("id, load_id, driver_id, document_type, status")
         .eq("load_id", loadId);
 
       if (documentsError) {
-        console.error("DONE - DOCUMENT CHECK ERROR:", documentsError);
+        console.error(
+          "DONE - DOCUMENT CHECK ERROR:",
+          documentsError
+        );
+
         showMessage(
           isES
             ? "No se pudieron verificar los documentos de entrega."
@@ -1896,11 +1959,26 @@ useEffect(() => {
         return false;
       }
 
-      const hasPOD = (currentDocuments ?? []).some((document) => {
-        const documentType = String(document.document_type ?? "").trim().toUpperCase();
-        const documentStatus = String(document.status ?? "").trim().toLowerCase();
-        return documentType === "POD" && documentStatus === "uploaded";
-      });
+      const hasPOD = (currentDocuments ?? []).some(
+        (document) => {
+          const documentType = String(
+            document.document_type ?? ""
+          )
+            .trim()
+            .toUpperCase();
+
+          const documentStatus = String(
+            document.status ?? ""
+          )
+            .trim()
+            .toLowerCase();
+
+          return (
+            documentType === "POD" &&
+            documentStatus === "uploaded"
+          );
+        }
+      );
 
       if (!hasPOD) {
         showMessage(
@@ -1910,34 +1988,44 @@ useEffect(() => {
         );
         return false;
       }
+    }
 
-      const { data: completedStop, error: completedStopError } = await supabase
-        .from("load_stops")
-        .update({ status: "completed" })
-        .eq("id", currentStop.id)
-        .eq("status", currentStop.status)
-        .select("id, status")
-        .maybeSingle();
+    // Completar la parada actual.
+    const {
+      data: completedStop,
+      error: completedStopError,
+    } = await supabase
+      .from("load_stops")
+      .update({ status: "completed" })
+      .eq("id", currentStop.id)
+      .eq("status", currentStop.status)
+      .select("id, status")
+      .maybeSingle();
 
-      if (completedStopError || !completedStop) {
-        console.error("DONE - COMPLETE STOP ERROR:", completedStopError);
-        showMessage(
-          isES
-            ? "No se pudo completar la parada. Verifique su estado antes de volver a intentarlo."
-            : "Could not complete the stop. Verify its status before retrying."
-        );
-        return false;
-      }
-
-      const remainingStops = stops.filter(
-        (stop) =>
-          stop.stop_order > currentStop.stop_order && !finishedStatuses.includes(stop.status)
+    if (completedStopError || !completedStop) {
+      console.error(
+        "DONE - COMPLETE STOP ERROR:",
+        completedStopError
       );
 
-      if (remainingStops.length > 0) {
-        const nextStop = remainingStops[0];
+      showMessage(
+        isES
+          ? "No se pudo completar la parada. Verifique su estado antes de volver a intentarlo."
+          : "Could not complete the stop. Verify its status before retrying."
+      );
+      return false;
+    }
 
-        const { data: updatedLoad, error: loadError } = await supabase
+    const remainingStops = stops.filter(
+      (stop) =>
+        stop.stop_order > currentStop.stop_order &&
+        !finishedStatuses.includes(stop.status)
+    );
+
+    // Todavía hay paradas: mantener la carga activa y avanzar el GPS.
+    if (remainingStops.length > 0) {
+      const { data: updatedLoad, error: loadError } =
+        await supabase
           .from("loads")
           .update({ status: "in_transit" })
           .eq("id", loadId)
@@ -1945,120 +2033,12 @@ useEffect(() => {
           .select(LOAD_SELECT)
           .maybeSingle();
 
-        if (loadError || !updatedLoad) {
-          console.error("DONE - NEXT STOP LOAD ERROR:", loadError);
-          await supabase
-            .from("load_stops")
-            .update({ status: currentStop.status })
-            .eq("id", currentStop.id)
-            .eq("status", "completed");
-
-          showMessage(
-            isES
-              ? "No se pudo avanzar la carga. La entrega fue restaurada."
-              : "The load could not advance. The delivery was restored."
-          );
-          return false;
-        }
-
-        const { data: driverData, error: driverError } = await supabase
-          .from("drivers")
-          .update({ status: "driving", current_load_id: loadId })
-          .eq("id", driverId)
-          .select("id, status, current_load_id")
-          .maybeSingle();
-
-        if (driverError || !driverData || driverData.status !== "driving") {
-          console.error("DONE - NEXT STOP DRIVER ERROR:", driverError);
-          await supabase
-            .from("loads")
-            .update({ status: selectedLoad.status })
-            .eq("id", loadId)
-            .eq("driver_id", driverId)
-            .eq("status", "in_transit");
-
-          await supabase
-            .from("load_stops")
-            .update({ status: currentStop.status })
-            .eq("id", currentStop.id)
-            .eq("status", "completed");
-
-          showMessage(
-            isES
-              ? "No se pudo actualizar el conductor. Se restauró el estado anterior."
-              : "Could not update the driver. The previous state was restored."
-          );
-          return false;
-        }
-
-        const hosSaved = await setHosStatus("Driving");
-
-        if (!hosSaved) {
-          console.error("DONE - HOS DRIVING EVENT FAILED");
-          await supabase
-            .from("drivers")
-            .update({ status: "on_duty" })
-            .eq("id", driverId)
-            .eq("status", "driving");
-
-          await supabase
-            .from("loads")
-            .update({ status: selectedLoad.status })
-            .eq("id", loadId)
-            .eq("driver_id", driverId)
-            .eq("status", "in_transit");
-
-          await supabase
-            .from("load_stops")
-            .update({ status: currentStop.status })
-            .eq("id", currentStop.id)
-            .eq("status", "completed");
-
-          setDriverWorkStatus("on_duty");
-
-          showMessage(
-            isES
-              ? "No se pudo registrar HOS. Se restauró el estado anterior."
-              : "Could not save HOS. The previous state was restored."
-          );
-          return false;
-        }
-
-        setLoads((current) =>
-          current.map((load) => (load.id === updatedLoad.id ? (updatedLoad as Load) : load))
+      if (loadError || !updatedLoad) {
+        console.error(
+          "DONE - NEXT STOP LOAD ERROR:",
+          loadError
         );
 
-        setDrivers((current) =>
-          current.map((driver) =>
-            driver.id === driverId
-              ? { ...driver, status: "driving", current_load_id: loadId }
-              : driver
-          )
-        );
-
-        setDriverWorkStatus("driving");
-
-        showMessage(
-          isES
-            ? `Delivery #${currentStop.stop_order} completado. Próxima parada: ${nextStop.stop_type === "pickup" ? "Pickup" : "Delivery"
-            } #${nextStop.stop_order}.`
-            : `Delivery #${currentStop.stop_order} completed. Next stop: ${nextStop.stop_type === "pickup" ? "Pickup" : "Delivery"
-            } #${nextStop.stop_order}.`
-        );
-
-        return true;
-      }
-
-      const { data: updatedLoad, error: finalLoadError } = await supabase
-        .from("loads")
-        .update({ status: "delivered" })
-        .eq("id", loadId)
-        .eq("driver_id", driverId)
-        .select(LOAD_SELECT)
-        .maybeSingle();
-
-      if (finalLoadError || !updatedLoad) {
-        console.error("DONE - FINAL LOAD ERROR:", finalLoadError);
         await supabase
           .from("load_stops")
           .update({ status: currentStop.status })
@@ -2067,28 +2047,41 @@ useEffect(() => {
 
         showMessage(
           isES
-            ? "No se pudo finalizar la carga. La entrega fue restaurada."
-            : "The load could not be finalized. The delivery was restored."
+            ? "No se pudo avanzar la carga. La parada fue restaurada."
+            : "The load could not advance. The stop was restored."
         );
         return false;
       }
 
-      const { data: finalDriver, error: finalDriverError } = await supabase
+      const {
+        data: driverData,
+        error: driverError,
+      } = await supabase
         .from("drivers")
-        .update({ current_load_id: null, status: "available" })
+        .update({
+          status: "driving",
+          current_load_id: loadId,
+        })
         .eq("id", driverId)
         .select("id, status, current_load_id")
         .maybeSingle();
 
-      if (finalDriverError || !finalDriver || finalDriver.status !== "available") {
-        console.error("DONE - FINAL DRIVER ERROR:", finalDriverError);
+      if (
+        driverError ||
+        !driverData ||
+        driverData.status !== "driving"
+      ) {
+        console.error(
+          "DONE - NEXT STOP DRIVER ERROR:",
+          driverError
+        );
 
         await supabase
           .from("loads")
-          .update({ status: "in_transit" })
+          .update({ status: selectedLoad.status })
           .eq("id", loadId)
           .eq("driver_id", driverId)
-          .eq("status", "delivered");
+          .eq("status", "in_transit");
 
         await supabase
           .from("load_stops")
@@ -2098,44 +2091,211 @@ useEffect(() => {
 
         showMessage(
           isES
-            ? "No se pudo liberar al conductor. Se restauró la carga para volver a intentarlo."
-            : "Could not release the driver. The load was restored for retry."
+            ? "No se pudo actualizar el conductor. Se restauró el estado anterior."
+            : "Could not update the driver. The previous state was restored."
+        );
+        return false;
+      }
+
+      const hosSaved = await setHosStatus("Driving");
+
+      if (!hosSaved) {
+        console.error("DONE - HOS DRIVING EVENT FAILED");
+
+        await supabase
+          .from("drivers")
+          .update({ status: "on_duty" })
+          .eq("id", driverId)
+          .eq("status", "driving");
+
+        await supabase
+          .from("loads")
+          .update({ status: selectedLoad.status })
+          .eq("id", loadId)
+          .eq("driver_id", driverId)
+          .eq("status", "in_transit");
+
+        await supabase
+          .from("load_stops")
+          .update({ status: currentStop.status })
+          .eq("id", currentStop.id)
+          .eq("status", "completed");
+
+        setDriverWorkStatus("on_duty");
+
+        showMessage(
+          isES
+            ? "No se pudo registrar HOS. Se restauró el estado anterior."
+            : "Could not save HOS. The previous state was restored."
         );
         return false;
       }
 
       setLoads((current) =>
-        current.map((load) => (load.id === updatedLoad.id ? (updatedLoad as Load) : load))
+        current.map((load) =>
+          load.id === updatedLoad.id
+            ? (updatedLoad as Load)
+            : load
+        )
       );
 
       setDrivers((current) =>
         current.map((driver) =>
           driver.id === driverId
-            ? { ...driver, status: "available", current_load_id: null }
+            ? {
+                ...driver,
+                status: "driving",
+                current_load_id: loadId,
+              }
             : driver
         )
       );
 
-      setSelectedLoadId("");
-      setDriverWorkStatus("available");
+      setDriverWorkStatus("driving");
+
+      // Consultar Supabase para obtener la próxima parada pendiente
+      // y actualizar el destino sin esperar a que se mueva el GPS.
+      const nextNavigationStop =
+        await getCurrentSequenceStop(loadId);
+
+      setNavigationStop(nextNavigationStop);
+
+      const nextStop = remainingStops[0];
+      const nextStopType =
+        nextStop.stop_type === "pickup"
+          ? "Pickup"
+          : "Delivery";
 
       showMessage(
         isES
-          ? `Carga ${updatedLoad.load_number || ""} completada. El conductor queda disponible para la próxima asignación.`
-          : `Load ${updatedLoad.load_number || ""} completed. The driver is available for the next assignment.`
+          ? `${isPickup ? "Pickup" : "Delivery"} #${currentStop.stop_order} completado. Próxima parada: ${nextStopType} #${nextStop.stop_order}.`
+          : `${isPickup ? "Pickup" : "Delivery"} #${currentStop.stop_order} completed. Next stop: ${nextStopType} #${nextStop.stop_order}.`
       );
 
       return true;
-    } catch (error) {
-      console.error("DONE - UNEXPECTED ERROR:", error);
+    }
+
+    // No quedan paradas: finalizar la carga.
+    const {
+      data: updatedLoad,
+      error: finalLoadError,
+    } = await supabase
+      .from("loads")
+      .update({ status: "delivered" })
+      .eq("id", loadId)
+      .eq("driver_id", driverId)
+      .select(LOAD_SELECT)
+      .maybeSingle();
+
+    if (finalLoadError || !updatedLoad) {
+      console.error(
+        "DONE - FINAL LOAD ERROR:",
+        finalLoadError
+      );
+
+      await supabase
+        .from("load_stops")
+        .update({ status: currentStop.status })
+        .eq("id", currentStop.id)
+        .eq("status", "completed");
+
       showMessage(
         isES
-          ? "Ocurrió un error inesperado al completar la entrega."
-          : "An unexpected error occurred while completing the delivery."
+          ? "No se pudo finalizar la carga. La parada fue restaurada."
+          : "The load could not be finalized. The stop was restored."
       );
       return false;
     }
+
+    const {
+      data: finalDriver,
+      error: finalDriverError,
+    } = await supabase
+      .from("drivers")
+      .update({
+        current_load_id: null,
+        status: "available",
+      })
+      .eq("id", driverId)
+      .select("id, status, current_load_id")
+      .maybeSingle();
+
+    if (
+      finalDriverError ||
+      !finalDriver ||
+      finalDriver.status !== "available"
+    ) {
+      console.error(
+        "DONE - FINAL DRIVER ERROR:",
+        finalDriverError
+      );
+
+      await supabase
+        .from("loads")
+        .update({ status: "in_transit" })
+        .eq("id", loadId)
+        .eq("driver_id", driverId)
+        .eq("status", "delivered");
+
+      await supabase
+        .from("load_stops")
+        .update({ status: currentStop.status })
+        .eq("id", currentStop.id)
+        .eq("status", "completed");
+
+      showMessage(
+        isES
+          ? "No se pudo liberar al conductor. Se restauró la carga para volver a intentarlo."
+          : "Could not release the driver. The load was restored for retry."
+      );
+      return false;
+    }
+
+    setLoads((current) =>
+      current.map((load) =>
+        load.id === updatedLoad.id
+          ? (updatedLoad as Load)
+          : load
+      )
+    );
+
+    setDrivers((current) =>
+      current.map((driver) =>
+        driver.id === driverId
+          ? {
+              ...driver,
+              status: "available",
+              current_load_id: null,
+            }
+          : driver
+      )
+    );
+
+    setSelectedLoadId("");
+    setDriverWorkStatus("available");
+
+    // La ruta queda limpia cuando se completa la última parada.
+    setNavigationStop(null);
+
+    showMessage(
+      isES
+        ? `Carga ${updatedLoad.load_number || ""} completada. El conductor queda disponible para la próxima asignación.`
+        : `Load ${updatedLoad.load_number || ""} completed. The driver is available for the next assignment.`
+    );
+
+    return true;
+  } catch (error) {
+    console.error("DONE - UNEXPECTED ERROR:", error);
+
+    showMessage(
+      isES
+        ? "Ocurrió un error inesperado al completar la parada."
+        : "An unexpected error occurred while completing the stop."
+    );
+
+    return false;
   }
+}
 
   async function saveGpsEvent(
     location: GPSLocation,
@@ -2282,17 +2442,23 @@ useEffect(() => {
     );
   }
 
-  function stopGpsTracking() {
-    if (gpsWatchId.current !== null) {
-      navigator.geolocation.clearWatch(gpsWatchId.current);
-      gpsWatchId.current = null;
-    }
-
-    gpsInsertInProgress.current = false;
-    setGpsTracking(false);
-    setGpsDatabaseError(false);
-    setGpsStatus(text.gpsNotActive);
+  
+function stopGpsTracking() {
+  if (gpsWatchId.current !== null) {
+    navigator.geolocation.clearWatch(gpsWatchId.current);
+    gpsWatchId.current = null;
   }
+
+  gpsInsertInProgress.current = false;
+
+  setGpsTracking(false);
+  setGpsDatabaseError(false);
+  setGpsStatus(text.gpsNotActive);
+
+  // Clear the active navigation destination when GPS is stopped.
+  setNavigationStop(null);
+}
+
 
   async function uploadDocument() {
     if (!selectedDriver) {

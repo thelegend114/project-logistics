@@ -23,6 +23,7 @@ interface TruckMapProps {
     heading?: number | null;
   } | null;
   destination: NavigationStop | null;
+  isES: boolean;
 }
 
 interface NavigationStep {
@@ -70,18 +71,20 @@ function formatDuration(seconds: number): string {
     : `${hours} h`;
 }
 
+
 function describeManeuver(
   maneuver: {
     type?: string;
     modifier?: string;
     exit?: number;
   },
-  roadName: string
+  roadName: string,
+  isES: boolean
 ): string {
   const type = String(maneuver.type ?? "").toLowerCase();
   const modifier = String(maneuver.modifier ?? "").toLowerCase();
 
-  const directions: Record<string, string> = {
+  const directionsES: Record<string, string> = {
     left: "Gira a la izquierda",
     "slight left": "Mantente ligeramente a la izquierda",
     "sharp left": "Gira cerradamente a la izquierda",
@@ -92,43 +95,68 @@ function describeManeuver(
     uturn: "Haz un cambio de sentido",
   };
 
+  const directionsEN: Record<string, string> = {
+    left: "Turn left",
+    "slight left": "Keep slightly left",
+    "sharp left": "Make a sharp left",
+    right: "Turn right",
+    "slight right": "Keep slightly right",
+    "sharp right": "Make a sharp right",
+    straight: "Continue straight",
+    uturn: "Make a U-turn",
+  };
+
+  const directions = isES ? directionsES : directionsEN;
   let instruction: string;
 
   if (type === "depart") {
-    instruction = "Comienza la ruta";
+    instruction = isES ? "Comienza la ruta" : "Start route";
   } else if (type === "arrive") {
-    instruction = "Has llegado a la parada";
+    instruction = isES ? "Has llegado a la parada" : "You have arrived at the stop";
   } else if (type === "roundabout" || type === "rotary") {
     instruction =
       typeof maneuver.exit === "number"
-        ? `En la rotonda, toma la salida ${maneuver.exit}`
-        : "Continúa por la rotonda";
+        ? isES
+          ? `En la rotonda, toma la salida ${maneuver.exit}`
+          : `At the roundabout, take exit ${maneuver.exit}`
+        : isES
+          ? "Continúa por la rotonda"
+          : "Continue through the roundabout";
   } else if (type === "merge") {
-    instruction = "Incorpórate a la vía";
+    instruction = isES ? "Incorpórate a la vía" : "Merge onto the road";
   } else if (type === "fork") {
     instruction =
-      directions[modifier] ?? "Continúa por la bifurcación";
+      directions[modifier] ??
+      (isES ? "Continúa por la bifurcación" : "Continue through the fork");
   } else if (type === "on ramp") {
-    instruction = "Toma la rampa de acceso";
+    instruction = isES ? "Toma la rampa de acceso" : "Take the entrance ramp";
   } else if (type === "off ramp") {
-    instruction = "Toma la salida";
+    instruction = isES ? "Toma la salida" : "Take the exit ramp";
   } else if (type === "end of road") {
     instruction =
-      directions[modifier] ?? "Continúa hasta el final de la vía";
+      directions[modifier] ??
+      (isES ? "Continúa hasta el final de la vía" : "Continue to the end of the road");
   } else {
     instruction =
       directions[modifier] ??
       (type === "continue"
-        ? "Continúa por la vía"
-        : "Continúa siguiendo la ruta");
+        ? isES
+          ? "Continúa por la vía"
+          : "Continue on the road"
+        : isES
+          ? "Continúa siguiendo la ruta"
+          : "Continue following the route");
   }
 
   if (roadName) {
-    instruction += ` hacia ${roadName}`;
+    instruction += isES
+      ? ` hacia ${roadName}`
+      : ` onto ${roadName}`;
   }
 
   return instruction;
 }
+
 
 function createTruckIcon(heading: number) {
   const rotation = ((heading % 360) + 360) % 360;
@@ -196,6 +224,7 @@ function getDistanceFromRoute(
 export default function TruckMap({
   lastLocation,
   destination,
+  isES,
 }: TruckMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
@@ -212,16 +241,57 @@ export default function TruckMap({
   const stepsRef = useRef<NavigationStep[]>([]);
   const currentStepIndexRef = useRef(0);
   const offRouteRef = useRef(false);
+  const lastSpokenInstructionRef = useRef("");
 
   const [rerouteVersion, setRerouteVersion] = useState(0);
   const [navigation, setNavigation] = useState<RouteState>({
-    instruction: "Esperando ubicación GPS...",
+    instruction: isES ? "Esperando ubicación GPS..." : "Waiting for GPS location...",
     roadName: "",
     distanceToManeuver: 0,
     routeDistance: 0,
     routeDuration: 0,
     isOffRoute: false,
   });
+  
+useEffect(() => {
+  if (!destination || !navigation.instruction.trim()) return;
+
+  const instruction = navigation.instruction.trim();
+
+  const ignoredMessages = [
+    "Esperando ubicación GPS...",
+    "Waiting for GPS location...",
+    "No se pudo calcular la ruta.",
+    "No se pudo calcular la ruta. Reintentando al actualizar la ubicación.",
+    "Could not calculate the route.",
+    "Off route — recalculating...",
+    "Desvío detectado. Recalculando ruta...",
+    "Desvío detectado — recalculando ruta...",
+  ];
+
+  if (
+    ignoredMessages.some((message) =>
+      instruction.startsWith(message)
+    )
+  ) {
+    return;
+  }
+
+  if (!("speechSynthesis" in window)) return;
+
+  const speechKey = `${destination.id}:${isES ? "es" : "en"}:${instruction}`;
+
+  if (lastSpokenInstructionRef.current === speechKey) return;
+
+  lastSpokenInstructionRef.current = speechKey;
+
+  const utterance = new SpeechSynthesisUtterance(instruction);
+  utterance.lang = isES ? "es-US" : "en-US";
+  utterance.rate = 0.95;
+
+  window.speechSynthesis.speak(utterance);
+}, [navigation.instruction, destination?.id, isES]);
+
 
   const initialLat = 25.77154;
   const initialLng = -80.38205;
@@ -297,7 +367,7 @@ export default function TruckMap({
       truckMarkerRef.current = L.marker(position, {
         icon,
         zIndexOffset: 1000,
-        title: "Tractor-tráiler — punto A",
+        title: isES ? "Ubicación del camión" : "Truck location",
       }).addTo(map);
 
       map.setView(position, 15);
@@ -377,7 +447,7 @@ export default function TruckMap({
 
           setNavigation((previous) => ({
             ...previous,
-            instruction: "Desvío detectado. Recalculando ruta...",
+            instruction: isES ? "Desvío detectado. Recalculando ruta..." : "Detour detected. Recalculating route...",
           }));
 
           setRerouteVersion((version) => version + 1);
@@ -460,40 +530,42 @@ export default function TruckMap({
     ].join(":");
 
 
-    if (!destinationMarkerRef.current) {
-      destinationMarkerRef.current = L.marker(
-        destinationPosition,
-        {
-          icon: L.divIcon({
-            className: "navigation-destination-icon",
-            html: `
-              <div style="
-                width:32px;height:32px;border-radius:50%;
-                background:#dc2626;color:white;
-                border:3px solid white;
-                box-shadow:0 2px 6px #64748b;
-                display:flex;align-items:center;
-                justify-content:center;font-weight:800;font-size:15px;
-              ">B</div>
-            `,
-            iconSize: [32, 32],
-            iconAnchor: [16, 16],
-          }),
-          title: `Destino B — parada ${destination.stop_order}`,
-        }
-      ).addTo(map);
-    } else {
-      destinationMarkerRef.current.setLatLng(
-        destinationPosition
-      );
+    
+if (!destinationMarkerRef.current) {
+  destinationMarkerRef.current = L.marker(
+    destinationPosition,
+    {
+      icon: L.divIcon({
+        className: "navigation-destination-icon",
+        html: `
+          <div style="
+            width:22px;
+            height:22px;
+            border-radius:50%;
+            background:#dc2626;
+            border:4px solid white;
+            box-shadow:0 2px 6px #64748b;
+          "></div>
+        `,
+        iconSize: [22, 22],
+        iconAnchor: [11, 11],
+      }),
+      title: isES ? "Próxima parada" : "Next stop",
     }
+  ).addTo(map);
+} else {
+  destinationMarkerRef.current.setLatLng(
+    destinationPosition
+  );
+}
 
-    destinationMarkerRef.current.bindPopup(
-      `<strong>Destino B</strong><br/>` +
-        `Parada ${destination.stop_order}: ${destination.stop_type}` +
-        `<br/>${destination.address ?? ""}` +
-        `<br/>${destination.city ?? ""} ${destination.state ?? ""}`
-    );
+   destinationMarkerRef.current.bindPopup(
+  `<strong>${isES ? "Próxima parada" : "Next stop"}</strong><br/>` +
+    `${isES ? "Parada" : "Stop"} ${destination.stop_order}: ${destination.stop_type}<br/>` +
+    `${destination.address ?? ""}<br/>` +
+    `${destination.city ?? ""} ${destination.state ?? ""}`
+);
+
 
     if (!lastLocation) {
       setNavigation((previous) => ({
@@ -596,10 +668,11 @@ export default function TruckMap({
             const roadName = String(step.name ?? "").trim();
 
             newSteps.push({
-              instruction: describeManeuver(
-                step.maneuver ?? {},
-                roadName
-              ),
+             instruction: describeManeuver(
+  step.maneuver ?? {},
+  roadName,
+  isES
+),
               roadName,
               distance: Number(step.distance ?? 0),
               duration: Number(step.duration ?? 0),
@@ -673,7 +746,7 @@ export default function TruckMap({
     };
 
     void fetchRoute();
-  }, [destination, lastLocation, rerouteVersion]);
+ }, [destination, lastLocation, rerouteVersion, isES]); 
 
   return (
     <div className="relative w-full overflow-hidden rounded-xl border border-slate-700 shadow-lg">
@@ -702,10 +775,34 @@ export default function TruckMap({
             )}
 
             <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-slate-600">
-              <span>
-                Maniobra:{" "}
-                {formatDistance(navigation.distanceToManeuver)}
-              </span>
+              
+
+<div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-slate-600">
+  <span>
+    {isES ? "Maniobra:" : "Maneuver:"}{" "}
+    {formatDistance(navigation.distanceToManeuver)}
+  </span>
+
+  <span>
+    {isES ? "Ruta:" : "Route:"}{" "}
+    {formatDistance(navigation.routeDistance)}
+  </span>
+
+  <span>
+    {isES ? "Tiempo estimado:" : "Estimated time:"}{" "}
+    {formatDuration(navigation.routeDuration)}
+  </span>
+</div>
+
+{navigation.isOffRoute && (
+  <div className="mt-2 text-sm font-bold text-red-600">
+    {isES
+      ? "Desvío detectado — recalculando ruta..."
+      : "Off route — recalculating..."}
+  </div>
+)}
+
+
               <span>
                 Ruta: {formatDistance(navigation.routeDistance)}
               </span>

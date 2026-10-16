@@ -2321,7 +2321,15 @@ async function updateLoadStatus(status: string): Promise<boolean> {
       });
 
       const result = await response.json().catch(() => null);
-
+       console.log("GPS API RESPONSE:", {
+  ok: response.ok,
+  status: response.status,
+  sentLatitude: location.lat,
+  sentLongitude: location.lng,
+  savedLatitude: result?.data?.latitude,
+  savedLongitude: result?.data?.longitude,
+  savedAt: result?.data?.recorded_at,
+});
       if (!response.ok) {
   const responseText = await response.clone().text();
 
@@ -2377,21 +2385,30 @@ async function updateLoadStatus(status: string): Promise<boolean> {
     setGpsTracking(true);
     setGpsStatus(text.gpsWaiting);
 
-    gpsWatchId.current = navigator.geolocation.watchPosition(
-      async (position) => {
-        console.log("¡GPS RECIBIDO EXITOSAMENTE!", position.coords);
+  
+gpsWatchId.current = navigator.geolocation.watchPosition(
+  async (position) => {
+    console.log("¡GPS RECIBIDO EXITOSAMENTE!", position.coords);
 
-        if (gpsWatchId.current === null) return;
+    console.log("GPS DIAGNOSTIC:", {
+      latitude: position.coords.latitude,
+      longitude: position.coords.longitude,
+      accuracy: position.coords.accuracy,
+      timestamp: position.timestamp,
+      receivedAt: new Date().toISOString(),
+    });
 
-        const location: GPSLocation = {
-          lat: position.coords.latitude,
-          lng: position.coords.longitude,
-          accuracy: position.coords.accuracy,
-          speed: position.coords.speed,
-          heading: position.coords.heading,
-        };
+    if (gpsWatchId.current === null) return;
 
-        setLastLocation(location);
+    const location: GPSLocation = {
+      lat: position.coords.latitude,
+      lng: position.coords.longitude,
+      accuracy: position.coords.accuracy,
+      speed: position.coords.speed,
+      heading: position.coords.heading,
+    };
+
+    setLastLocation(location);
 
         const gpsSaved = await saveGpsEvent(location, driverId, loadId);
 

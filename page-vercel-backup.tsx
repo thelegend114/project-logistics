@@ -1009,33 +1009,35 @@ export default function DriverPage() {
       }
     );
 
-    channel.on(
-      "postgres_changes",
-      {
-        event: "INSERT",
-        schema: "public",
-        table: "gps_events",
-        filter: `driver_id=eq.${driverId}`,
-      },
-      (payload) => {
-        if (!isActive) return;
+    
+channel.on(
+  "postgres_changes",
+  {
+    event: "INSERT",
+    schema: "public",
+    table: "gps_events",
+    filter: `driver_id=eq.${driverId}`,
+  },
+  (payload) => {
+    if (!isActive) return;
 
-        const gpsEvent = payload.new as {
-          latitude: number;
-          longitude: number;
-        };
+    const gpsEvent = payload.new as {
+      latitude: number;
+      longitude: number;
+    };
 
-        setLastLocation({
-          lat: gpsEvent.latitude,
-          lng: gpsEvent.longitude,
-          accuracy: 0,
-          speed: null,
-          heading: null,
-        });
+    setLastLocation({
+      lat: gpsEvent.latitude,
+      lng: gpsEvent.longitude,
+      accuracy: 0,
+      speed: null,
+      heading: null,
+    });
 
-        setGpsDatabaseError(false);
-      }
-    );
+    setGpsDatabaseError(false);
+  }
+);
+
 
   channel.on(
       "postgres_changes",

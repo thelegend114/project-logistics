@@ -3,6 +3,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import L from "leaflet";
+import "@tomickigrzegorz/leaflet-rotate";
 import "leaflet/dist/leaflet.css";
 
 interface NavigationStop {
@@ -41,12 +42,35 @@ interface RouteState {
   routeDistance: number;
   routeDuration: number;
   isOffRoute: boolean;
+  isArrived: boolean;
+  isCalculating: boolean;
+  routeError: boolean;
 }
 
-const OFF_ROUTE_METERS = 80;
+const OFF_ROUTE_METERS = 70;
+const ARRIVAL_RADIUS_METERS = 161;
 const ARRIVAL_TO_MANEUVER_METERS = 45;
-const REROUTE_COOLDOWN_MS = 12000;
-const MIN_REROUTE_MOVEMENT_METERS = 30;
+const ROUTE_REFRESH_DISTANCE_METERS = 100;
+const ROUTE_REFRESH_INTERVAL_MS = 30_000;
+const REROUTE_COOLDOWN_MS = 12_000;
+const MIN_REROUTE_MOVEMENT_METERS = 15;
+const ROUTE_RETRY_INTERVAL_MS = 15_000;
+
+function initialNavigation(isES: boolean): RouteState {
+  return {
+    instruction: isES
+      ? "Esperando ubicación GPS..."
+      : "Waiting for GPS location...",
+    roadName: "",
+    distanceToManeuver: 0,
+    routeDistance: 0,
+    routeDuration: 0,
+    isOffRoute: false,
+    isArrived: false,
+    isCalculating: false,
+    routeError: false,
+  };
+}
 
 function formatDistance(meters: number): string {
   if (!Number.isFinite(meters) || meters < 0) return "--";
@@ -59,6 +83,8 @@ function formatDistance(meters: number): string {
 }
 
 function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "--";
+
   const minutes = Math.max(0, Math.round(seconds / 60));
 
   if (minutes < 60) return `${minutes} min`;
@@ -70,7 +96,6 @@ function formatDuration(seconds: number): string {
     ? `${hours} h ${remainingMinutes} min`
     : `${hours} h`;
 }
-
 
 function describeManeuver(
   maneuver: {
@@ -112,7 +137,9 @@ function describeManeuver(
   if (type === "depart") {
     instruction = isES ? "Comienza la ruta" : "Start route";
   } else if (type === "arrive") {
-    instruction = isES ? "Has llegado a la parada" : "You have arrived at the stop";
+    instruction = isES
+      ? "Has llegado a la parada"
+      : "You have arrived at the stop";
   } else if (type === "roundabout" || type === "rotary") {
     instruction =
       typeof maneuver.exit === "number"
@@ -127,15 +154,21 @@ function describeManeuver(
   } else if (type === "fork") {
     instruction =
       directions[modifier] ??
-      (isES ? "Continúa por la bifurcación" : "Continue through the fork");
+      (isES
+        ? "Continúa por la bifurcación"
+        : "Continue through the fork");
   } else if (type === "on ramp") {
-    instruction = isES ? "Toma la rampa de acceso" : "Take the entrance ramp";
+    instruction = isES
+      ? "Toma la rampa de acceso"
+      : "Take the entrance ramp";
   } else if (type === "off ramp") {
     instruction = isES ? "Toma la salida" : "Take the exit ramp";
   } else if (type === "end of road") {
     instruction =
       directions[modifier] ??
-      (isES ? "Continúa hasta el final de la vía" : "Continue to the end of the road");
+      (isES
+        ? "Continúa hasta el final de la vía"
+        : "Continue to the end of the road");
   } else {
     instruction =
       directions[modifier] ??
@@ -157,7 +190,6 @@ function describeManeuver(
   return instruction;
 }
 
-
 function createTruckIcon(heading: number) {
   const rotation = ((heading % 360) + 360) % 360;
 
@@ -165,7 +197,8 @@ function createTruckIcon(heading: number) {
     className: "tractor-trailer-map-icon",
     html: `
       <div style="
-        width:36px;height:52px;
+        width:36px;
+        height:52px;
         transform:rotate(${rotation}deg);
         transform-origin:center;
         filter:drop-shadow(0 2px 3px #64748b);
@@ -203,22 +236,47 @@ function createTruckIcon(heading: number) {
 
 function getDistanceFromRoute(
   position: L.LatLng,
-  route: L.Polyline
+  route: L.Polyline,
+  map: L.Map
 ): number {
   const points = route.getLatLngs() as L.LatLng[];
 
   if (points.length < 2) return Infinity;
 
+  const projectedPosition = map.latLngToLayerPoint(position);
   let minimumDistance = Infinity;
 
-  for (const point of points) {
-    minimumDistance = Math.min(
-      minimumDistance,
-      position.distanceTo(point)
+  for (let i = 0; i < points.length - 1; i++) {
+    const start = map.latLngToLayerPoint(points[i]);
+    const end = map.latLngToLayerPoint(points[i + 1]);
+
+    const closest = L.LineUtil.closestPointOnSegment(
+      projectedPosition,
+      start,
+      end
     );
+
+    const closestLatLng = map.layerPointToLatLng(closest);
+    const distance = position.distanceTo(closestLatLng);
+
+    minimumDistance = Math.min(minimumDistance, distance);
   }
 
   return minimumDistance;
+}
+
+function isValidCoordinate(
+  lat: number | null | undefined,
+  lng: number | null | undefined
+): boolean {
+  return (
+    lat != null &&
+    lng != null &&
+    Number.isFinite(Number(lat)) &&
+    Number.isFinite(Number(lng)) &&
+    Math.abs(Number(lat)) <= 90 &&
+    Math.abs(Number(lng)) <= 180
+  );
 }
 
 export default function TruckMap({
@@ -235,86 +293,90 @@ export default function TruckMap({
   const headingRef = useRef(0);
   const lastRouteOriginRef = useRef<L.LatLng | null>(null);
   const lastRouteDestinationRef = useRef<string | null>(null);
+  const lastSuccessfulRouteTimeRef = useRef(0);
+  const lastRouteAttemptTimeRef = useRef(0);
   const routeRequestRef = useRef(0);
+
   const lastRerouteTimeRef = useRef(0);
   const lastReroutePositionRef = useRef<L.LatLng | null>(null);
+
   const stepsRef = useRef<NavigationStep[]>([]);
   const currentStepIndexRef = useRef(0);
   const offRouteRef = useRef(false);
   const lastSpokenInstructionRef = useRef("");
 
   const [rerouteVersion, setRerouteVersion] = useState(0);
-  const [navigation, setNavigation] = useState<RouteState>({
-    instruction: isES ? "Esperando ubicación GPS..." : "Waiting for GPS location...",
-    roadName: "",
-    distanceToManeuver: 0,
-    routeDistance: 0,
-    routeDuration: 0,
-    isOffRoute: false,
-  });
-  
-useEffect(() => {
-  if (!destination || !navigation.instruction.trim()) return;
+  const [navigation, setNavigation] = useState<RouteState>(() =>
+    initialNavigation(isES)
+  );
 
-  const instruction = navigation.instruction.trim();
+  // Anunciar instrucciones nuevas sin repetirlas continuamente.
+  useEffect(() => {
+    if (!destination || !navigation.instruction.trim()) return;
+    if (navigation.isCalculating || navigation.routeError) return;
 
-  const ignoredMessages = [
-    "Esperando ubicación GPS...",
-    "Waiting for GPS location...",
-    "No se pudo calcular la ruta.",
-    "No se pudo calcular la ruta. Reintentando al actualizar la ubicación.",
-    "Could not calculate the route.",
-    "Off route — recalculating...",
-    "Desvío detectado. Recalculando ruta...",
-    "Desvío detectado — recalculando ruta...",
-  ];
+    if (
+      !("speechSynthesis" in window) ||
+      navigation.instruction.startsWith("Esperando") ||
+      navigation.instruction.startsWith("Waiting") ||
+      navigation.instruction.startsWith("No se pudo") ||
+      navigation.instruction.startsWith("Could not") ||
+      navigation.instruction.startsWith("Desvío") ||
+      navigation.instruction.startsWith("Detour")
+    ) {
+      return;
+    }
 
-  if (
-    ignoredMessages.some((message) =>
-      instruction.startsWith(message)
-    )
-  ) {
-    return;
-  }
+    const speechKey =
+      `${destination.id}:${isES ? "es" : "en"}:${navigation.instruction}`;
 
-  if (!("speechSynthesis" in window)) return;
+    if (lastSpokenInstructionRef.current === speechKey) return;
 
-  const speechKey = `${destination.id}:${isES ? "es" : "en"}:${instruction}`;
+    lastSpokenInstructionRef.current = speechKey;
 
-  if (lastSpokenInstructionRef.current === speechKey) return;
+    const utterance = new SpeechSynthesisUtterance(
+      navigation.instruction
+    );
 
-  lastSpokenInstructionRef.current = speechKey;
+    utterance.lang = isES ? "es-US" : "en-US";
+    utterance.rate = 0.95;
 
-  const utterance = new SpeechSynthesisUtterance(instruction);
-  utterance.lang = isES ? "es-US" : "en-US";
-  utterance.rate = 0.95;
+    window.speechSynthesis.speak(utterance);
+  }, [
+    navigation.instruction,
+    navigation.isCalculating,
+    navigation.routeError,
+    destination?.id,
+    isES,
+  ]);
 
-  window.speechSynthesis.speak(utterance);
-}, [navigation.instruction, destination?.id, isES]);
-
-
-  const initialLat = 25.77154;
-  const initialLng = -80.38205;
-
-  // Inicializar el mapa.
+  // Inicializar Leaflet una sola vez.
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
 
-    const map = L.map(containerRef.current).setView(
-      [initialLat, initialLng],
-      14
-    );
+   const initialPosition: L.LatLngExpression = lastLocation
+  ? [lastLocation.lat, lastLocation.lng]
+  : [25.77154, -80.38205];
 
-    mapRef.current = map;
+const map = L.map(containerRef.current, {
+  zoomControl: false,
+  attributionControl: true,
+  rotate: true,
+  bearing: 0,
+  touchRotate: false,
+  shiftKeyRotate: false,
+  dragRotate: false,
+}).setView(initialPosition, 16);
 
-    L.tileLayer(
-      "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-      {
-        attribution:
-          '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-        maxZoom: 19,
-      }
-    ).addTo(map);
+mapRef.current = map;
+
+    
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  attribution:
+    '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+  maxZoom: 19,
+}).addTo(map);
+
 
     const observer = new ResizeObserver(() => {
       map.invalidateSize();
@@ -335,160 +397,209 @@ useEffect(() => {
     };
   }, []);
 
-  // Actualizar la posición del camión y seguir las maniobras.
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map || !lastLocation) return;
+  // Actualizar la posición del camión y comprobar la llegada.
+ 
+useEffect(() => {
+  const map = mapRef.current;
 
-    const { lat, lng, heading } = lastLocation;
+  if (
+    !map ||
+    !lastLocation ||
+    !isValidCoordinate(lastLocation.lat, lastLocation.lng)
+  ) {
+    return;
+  }
 
-    if (
-      !Number.isFinite(lat) ||
-      !Number.isFinite(lng) ||
-      Math.abs(lat) > 90 ||
-      Math.abs(lng) > 180
-    ) {
-      return;
-    }
+  const { lat, lng, heading } = lastLocation;
+  if (
+  typeof heading === "number" &&
+  Number.isFinite(heading) &&
+  heading >= 0 &&
+  heading <= 360
+) {
+  headingRef.current = heading;
 
-    if (
-      typeof heading === "number" &&
-      Number.isFinite(heading) &&
-      heading >= 0 &&
-      heading <= 360
-    ) {
-      headingRef.current = heading;
-    }
+  const map = mapRef.current;
 
-    const position = L.latLng(lat, lng);
-    const icon = createTruckIcon(headingRef.current);
+  if (map && typeof map.setHeading === "function") {
+  map.setHeading(heading);
+ }
+}
 
-    if (!truckMarkerRef.current) {
-      truckMarkerRef.current = L.marker(position, {
-        icon,
-        zIndexOffset: 1000,
-        title: isES ? "Ubicación del camión" : "Truck location",
-      }).addTo(map);
+  if (
+    typeof heading === "number" &&
+    Number.isFinite(heading) &&
+    heading >= 0 &&
+    heading <= 360
+  ) {
+    headingRef.current = heading;
+  }
 
-      map.setView(position, 15);
-    } else {
-      truckMarkerRef.current.setLatLng(position);
-      truckMarkerRef.current.setIcon(icon);
-    }
+  const position = L.latLng(lat, lng);
+  const icon = createTruckIcon(0);
 
-    const steps = stepsRef.current;
-    let stepIndex = currentStepIndexRef.current;
+  if (!truckMarkerRef.current) {
+    truckMarkerRef.current = L.marker(position, {
+      icon,
+      zIndexOffset: 1000,
+      title: isES ? "Ubicación del camión" : "Truck location",
+    }).addTo(map);
+  } else {
+    truckMarkerRef.current.setLatLng(position);
+    truckMarkerRef.current.setIcon(icon);
+  }
 
-    while (stepIndex < steps.length - 1) {
-      const step = steps[stepIndex];
-      const distance = position.distanceTo(step.location);
+  // Detectar llegada visual al destino.
+  // La actualización oficial del estado se realiza en Supabase
+  // desde el motor de secuencia de app/drive/page.tsx.
+  if (
+    destination &&
+    isValidCoordinate(destination.latitude, destination.longitude)
+  ) {
+    const destinationPosition = L.latLng(
+      Number(destination.latitude),
+      Number(destination.longitude)
+    );
 
-      if (distance <= ARRIVAL_TO_MANEUVER_METERS) {
-        stepIndex++;
-      } else {
-        break;
-      }
-    }
+    const distanceToDestination =
+      position.distanceTo(destinationPosition);
 
-    currentStepIndexRef.current = stepIndex;
-
-    const currentStep = steps[stepIndex];
-
-    if (currentStep) {
-      const distanceToManeuver = position.distanceTo(
-        currentStep.location
-      );
-
+    if (distanceToDestination <= ARRIVAL_RADIUS_METERS) {
       setNavigation((previous) => ({
+        ...previous,
+        instruction: isES
+          ? "Has llegado a la parada"
+          : "You have arrived at the stop",
+        roadName: destination.address ?? "",
+        distanceToManeuver: 0,
+        routeDistance: 0,
+        routeDuration: 0,
+        isOffRoute: false,
+        isArrived: true,
+        isCalculating: false,
+        routeError: false,
+      }));
+    } else {
+      setNavigation((previous) =>
+        previous.isArrived
+          ? { ...previous, isArrived: false }
+          : previous
+      );
+    }
+  }
+
+  // Actualizar la siguiente maniobra.
+  const steps = stepsRef.current;
+  let stepIndex = currentStepIndexRef.current;
+
+  while (stepIndex < steps.length - 1) {
+    const distance = position.distanceTo(
+      steps[stepIndex].location
+    );
+
+    if (distance <= ARRIVAL_TO_MANEUVER_METERS) {
+      stepIndex++;
+    } else {
+      break;
+    }
+  }
+
+  currentStepIndexRef.current = stepIndex;
+
+  const currentStep = steps[stepIndex];
+
+  if (currentStep) {
+    const distanceToManeuver = position.distanceTo(
+      currentStep.location
+    );
+
+    setNavigation((previous) => {
+      if (previous.isArrived) return previous;
+
+      return {
         ...previous,
         instruction: currentStep.instruction,
         roadName: currentStep.roadName,
         distanceToManeuver,
-      }));
-    }
+      };
+    });
+  }
 
-    const route = routeRef.current;
+  // Detectar desviaciones comparando con la ruta.
+  const route = routeRef.current;
 
-    if (route) {
-      const distanceFromRoute = getDistanceFromRoute(
-        position,
-        route
-      );
+  if (route) {
+    const distanceFromRoute = getDistanceFromRoute(
+      position,
+      route,
+      map
+    );
 
-      const isOffRoute = distanceFromRoute > OFF_ROUTE_METERS;
+    const isOffRoute =
+      distanceFromRoute > OFF_ROUTE_METERS;
 
-      offRouteRef.current = isOffRoute;
+    offRouteRef.current = isOffRoute;
 
-      setNavigation((previous) => ({
-        ...previous,
-        isOffRoute,
-      }));
+    setNavigation((previous) => ({
+      ...previous,
+      isOffRoute: previous.isArrived ? false : isOffRoute,
+    }));
 
-      if (isOffRoute) {
-        const now = Date.now();
-        const previousReroutePosition =
-          lastReroutePositionRef.current;
+    if (isOffRoute) {
+      const now = Date.now();
+      const previousReroutePosition =
+        lastReroutePositionRef.current;
 
-        const movedEnough =
-          !previousReroutePosition ||
-          previousReroutePosition.distanceTo(position) >=
-            MIN_REROUTE_MOVEMENT_METERS;
+      const movedEnough =
+        !previousReroutePosition ||
+        previousReroutePosition.distanceTo(position) >=
+          MIN_REROUTE_MOVEMENT_METERS;
 
-        const cooldownPassed =
-          now - lastRerouteTimeRef.current >=
+      const cooldownPassed =
+        now - lastRerouteTimeRef.current >=
           REROUTE_COOLDOWN_MS;
 
-        if (movedEnough && cooldownPassed) {
-          lastRerouteTimeRef.current = now;
-          lastReroutePositionRef.current = position;
+      if (movedEnough && cooldownPassed) {
+        lastRerouteTimeRef.current = now;
+        lastReroutePositionRef.current = position;
+        lastRouteOriginRef.current = null;
 
-                    // Solicitar un recálculo inmediato desde la ubicación GPS actual.
-          lastRouteOriginRef.current = null;
+        setNavigation((previous) => ({
+          ...previous,
+          instruction: isES
+            ? "Desvío detectado. Recalculando ruta..."
+            : "Detour detected. Recalculating route...",
+          isCalculating: true,
+          routeError: false,
+        }));
 
-          setNavigation((previous) => ({
-            ...previous,
-            instruction: isES ? "Desvío detectado. Recalculando ruta..." : "Detour detected. Recalculating route...",
-          }));
-
-          setRerouteVersion((version) => version + 1);
-        }
+        setRerouteVersion((version) => version + 1);
       }
     }
+  }
 
-    // Mantener el camión visible sin reajustar el zoom.
-    if (
-      !map.getBounds().pad(-0.15).contains(position)
-    ) {
-      map.panTo(position, { animate: true, duration: 0.4 });
-    }
-  }, [lastLocation]);
+  // Mantener el camión visible sin cambiar el zoom continuamente.
+  if (!map.getBounds().pad(-0.15).contains(position)) {
+    map.panTo(position, {
+      animate: true,
+      duration: 0.4,
+    });
+  }
+}, [lastLocation, destination, isES]);
 
-  // Calcular o recalcular la ruta, incluyendo instrucciones de maniobra.
+  // Calcular y actualizar la ruta.
   useEffect(() => {
     const map = mapRef.current;
+
     if (!map) return;
-
-    const validDestination =
-      destination &&
-      destination.latitude !== null &&
-      destination.longitude !== null &&
-      Number.isFinite(destination.latitude) &&
-      Number.isFinite(destination.longitude) &&
-      Math.abs(destination.latitude) <= 90 &&
-      Math.abs(destination.longitude) <= 180;
-
-    
 
     if (
       !destination ||
-      destination.latitude == null ||
-      destination.longitude == null ||
-      !Number.isFinite(destination.latitude) ||
-      !Number.isFinite(destination.longitude) ||
-      Math.abs(destination.latitude) > 90 ||
-      Math.abs(destination.longitude) > 180
+      !isValidCoordinate(
+        destination.latitude,
+        destination.longitude
+      )
     ) {
-      // Invalidar cualquier solicitud de ruta que siga en curso.
       routeRequestRef.current++;
 
       destinationMarkerRef.current?.remove();
@@ -497,30 +608,23 @@ useEffect(() => {
       routeRef.current?.remove();
       routeRef.current = null;
 
-      // Borrar todas las instrucciones y referencias de la ruta anterior.
       stepsRef.current = [];
       currentStepIndexRef.current = 0;
       lastRouteOriginRef.current = null;
       lastRouteDestinationRef.current = null;
+      lastSuccessfulRouteTimeRef.current = 0;
+      lastRouteAttemptTimeRef.current = 0;
       lastReroutePositionRef.current = null;
       lastRerouteTimeRef.current = 0;
       offRouteRef.current = false;
 
-      setNavigation({
-        instruction: "",
-        roadName: "",
-        distanceToManeuver: 0,
-        routeDistance: 0,
-        routeDuration: 0,
-        isOffRoute: false,
-      });
-
+      setNavigation(initialNavigation(isES));
       return;
     }
 
     const destinationPosition = L.latLng(
-      destination.latitude,
-      destination.longitude
+      Number(destination.latitude),
+      Number(destination.longitude)
     );
 
     const destinationKey = [
@@ -529,49 +633,65 @@ useEffect(() => {
       destination.longitude,
     ].join(":");
 
-
-    
-if (!destinationMarkerRef.current) {
-  destinationMarkerRef.current = L.marker(
-    destinationPosition,
-    {
-      icon: L.divIcon({
-        className: "navigation-destination-icon",
-        html: `
-          <div style="
-            width:22px;
-            height:22px;
-            border-radius:50%;
-            background:#dc2626;
-            border:4px solid white;
-            box-shadow:0 2px 6px #64748b;
-          "></div>
-        `,
-        iconSize: [22, 22],
-        iconAnchor: [11, 11],
-      }),
-      title: isES ? "Próxima parada" : "Next stop",
+    if (!destinationMarkerRef.current) {
+      destinationMarkerRef.current = L.marker(
+        destinationPosition,
+        {
+          icon: L.divIcon({
+            className: "navigation-destination-icon",
+            html: `
+              <div style="
+                width:22px;
+                height:22px;
+                border-radius:50%;
+                background:#dc2626;
+                border:4px solid white;
+                box-shadow:0 2px 6px #64748b;
+              "></div>
+            `,
+            iconSize: [22, 22],
+            iconAnchor: [11, 11],
+          }),
+          title: isES ? "Próxima parada" : "Next stop",
+        }
+      ).addTo(map);
+    } else {
+      destinationMarkerRef.current.setLatLng(
+        destinationPosition
+      );
     }
-  ).addTo(map);
-} else {
-  destinationMarkerRef.current.setLatLng(
-    destinationPosition
-  );
-}
 
-   destinationMarkerRef.current.bindPopup(
-  `<strong>${isES ? "Próxima parada" : "Next stop"}</strong><br/>` +
-    `${isES ? "Parada" : "Stop"} ${destination.stop_order}: ${destination.stop_type}<br/>` +
-    `${destination.address ?? ""}<br/>` +
-    `${destination.city ?? ""} ${destination.state ?? ""}`
-);
+    const popupContent = document.createElement("div");
+    const popupTitle = document.createElement("strong");
 
+    popupTitle.textContent = isES
+      ? "Próxima parada"
+      : "Next stop";
 
-    if (!lastLocation) {
+    popupContent.appendChild(popupTitle);
+
+    const popupDetails = document.createElement("div");
+
+    popupDetails.textContent =
+      `${isES ? "Parada" : "Stop"} ${destination.stop_order}: ` +
+      `${destination.stop_type} · ${destination.address ?? ""} · ` +
+      `${destination.city ?? ""} ${destination.state ?? ""}`;
+
+    popupContent.appendChild(popupDetails);
+    destinationMarkerRef.current.bindPopup(popupContent);
+
+    if (
+      !lastLocation ||
+      !isValidCoordinate(lastLocation.lat, lastLocation.lng)
+    ) {
       setNavigation((previous) => ({
         ...previous,
-        instruction: "Esperando ubicación GPS...",
+        instruction: isES
+          ? "Esperando ubicación GPS..."
+          : "Waiting for GPS location...",
+        isCalculating: false,
       }));
+
       return;
     }
 
@@ -579,6 +699,29 @@ if (!destinationMarkerRef.current) {
       lastLocation.lat,
       lastLocation.lng
     );
+
+    const distanceToDestination =
+      origin.distanceTo(destinationPosition);
+
+    // Llegada visual: no modifica el estado operativo de la parada.
+    if (distanceToDestination <= ARRIVAL_RADIUS_METERS) {
+      setNavigation((previous) => ({
+        ...previous,
+        instruction: isES
+          ? "Has llegado a la parada"
+          : "You have arrived at the stop",
+        roadName: destination.address ?? "",
+        distanceToManeuver: 0,
+        routeDistance: 0,
+        routeDuration: 0,
+        isOffRoute: false,
+        isArrived: true,
+        isCalculating: false,
+        routeError: false,
+      }));
+
+      return;
+    }
 
     const previousOrigin = lastRouteOriginRef.current;
 
@@ -589,23 +732,47 @@ if (!destinationMarkerRef.current) {
 
     const originMoved =
       !previousOrigin ||
-      map.distance(previousOrigin, origin) >= 500;
+      previousOrigin.distanceTo(origin) >=
+        ROUTE_REFRESH_DISTANCE_METERS;
+
+    const refreshDue =
+      Date.now() - lastSuccessfulRouteTimeRef.current >=
+      ROUTE_REFRESH_INTERVAL_MS;
 
     const rerouteRequested = previousOrigin === null;
 
+    const needsRoute =
+      destinationChanged ||
+      routeMissing ||
+      originMoved ||
+      refreshDue ||
+      rerouteRequested;
+
+    if (!needsRoute) return;
+
+    const now = Date.now();
+
+    // Evitar demasiadas solicitudes al servicio de rutas público.
     if (
       !destinationChanged &&
       !routeMissing &&
-      !originMoved &&
-      !rerouteRequested
+      now - lastRouteAttemptTimeRef.current <
+        ROUTE_RETRY_INTERVAL_MS
     ) {
       return;
     }
 
     const requestId = ++routeRequestRef.current;
+    lastRouteAttemptTimeRef.current = now;
 
-    lastRouteOriginRef.current = origin;
-    lastRouteDestinationRef.current = destinationKey;
+    setNavigation((previous) => ({
+      ...previous,
+      isCalculating: true,
+      routeError: false,
+      instruction: isES
+        ? "Calculando ruta..."
+        : "Calculating route...",
+    }));
 
     const fetchRoute = async () => {
       try {
@@ -615,16 +782,17 @@ if (!destinationMarkerRef.current) {
           `${destinationPosition.lng},${destinationPosition.lat}` +
           "?overview=full&geometries=geojson&steps=true";
 
-        const response = await fetch(url);
+        const response = await fetch(url, {
+          signal: AbortSignal.timeout(20_000),
+        });
 
         if (!response.ok) {
-          throw new Error(
-            `Routing HTTP ${response.status}`
-          );
+          throw new Error(`Routing HTTP ${response.status}`);
         }
 
         const result = await response.json();
 
+        // Ignorar respuestas antiguas si ya se solicitó otra ruta.
         if (requestId !== routeRequestRef.current) return;
 
         if (result.code !== "Ok" || !result.routes?.length) {
@@ -634,8 +802,7 @@ if (!destinationMarkerRef.current) {
         }
 
         const routeResult = result.routes[0];
-        const coordinates =
-          routeResult.geometry?.coordinates;
+        const coordinates = routeResult.geometry?.coordinates;
 
         if (!coordinates || coordinates.length < 2) {
           throw new Error(
@@ -644,12 +811,10 @@ if (!destinationMarkerRef.current) {
         }
 
         const latLngs: L.LatLngExpression[] =
-          coordinates.map(
-            (point: [number, number]) => [
-              point[1],
-              point[0],
-            ]
-          );
+          coordinates.map((point: [number, number]) => [
+            point[1],
+            point[0],
+          ]);
 
         const newSteps: NavigationStep[] = [];
 
@@ -665,14 +830,16 @@ if (!destinationMarkerRef.current) {
               continue;
             }
 
-            const roadName = String(step.name ?? "").trim();
+            const roadName = String(
+              step.name ?? ""
+            ).trim();
 
             newSteps.push({
-             instruction: describeManeuver(
-  step.maneuver ?? {},
-  roadName,
-  isES
-),
+              instruction: describeManeuver(
+                step.maneuver ?? {},
+                roadName,
+                isES
+              ),
               roadName,
               distance: Number(step.distance ?? 0),
               duration: Number(step.duration ?? 0),
@@ -686,7 +853,9 @@ if (!destinationMarkerRef.current) {
 
         if (newSteps.length === 0) {
           newSteps.push({
-            instruction: "Continúa siguiendo la ruta",
+            instruction: isES
+              ? "Continúa siguiendo la ruta"
+              : "Continue following the route",
             roadName: "",
             distance: Number(routeResult.distance ?? 0),
             duration: Number(routeResult.duration ?? 0),
@@ -694,21 +863,23 @@ if (!destinationMarkerRef.current) {
           });
         }
 
-        routeRef.current?.remove();
-
-        routeRef.current = L.polyline(latLngs, {
+        const newRoute = L.polyline(latLngs, {
           color: "#2563eb",
           weight: 6,
           opacity: 0.9,
         }).addTo(map);
 
+        routeRef.current?.remove();
+        routeRef.current = newRoute;
+
         stepsRef.current = newSteps;
         currentStepIndexRef.current = 0;
         offRouteRef.current = false;
 
+        // Guardar origen y hora solo después de una ruta válida.
         lastRouteOriginRef.current = origin;
         lastRouteDestinationRef.current = destinationKey;
-
+        lastSuccessfulRouteTimeRef.current = Date.now();
         lastReroutePositionRef.current = origin;
 
         setNavigation({
@@ -720,14 +891,13 @@ if (!destinationMarkerRef.current) {
           routeDistance: Number(routeResult.distance ?? 0),
           routeDuration: Number(routeResult.duration ?? 0),
           isOffRoute: false,
+          isArrived: false,
+          isCalculating: false,
+          routeError: false,
         });
 
-        // Solo encuadrar toda la ruta cuando se crea el primer
-        // trazado o cambia la parada, no en cada recálculo.
         if (destinationChanged || routeMissing) {
-          const bounds = routeRef.current.getBounds();
-
-          map.fitBounds(bounds, {
+          map.fitBounds(newRoute.getBounds(), {
             padding: [40, 40],
             maxZoom: 15,
           });
@@ -737,89 +907,145 @@ if (!destinationMarkerRef.current) {
 
         console.error("TRUCK MAP ROUTE ERROR:", error);
 
+        // No presentar un ETA anterior como si fuera actual.
+        lastRouteOriginRef.current = null;
+
         setNavigation((previous) => ({
           ...previous,
-          instruction:
-            "No se pudo calcular la ruta. Reintentando al actualizar la ubicación.",
+          instruction: isES
+            ? "No se pudo actualizar la ruta. Se reintentará."
+            : "Could not update the route. It will retry.",
+          routeDistance: 0,
+          routeDuration: 0,
+          isCalculating: false,
+          routeError: true,
         }));
       }
     };
 
     void fetchRoute();
- }, [destination, lastLocation, rerouteVersion, isES]); 
+  }, [destination, lastLocation, rerouteVersion, isES]);
 
   return (
     <div className="relative w-full overflow-hidden rounded-xl border border-slate-700 shadow-lg">
-            {destination && (
+      {destination && (
         <div
           className="absolute left-3 right-3 top-3 z-[1000] rounded-xl bg-white p-3 shadow-lg"
           style={{ pointerEvents: "none" }}
         >
-        <div className="flex items-start gap-3">
-          <div
-            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-blue-600 text-white"
-            style={{ fontSize: 22 }}
-          >
-            ↗
-          </div>
-
-          <div className="min-w-0 flex-1">
-            <div className="text-base font-bold text-slate-900">
-              {navigation.instruction}
+          <div className="flex items-start gap-3">
+            <div
+              className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-white ${
+                navigation.isArrived
+                  ? "bg-emerald-600"
+                  : "bg-blue-600"
+              }`}
+              style={{ fontSize: 22 }}
+            >
+              {navigation.isArrived ? "✓" : "↗"}
             </div>
 
-            {navigation.roadName && (
-              <div className="mt-0.5 text-sm text-slate-600">
-                {navigation.roadName}
+            <div className="min-w-0 flex-1">
+              <div className="text-base font-bold text-slate-900">
+                {navigation.instruction}
               </div>
-            )}
 
-            <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-slate-600">
-              
-
-<div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-slate-600">
-  <span>
-    {isES ? "Maniobra:" : "Maneuver:"}{" "}
-    {formatDistance(navigation.distanceToManeuver)}
-  </span>
-
-  <span>
-    {isES ? "Ruta:" : "Route:"}{" "}
-    {formatDistance(navigation.routeDistance)}
-  </span>
-
-  <span>
-    {isES ? "Tiempo estimado:" : "Estimated time:"}{" "}
-    {formatDuration(navigation.routeDuration)}
-  </span>
+             
+<div className="mt-2 rounded-lg border border-blue-100 bg-blue-50 p-3">
+  <div className="text-xs font-bold uppercase tracking-wide text-blue-700">
+    {isES ? "Destino de la parada" : "Stop destination"}
+  </div>
+  <div className="mt-1 break-words text-sm font-semibold text-slate-900">
+    {[
+      destination?.address?.trim(),
+      destination?.city?.trim(),
+      destination?.state?.trim(),
+    ].filter(Boolean).join(", ") ||
+      (isES ? "Dirección no disponible" : "Address unavailable")}
+  </div>
+  {navigation.roadName && !navigation.isArrived && (
+    <div className="mt-2 text-sm text-slate-600">
+      {navigation.roadName}
+    </div>
+  )}
 </div>
 
-{navigation.isOffRoute && (
-  <div className="mt-2 text-sm font-bold text-red-600">
-    {isES
-      ? "Desvío detectado — recalculando ruta..."
-      : "Off route — recalculating..."}
-  </div>
-)}
 
+              <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-slate-600">
+                {!navigation.isArrived && (
+                  <>
+                    <span>
+                      {isES ? "Maniobra:" : "Maneuver:"}{" "}
+                      {formatDistance(
+                        navigation.distanceToManeuver
+                      )}
+                    </span>
 
-              <span>
-                Ruta: {formatDistance(navigation.routeDistance)}
-              </span>
-              <span>
-                Tiempo estimado:{" "}
-                {formatDuration(navigation.routeDuration)}
-              </span>
-            </div>
+                    <span>
+                      {isES ? "Ruta:" : "Route:"}{" "}
+                      {navigation.routeError
+                        ? "--"
+                        : formatDistance(
+                            navigation.routeDistance
+                          )}
+                    </span>
 
-            {navigation.isOffRoute && (
-              <div className="mt-2 text-sm font-bold text-red-600">
-                Desvío detectado — recalculando...
+                    <span>
+                      {isES
+                        ? "Tiempo estimado:"
+                        : "Estimated time:"}{" "}
+                      {navigation.routeError ||
+                      navigation.isCalculating
+                        ? "--"
+                        : formatDuration(
+                            navigation.routeDuration
+                          )}
+                    </span>
+                  </>
+                )}
               </div>
-            )}
+
+              {navigation.isCalculating && (
+                <div className="mt-2 text-sm font-semibold text-blue-700">
+                  {isES
+                    ? "Actualizando navegación..."
+                    : "Updating navigation..."}
+                </div>
+              )}
+
+              {navigation.isOffRoute &&
+                !navigation.isArrived && (
+                  <div className="mt-2 text-sm font-bold text-red-600">
+                    {isES
+                      ? "Desvío detectado. Recalculando ruta..."
+                      : "Off route. Recalculating route..."}
+                  </div>
+                )}
+
+              {navigation.routeError && (
+                <div className="mt-2 text-sm font-semibold text-amber-700">
+                  {isES
+                    ? "El tiempo estimado no está disponible. Comprueba la conexión."
+                    : "ETA unavailable. Check the connection."}
+                </div>
+              )}
+
+              {navigation.isArrived && (
+                <div className="mt-1 text-sm font-semibold text-emerald-700">
+                  {isES
+                    ? "Proximidad al destino confirmada por GPS. Completa la parada mediante el flujo operativo."
+                    : "GPS proximity to destination confirmed. Complete the stop through the operational workflow."}
+                </div>
+              )}
+
+              <div className="mt-2 text-[11px] text-slate-500">
+                {isES
+                  ? "ETA aproximado; puede variar según las condiciones de la vía."
+                  : "Estimated ETA; actual travel time may vary with road conditions."}
+              </div>
+            </div>
           </div>
         </div>
-      </div>
       )}
 
       <div

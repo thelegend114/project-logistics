@@ -450,9 +450,9 @@ const isDriveBlocked = (
   const [gpsTracking, setGpsTracking] = useState(false);
   const [gpsStatus, setGpsStatus] = useState(text.gpsNotActive);
   const [gpsDatabaseError, setGpsDatabaseError] = useState(false);
-
- 
   const [lastLocation, setLastLocation] = useState<GPSLocation | null>(null);
+  const [lastGpsReceivedAt, setLastGpsReceivedAt] = useState<number | null>(null);
+  const [gpsClockNow, setGpsClockNow] = useState(Date.now());
 
   const [navigationStop, setNavigationStop] =
   useState<SequenceStop | null>(null);
@@ -868,6 +868,29 @@ const isDriveBlocked = (
     );
   }, [previousLoadDocuments]);
 
+
+  useEffect(() => {
+  const timer = window.setInterval(() => {
+    setGpsClockNow(Date.now());
+  }, 10000);
+
+  return () => window.clearInterval(timer);
+}, []);
+
+const gpsReceivingRecently =
+  lastGpsReceivedAt !== null &&
+  gpsClockNow - lastGpsReceivedAt < 90000;
+
+const gpsSignalActive = gpsTracking || gpsReceivingRecently;
+
+const gpsDisplayStatus = gpsTracking
+  ? gpsStatus
+  : gpsReceivingRecently
+    ? isES
+      ? "GPS recibido en tiempo real"
+      : "GPS received in real time"
+    : gpsStatus;
+
   useEffect(() => {
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") {
@@ -948,48 +971,85 @@ useEffect(() => {
 
     const channel = supabase.channel(`driver-channel-${driverId}`);
 
-    channel.on(
-      "postgres_changes",
-      {
-        event: "UPDATE",
-        schema: "public",
-        table: "drivers",
-        filter: `id=eq.${driverId}`,
-      },
-      (payload) => {
-        if (!isActive) return;
+    
+channel.on(
+  "postgres_changes",
+  {
+    event: "UPDATE",
+    schema: "public",
+    table: "drivers",
+  },
+  (payload) => {
+    if (!isActive) return;
 
-        const updatedDriver = payload.new as {
-          id: string;
-          status: string | null;
-          current_load_id: string | null;
-        };
+    // PRUEBA RAW: registrar el evento antes de filtrar por conductor.
+    console.log("REALTIME RAW DRIVERS EVENT:", payload);
 
-        const receivedDriverId = String(updatedDriver.id);
-        const normalizedStatus = String(updatedDriver.status ?? "").trim().toLowerCase();
+    const updatedDriver = payload.new as {
+      id: string;
+      status: string | null;
+      current_load_id: string | null;
+    };
 
-        setDrivers((currentDrivers) =>
-          currentDrivers.map((driver) =>
-            String(driver.id) === receivedDriverId
-              ? {
-                ...driver,
-                status: updatedDriver.status ?? driver.status,
-                current_load_id: updatedDriver.current_load_id,
-              }
-              : driver
-          )
-        );
+    const receivedDriverId = String(updatedDriver.id);
 
-        const validStatuses = ["off_duty", "hold", "available", "on_duty", "driving"] as const;
+    console.log("REALTIME DRIVER ID RECEIVED:", receivedDriverId);
+    console.log("REALTIME DRIVER STATUS RECEIVED:", updatedDriver.status);
 
-        if (receivedDriverId === String(selectedDriverId)) {
-          if (validStatuses.includes(normalizedStatus as any)) {
-            setDriverWorkStatus(normalizedStatus as any);
-          }
-          setSelectedLoadId(updatedDriver.current_load_id ?? "");
-        }
-      }
+    // Ignorar los demás conductores después de registrar el RAW.
+    if (receivedDriverId !== driverId) {
+      console.log("REALTIME DRIVER IGNORED: different driver", {
+        receivedDriverId,
+        expectedDriverId: driverId,
+      });
+      return;
+    }
+
+    const normalizedStatus = String(
+      updatedDriver.status ?? ""
+    )
+      .trim()
+      .toLowerCase()
+      .replace(/[\s-]+/g, "_");
+
+    console.log("DRIVE REALTIME DRIVER UPDATE:", {
+      id: receivedDriverId,
+      status: normalizedStatus,
+      current_load_id: updatedDriver.current_load_id,
+    });
+
+    setDrivers((currentDrivers) =>
+      currentDrivers.map((driver) =>
+        String(driver.id) === receivedDriverId
+          ? {
+              ...driver,
+              status: updatedDriver.status ?? driver.status,
+              current_load_id: updatedDriver.current_load_id,
+            }
+          : driver
+      )
     );
+
+    const validStatuses = [
+      "off_duty",
+      "hold",
+      "available",
+      "on_duty",
+      "driving",
+    ] as const;
+
+    if (
+      validStatuses.some((status) => status === normalizedStatus)
+    ) {
+      setDriverWorkStatus(
+        normalizedStatus as (typeof validStatuses)[number]
+      );
+    }
+
+    setSelectedLoadId(updatedDriver.current_load_id ?? "");
+  }
+);
+
 
     channel.on(
       "postgres_changes",
@@ -1001,6 +1061,8 @@ useEffect(() => {
       },
       (payload) => {
         if (!isActive) return;
+
+        console.log("DRIVE REALTIME LOAD EVENT RECEIVED:", payload);
 
         if (payload.eventType === "DELETE") {
           const deletedLoad = payload.old as { id?: string };
@@ -1063,33 +1125,47 @@ useEffect(() => {
       }
     );
 
-    channel.on(
-      "postgres_changes",
-      {
-        event: "INSERT",
-        schema: "public",
-        table: "gps_events",
-        filter: `driver_id=eq.${driverId}`,
-      },
-      (payload) => {
-        if (!isActive) return;
+   
+channel.on(
+  "postgres_changes",
+  {
+    event: "INSERT",
+    schema: "public",
+    table: "gps_events",
+    filter: `driver_id=eq.${driverId}`,
+  },
+  (payload) => {
+    console.log("REALTIME RAW GPS EVENT:", payload);
 
-        const gpsEvent = payload.new as {
-          latitude: number;
-          longitude: number;
-        };
+    if (!isActive) {
+      console.log("GPS REALTIME IGNORED: subscription inactive");
+      return;
+    }
 
-        setLastLocation({
-          lat: gpsEvent.latitude,
-          lng: gpsEvent.longitude,
-          accuracy: 0,
-          speed: null,
-          heading: null,
-        });
+    const gpsEvent = payload.new as {
+      driver_id?: string;
+      latitude: number;
+      longitude: number;
+    };
 
-        setGpsDatabaseError(false);
-      }
-    );
+    console.log("GPS REALTIME COORDINATES:", {
+      driverIdReceived: gpsEvent.driver_id,
+      latitude: gpsEvent.latitude,
+      longitude: gpsEvent.longitude,
+      receivedAt: new Date().toISOString(),
+    });
+
+    setLastLocation({
+      lat: gpsEvent.latitude,
+      lng: gpsEvent.longitude,
+      accuracy: 0,
+      speed: null,
+      heading: null,
+    });
+
+    setLastGpsReceivedAt(Date.now());
+  }
+);
 
     channel.on(
       "postgres_changes",
@@ -1107,6 +1183,7 @@ useEffect(() => {
 
     channel.subscribe((status, err) => {
       if (!isActive) return;
+      console.log("DRIVE REALTIME SUBSCRIBE STATUS:", status, err);
       if (err || status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
         console.error("DRIVE REALTIME CONNECTION FAILED:", { status, error: err });
 
@@ -2295,8 +2372,19 @@ if (!allStopsAlreadyCompleted) {
     driverId: string,
     loadId: string
   ): Promise<boolean> {
-    if (gpsInsertInProgress.current) return false;
-    gpsInsertInProgress.current = true;
+    if (gpsInsertInProgress.current) { 
+  console.warn("GPS INSERT SKIPPED:", {
+    reason: "Previous GPS request is still in progress",
+    at: new Date().toISOString(),
+    latitude: location.lat,
+    longitude: location.lng,
+  });
+
+  return false;
+}
+
+gpsInsertInProgress.current = true;
+const gpsRequestStartedAt = Date.now();
 
     try {
       const response = await fetch("/api/gps-events", {
@@ -2315,14 +2403,15 @@ if (!allStopsAlreadyCompleted) {
 
       const result = await response.json().catch(() => null);
        console.log("GPS API RESPONSE:", {
-  ok: response.ok,
-  status: response.status,
-  sentLatitude: location.lat,
-  sentLongitude: location.lng,
-  savedLatitude: result?.data?.latitude,
-  savedLongitude: result?.data?.longitude,
-  savedAt: result?.data?.recorded_at,
-});
+        durationMs: Date.now() - gpsRequestStartedAt,
+        ok: response.ok,
+        status: response.status,
+        sentLatitude: location.lat,
+        sentLongitude: location.lng,
+        savedLatitude: result?.data?.latitude,
+        savedLongitude: result?.data?.longitude,
+        savedAt: result?.data?.recorded_at,
+   });
       if (!response.ok) {
   const responseText = await response.clone().text();
 
@@ -2372,16 +2461,38 @@ if (!allStopsAlreadyCompleted) {
 
     const driverId = selectedDriver.id;
     const loadId = selectedLoad.id;
+    let lastGpsCallbackAt = 0;
 
     setGpsDatabaseError(false);
     setGpsStatus(text.requestingGps);
     setGpsTracking(true);
     setGpsStatus(text.gpsWaiting);
 
-  
+  console.log(
+  "GPS: iniciando watchPosition");
 gpsWatchId.current = navigator.geolocation.watchPosition(
-  async (position) => {
-    console.log("¡GPS RECIBIDO EXITOSAMENTE!", position.coords);
+ async (position) => {
+  console.log(
+  "GPS: callback recibido",
+  position.timestamp
+);
+  const callbackNow = Date.now();
+
+  console.log("GPS WATCH INTERVAL:", {
+    secondsSincePreviousCallback: lastGpsCallbackAt
+      ? Math.round((callbackNow - lastGpsCallbackAt) / 1000)
+      : null,
+    positionTimestamp: new Date(position.timestamp).toISOString(),
+    positionAgeMs: callbackNow - position.timestamp,
+    receivedAt: new Date(callbackNow).toISOString(),
+    latitude: position.coords.latitude,
+    longitude: position.coords.longitude,
+    accuracy: position.coords.accuracy,
+  });
+
+  lastGpsCallbackAt = callbackNow;
+
+  console.log("¡GPS RECIBIDO EXITOSAMENTE!", position.coords);
 
     console.log("GPS DIAGNOSTIC:", {
       latitude: position.coords.latitude,
@@ -2405,10 +2516,29 @@ gpsWatchId.current = navigator.geolocation.watchPosition(
 
         const gpsSaved = await saveGpsEvent(location, driverId, loadId);
 
-        if (gpsWatchId.current === null) return;
-        if (!gpsSaved) return;
+console.log("GPS SAVE RESULT:", {
+  gpsSaved,
+  driverId,
+  loadId,
+  gpsWatchId: gpsWatchId.current,
+});
+
+if (gpsWatchId.current === null) {
+  console.error("GPS FLOW STOPPED: gpsWatchId is null");
+  return;
+}
+
+if (!gpsSaved) {
+  console.error("GPS FLOW STOPPED: saveGpsEvent returned false");
+  return;
+}
 
         try {
+  console.log("GPS CALLING SEQUENCE ARRIVAL:", {
+  location,
+  loadId,
+  gpsWatchId: gpsWatchId.current,
+});        
   await processSequenceArrival(location);
 
   if (gpsWatchId.current === null) return;
@@ -3170,7 +3300,7 @@ return (
                     })();
                   }}
                 />
-              </div>
+              </div> 
 
               <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs leading-5 text-slate-600">
                 {isES
@@ -3204,7 +3334,13 @@ return (
                 : "border-slate-200 bg-slate-50 text-slate-500"
                 }`}
             >
-              {gpsTracking ? text.live : text.off}
+              {gpsTracking
+              ? text.live
+              : gpsReceivingRecently
+              ? isES
+              ? "RECIBIENDO"
+              : "RECEIVING"
+              : text.off}
             </span>
           </div>
 
@@ -3220,13 +3356,15 @@ return (
               <span
                 className={`h-3 w-3 rounded-full ${gpsTracking
                   ? gpsDatabaseError
-                    ? "animate-pulse bg-amber-500"
-                    : "animate-pulse bg-emerald-500"
+                  ? "animate-pulse bg-amber-500"
+                  : "animate-pulse bg-emerald-500"
                   : "bg-slate-400"
                   }`}
               />
 
-              <div className="font-bold text-slate-900">{gpsStatus}</div>
+              <div className="font-bold text-slate-900">
+                  {gpsDisplayStatus}
+             </div>
             </div>
 
             <div className="mt-2 text-xs text-slate-500">
@@ -3280,15 +3418,21 @@ return (
             </div>
 
             <TruckMap
-  lastLocation={lastLocation}
-  destination={navigationStop}
-  isES={isES}
-/>
+              lastLocation={lastLocation}
+              destination={navigationStop}
+              isES={isES}
+            />
           </div>
 
           <div className="mt-4">
             <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold text-slate-700">
-              {gpsTracking ? text.gpsActive : text.gpsNotActive}
+              {gpsTracking
+              ? text.gpsActive
+              : gpsReceivingRecently
+              ? isES
+              ? "Recibiendo ubicación GPS del teléfono"
+              : "Receiving GPS location from phone"
+              : text.gpsNotActive}
             </div>
           </div>
          </div>

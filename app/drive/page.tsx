@@ -1786,8 +1786,13 @@ export default function DriverPage() {
 
       const nextStopStatus = stopType === "pickup" ? "at_pickup" : "at_delivery";
 
-      // No volver a procesar una parada que ya cambió de estado.
-      if (currentStop.status !== "pending") {
+      // CORREGIDO: antes solo aceptaba "pending". Una parada "in_progress"
+      // (como la parada 1 de tu carga) se tomaba como ya procesada y la llegada
+      // nunca se registraba. Ahora ambos estados pueden recibir la llegada.
+      const arrivableStatuses = ["pending", "in_progress"];
+
+      // No volver a procesar una parada que ya cambió de estado (at_pickup, completed...).
+      if (!arrivableStatuses.includes(currentStop.status)) {
         console.log("SEQUENCE ENGINE - STOP ALREADY PROCESSED:", {
           stopId: currentStop.id,
           status: currentStop.status,
@@ -1801,7 +1806,7 @@ export default function DriverPage() {
         .update({ status: nextStopStatus })
         .eq("id", currentStop.id)
         .eq("load_id", loadId)
-        .eq("status", "pending")
+        .eq("status", currentStop.status)
         .select("id, status")
         .maybeSingle();
 
@@ -1824,7 +1829,7 @@ export default function DriverPage() {
 
         await supabase
           .from("load_stops")
-          .update({ status: "pending" })
+          .update({ status: currentStop.status })
           .eq("id", currentStop.id)
           .eq("status", nextStopStatus);
 
@@ -1850,7 +1855,7 @@ export default function DriverPage() {
 
         await supabase
           .from("load_stops")
-          .update({ status: "pending" })
+          .update({ status: currentStop.status })
           .eq("id", currentStop.id)
           .eq("status", nextStopStatus);
 
@@ -1877,7 +1882,7 @@ export default function DriverPage() {
 
         await supabase
           .from("load_stops")
-          .update({ status: "pending" })
+          .update({ status: currentStop.status })
           .eq("id", currentStop.id)
           .eq("status", nextStopStatus);
 

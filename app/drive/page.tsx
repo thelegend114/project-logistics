@@ -1135,25 +1135,31 @@ channel.on(
     filter: `driver_id=eq.${driverId}`,
   },
   (payload) => {
-    console.log("REALTIME RAW GPS EVENT:", payload);
+   console.log("REALTIME RAW GPS EVENT:", payload);
 
-    if (!isActive) {
-      console.log("GPS REALTIME IGNORED: subscription inactive");
-      return;
-    }
+if (!isActive) {
+  console.log("GPS REALTIME IGNORED: subscription inactive");
+  return;
+}
 
-    const gpsEvent = payload.new as {
-      driver_id?: string;
-      latitude: number;
-      longitude: number;
-    };
+const gpsEvent = payload.new as {
+  id?: string;
+  driver_id?: string;
+  load_id?: string | null;
+  latitude: number;
+  longitude: number;
+  recorded_at?: string | null;
+};
 
-    console.log("GPS REALTIME COORDINATES:", {
-      driverIdReceived: gpsEvent.driver_id,
-      latitude: gpsEvent.latitude,
-      longitude: gpsEvent.longitude,
-      receivedAt: new Date().toISOString(),
-    });
+console.log("GPS REALTIME COORDINATES:", {
+  eventId: gpsEvent.id,
+  driverIdReceived: gpsEvent.driver_id,
+  loadIdReceived: gpsEvent.load_id,
+  latitude: gpsEvent.latitude,
+  longitude: gpsEvent.longitude,
+  recordedAt: gpsEvent.recorded_at,
+  receivedAt: new Date().toISOString(),
+});
 
     setLastLocation({
       lat: gpsEvent.latitude,
@@ -1612,309 +1618,201 @@ channel.on(
     return true;
   }
 
-  async function processSequenceArrival(location: GPSLocation): Promise<boolean> {
-    if (sequenceProcessing.current) return false;
-    sequenceProcessing.current = true;
+  
+async function processSequenceArrival(
+  arrivedStop: {
+    id: string;
+    stop_order: number;
+    stop_type: string;
+  }
+): Promise<boolean> {
+  if (sequenceProcessing.current) return false;
 
-    try {
-      if (
-        !selectedDriverId ||
-        !selectedLoadId ||
-        !Number.isFinite(location.lat) ||
-        !Number.isFinite(location.lng)
-      ) {
-        return false;
-      }
+  sequenceProcessing.current = true;
 
-      const driverId = selectedDriverId;
-      const loadId = selectedLoadId;
+  try {
+    if (!selectedDriverId || !selectedLoadId || !arrivedStop?.id) {
+      return false;
+    }
 
-      const { data: loadRecord, error: loadCheckError } = await supabase
+    const driverId = selectedDriverId;
+    const loadId = selectedLoadId;
+
+    const { data: loadRecord, error: loadCheckError } =
+      await supabase
         .from("loads")
         .select("id, driver_id, status")
         .eq("id", loadId)
         .eq("driver_id", driverId)
+        .neq("status", "cancelled")
         .maybeSingle();
 
-      if (loadCheckError || !loadRecord) {
-        console.error("SEQUENCE ENGINE - LOAD CHECK ERROR:", loadCheckError);
-        return false;
-      }
+    if (loadCheckError || !loadRecord) {
+      console.error(
+        "SEQUENCE ENGINE - LOAD CHECK ERROR:",
+        loadCheckError
+      );
+      return false;
+    }
 
-      const currentStop = await getCurrentSequenceStop(loadId);
-      if (!currentStop) return false;
+    const currentStop = await getCurrentSequenceStop(loadId);
 
-      if (
-        currentStop.latitude == null ||
-        currentStop.longitude == null ||
-        !Number.isFinite(currentStop.latitude) ||
-        !Number.isFinite(currentStop.longitude)
-      ) {
-        console.error("SEQUENCE ENGINE - INVALID STOP COORDINATES:", currentStop);
-        return false;
-      }
+    if (!currentStop || currentStop.id !== arrivedStop.id) {
+      console.warn("SEQUENCE ENGINE - STALE ARRIVAL IGNORED:", {
+        arrivedStopId: arrivedStop.id,
+        currentStopId: currentStop?.id ?? null,
+      });
+      return false;
+    }
 
-      const stopType = String(currentStop.stop_type ?? "").trim().toLowerCase();
-      const stopStatus = String(currentStop.status ?? "").trim().toLowerCase();
+    const stopType = String(currentStop.stop_type ?? "")
+      .trim()
+      .toLowerCase();
 
-     
-const distanceMiles = calculateDistanceMiles(
-  location.lat,
-  location.lng,
-  currentStop.latitude,
-  currentStop.longitude
-);
+    if (stopType !== "pickup" && stopType !== "delivery") {
+      console.error(
+        "SEQUENCE ENGINE - UNKNOWN STOP TYPE:",
+        currentStop.stop_type
+      );
+      return false;
+    }
 
-const arrivalRadiusMiles = 0.1;
+    const nextStopStatus =
+      stopType === "pickup" ? "at_pickup" : "at_delivery";
 
-console.log("SEQUENCE ARRIVAL DEBUG:", {
-  loadId,
-  stopId: currentStop.id,
-  stopOrder: currentStop.stop_order,
-  stopType,
-  stopStatus,
-  driverLat: location.lat,
-  driverLng: location.lng,
-  stopLat: currentStop.latitude,
-  stopLng: currentStop.longitude,
-  distanceMiles,
-  arrivalRadiusMiles,
-});
+    // No volver a procesar una parada que ya cambió de estado.
+    if (currentStop.status !== "pending") {
+      console.log("SEQUENCE ENGINE - STOP ALREADY PROCESSED:", {
+        stopId: currentStop.id,
+        status: currentStop.status,
+      });
+      return false;
+    }
 
-if (!Number.isFinite(distanceMiles) || distanceMiles < 0) return false;
+    // Registrar la llegada a la parada exacta confirmada por el mapa.
+    const { data: updatedStop, error: stopError } = await supabase
+      .from("load_stops")
+      .update({ status: nextStopStatus })
+      .eq("id", currentStop.id)
+      .eq("load_id", loadId)
+      .eq("status", "pending")
+      .select("id, status")
+      .maybeSingle();
 
-if (distanceMiles <= arrivalRadiusMiles && stopStatus === "pending") {
-  console.log("¡Llegaste al punto de recogida! Actualizando estado a 'at_pickup'...");
+    if (stopError || !updatedStop) {
+      console.error("SEQUENCE ENGINE - STOP UPDATE ERROR:", stopError);
+      return false;
+    }
 
-        const { data: arrivedStop, error: arriveError } = await supabase
-          .from("load_stops")
-          .update({ status: "at_pickup" })
-          .eq("id", currentStop.id)
-          .eq("status", "pending")
-          .select("id, status")
-          .maybeSingle();
+    // Sincronizar el estado de la carga.
+    const { data: updatedLoad, error: loadError } = await supabase
+      .from("loads")
+      .update({ status: nextStopStatus })
+      .eq("id", loadId)
+      .eq("driver_id", driverId)
+      .select(LOAD_SELECT)
+      .maybeSingle();
 
-        if (arriveError || !arrivedStop) {
-          console.error("SEQUENCE ENGINE - ARRIVAL UPDATE ERROR:", arriveError);
-        } else {
-          console.log("Estado actualizado exitosamente a 'at_pickup'");
-        }
-      }
+    if (loadError || !updatedLoad) {
+      console.error("SEQUENCE ENGINE - LOAD UPDATE ERROR:", loadError);
 
-      const restoreStopStatus = async (
-        expectedStatus: string,
-        originalStatus: string
-      ): Promise<void> => {
-        const { error } = await supabase
-          .from("load_stops")
-          .update({ status: originalStatus })
-          .eq("id", currentStop.id)
-          .eq("status", expectedStatus);
-
-        if (error) {
-          console.error("SEQUENCE ENGINE - STOP ROLLBACK ERROR:", error);
-        }
-      };
-
-      const updateDriverStatus = async (status: "driving" | "on_duty"): Promise<boolean> => {
-        const { data, error } = await supabase
-          .from("drivers")
-          .update({ status })
-          .eq("id", driverId)
-          .select("id, status")
-          .maybeSingle();
-
-        if (error || !data || data.status !== status) {
-          console.error("SEQUENCE ENGINE - DRIVER STATUS ERROR:", error);
-          return false;
-        }
-
-        setDrivers((current) =>
-          current.map((driver) => (driver.id === driverId ? { ...driver, status } : driver))
-        );
-
-        setDriverWorkStatus(status);
-        return true;
-      };
-
-      if (stopType === "pickup" && stopStatus === "at_pickup") {
-        const { data: completedPickup, error: pickupError } = await supabase
-          .from("load_stops")
-          .update({ status: "completed" })
-          .eq("id", currentStop.id)
-          .eq("status", currentStop.status)
-          .select("id, status")
-          .maybeSingle();
-
-        if (pickupError || !completedPickup) {
-          console.error("SEQUENCE ENGINE - PICKUP COMPLETE ERROR:", pickupError);
-          return false;
-        }
-
-        // 🔍 BÚSQUEDA ACTUAL DE LA CARGA (Cámbiala para que ignore las canceladas)
-        const { data: loadRecord, error: loadCheckError } = await supabase
-          .from("loads")
-          .select("id, driver_id, status")
-          .eq("id", loadId)
-          .eq("driver_id", driverId)
-          .neq("status", "cancelled") // 👈 ¡Agrega esta línea para descartar canceladas automáticamente!
-          .maybeSingle();
-
-        if (loadCheckError || !loadRecord) {
-          console.error("SEQUENCE ENGINE - PICKUP TRANSIT ERROR:", loadCheckError);
-          await restoreStopStatus("completed", currentStop.status);
-          return false;
-        }
-
-        const driverUpdated = await updateDriverStatus("driving");
-
-        if (!driverUpdated) {
-          await supabase
-            .from("loads")
-            .update({ status: loadRecord.status })
-            .eq("id", loadId)
-            .eq("driver_id", driverId)
-            .eq("status", "in_transit");
-
-          await restoreStopStatus("completed", currentStop.status);
-          return false;
-        }
-
-        const hosSaved = await setHosStatus("Driving");
-
-        if (!hosSaved) {
-          console.error("SEQUENCE ENGINE - HOS DRIVING EVENT FAILED");
-          await supabase
-            .from("drivers")
-            .update({ status: "on_duty" })
-            .eq("id", driverId)
-            .eq("status", "driving");
-
-          await supabase
-            .from("loads")
-            .update({ status: loadRecord.status })
-            .eq("id", loadId)
-            .eq("driver_id", driverId)
-            .eq("status", "in_transit");
-
-          await restoreStopStatus("completed", currentStop.status);
-          setDriverWorkStatus("on_duty");
-          return false;
-        }
-
-        setLoads((current) =>
-          current.map((load) => (load.id === loadRecord.id ? (loadRecord as Load) : load))
-        );
-
-        showMessage(
-          isES
-            ? `Pickup #${currentStop.stop_order} completado. Continúa hacia la siguiente parada.`
-            : `Pickup #${currentStop.stop_order} completed. Continue to the next stop.`
-        );
-
-        return true;
-      }
-
-      if (stopStatus === "at_delivery") return false;
-      if (distanceMiles > arrivalRadiusMiles) return false;
-
-      let nextStopStatus: "at_pickup" | "at_delivery";
-
-      if (stopType === "pickup") {
-        nextStopStatus = "at_pickup";
-      } else if (stopType === "delivery") {
-        nextStopStatus = "at_delivery";
-      } else {
-        console.error("SEQUENCE ENGINE - UNKNOWN STOP TYPE:", currentStop.stop_type);
-        return false;
-      }
-
-      const { data: updatedStop, error: stopError } = await supabase
+      await supabase
         .from("load_stops")
-        .update({ status: nextStopStatus })
+        .update({ status: "pending" })
         .eq("id", currentStop.id)
-        .eq("status", currentStop.status)
-        .select("id, status")
-        .maybeSingle();
+        .eq("status", nextStopStatus);
 
-      if (stopError || !updatedStop) {
-        console.error("SEQUENCE ENGINE - STOP UPDATE ERROR:", stopError);
-        return false;
-      }
+      return false;
+    }
 
-      const nextLoadStatus = nextStopStatus === "at_pickup" ? "at_pickup" : "at_delivery";
+    const { data: updatedDriver, error: driverError } = await supabase
+      .from("drivers")
+      .update({ status: "on_duty" })
+      .eq("id", driverId)
+      .select("id, status")
+      .maybeSingle();
 
-      const { data: updatedLoad, error: loadError } = await supabase
+    if (driverError || !updatedDriver) {
+      console.error("SEQUENCE ENGINE - DRIVER UPDATE ERROR:", driverError);
+
+      await supabase
         .from("loads")
-        .update({ status: nextLoadStatus })
+        .update({ status: loadRecord.status })
         .eq("id", loadId)
         .eq("driver_id", driverId)
-        .select(LOAD_SELECT)
-        .maybeSingle();
+        .eq("status", nextStopStatus);
 
-      if (loadError || !updatedLoad) {
-        console.error("SEQUENCE ENGINE - LOAD UPDATE ERROR:", loadError);
-        await restoreStopStatus(nextStopStatus, currentStop.status);
-        return false;
-      }
+      await supabase
+        .from("load_stops")
+        .update({ status: "pending" })
+        .eq("id", currentStop.id)
+        .eq("status", nextStopStatus);
 
-      const driverUpdated = await updateDriverStatus("on_duty");
-
-      if (!driverUpdated) {
-        await supabase
-          .from("loads")
-          .update({ status: loadRecord.status })
-          .eq("id", loadId)
-          .eq("driver_id", driverId)
-          .eq("status", nextLoadStatus);
-
-        await restoreStopStatus(nextStopStatus, currentStop.status);
-        return false;
-      }
-
-      const hosSaved = await setHosStatus("On Duty");
-
-      if (!hosSaved) {
-        console.error("SEQUENCE ENGINE - HOS ON DUTY EVENT FAILED");
-        await supabase
-          .from("drivers")
-          .update({ status: "driving" })
-          .eq("id", driverId)
-          .eq("status", "on_duty");
-
-        await supabase
-          .from("loads")
-          .update({ status: loadRecord.status })
-          .eq("id", loadId)
-          .eq("driver_id", driverId)
-          .eq("status", nextLoadStatus);
-
-        await restoreStopStatus(nextStopStatus, currentStop.status);
-        setDriverWorkStatus("driving");
-        return false;
-      }
-
-      setLoads((current) =>
-        current.map((load) => (load.id === updatedLoad.id ? (updatedLoad as Load) : load))
-      );
-
-      showMessage(
-        isES
-          ? `Llegó al ${stopType === "pickup" ? "Pickup" : "Delivery"} #${currentStop.stop_order}.`
-          : `Arrived at ${stopType === "pickup" ? "Pickup" : "Delivery"} #${currentStop.stop_order}.`
-      );
-
-      return true;
-    } catch (error) {
-      console.error("SEQUENCE ENGINE - UNEXPECTED ERROR:", error);
       return false;
-    } finally {
-      sequenceProcessing.current = false;
     }
-  }
 
- 
-async function updateLoadStatus(status: string): Promise<boolean> {
+    const hosSaved = await setHosStatus("On Duty");
+
+    if (!hosSaved) {
+      console.error("SEQUENCE ENGINE - HOS ON DUTY EVENT FAILED");
+
+      await supabase
+        .from("drivers")
+        .update({ status: "driving" })
+        .eq("id", driverId)
+        .eq("status", "on_duty");
+
+      await supabase
+        .from("loads")
+        .update({ status: loadRecord.status })
+        .eq("id", loadId)
+        .eq("driver_id", driverId)
+        .eq("status", nextStopStatus);
+
+      await supabase
+        .from("load_stops")
+        .update({ status: "pending" })
+        .eq("id", currentStop.id)
+        .eq("status", nextStopStatus);
+
+      setDriverWorkStatus("driving");
+      return false;
+    }
+
+    setDrivers((current) =>
+      current.map((driver) =>
+        driver.id === driverId
+          ? { ...driver, status: "on_duty" }
+          : driver
+      )
+    );
+
+    setDriverWorkStatus("on_duty");
+
+    setLoads((current) =>
+      current.map((load) =>
+        load.id === updatedLoad.id
+          ? (updatedLoad as Load)
+          : load
+      )
+    );
+
+    showMessage(
+      isES
+        ? `Llegada confirmada: ${stopType === "pickup" ? "Pickup" : "Delivery"} #${currentStop.stop_order}.`
+        : `Arrival confirmed: ${stopType === "pickup" ? "Pickup" : "Delivery"} #${currentStop.stop_order}.`
+    );
+
+    return true;
+  } catch (error) {
+    console.error("SEQUENCE ENGINE - UNEXPECTED ERROR:", error);
+    return false;
+  } finally {
+    sequenceProcessing.current = false;
+  }
+}
+
+ async function updateLoadStatus(status: string): Promise<boolean> {
   if (!selectedLoad) {
     showMessage(text.selectLoadFirst);
     return false;
@@ -2539,7 +2437,7 @@ if (!gpsSaved) {
   loadId,
   gpsWatchId: gpsWatchId.current,
 });        
-  await processSequenceArrival(location);
+ // La llegada operativa ahora se procesa desde TruckMap mediante onArrival.
 
   if (gpsWatchId.current === null) return;
 
@@ -3417,11 +3315,16 @@ return (
               </p>
             </div>
 
-            <TruckMap
-              lastLocation={lastLocation}
-              destination={navigationStop}
-              isES={isES}
-            />
+            
+<TruckMap
+  lastLocation={lastLocation}
+  destination={navigationStop}
+  isES={isES}
+  onArrival={(stop) => {
+    void processSequenceArrival(stop);
+  }}
+/>
+
           </div>
 
           <div className="mt-4">

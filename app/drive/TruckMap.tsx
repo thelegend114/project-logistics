@@ -25,6 +25,7 @@ interface TruckMapProps {
   } | null;
   destination: NavigationStop | null;
   isES: boolean;
+    onArrival?: (stop: NavigationStop) => void;
 }
 
 interface NavigationStep {
@@ -283,9 +284,13 @@ export default function TruckMap({
   lastLocation,
   destination,
   isES,
+  onArrival,
 }: TruckMapProps) {
+
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
+  const arrivalNotifiedRef = useRef<string | null>(null);
+
   const truckMarkerRef = useRef<L.Marker | null>(null);
   const destinationMarkerRef = useRef<L.Marker | null>(null);
   const routeRef = useRef<L.Polyline | null>(null);
@@ -411,20 +416,6 @@ useEffect(() => {
   }
 
   const { lat, lng, heading } = lastLocation;
-  if (
-  typeof heading === "number" &&
-  Number.isFinite(heading) &&
-  heading >= 0 &&
-  heading <= 360
-) {
-  headingRef.current = heading;
-
-  const map = mapRef.current;
-
-  if (map && typeof map.setHeading === "function") {
-  map.setHeading(heading);
- }
-}
 
   if (
     typeof heading === "number" &&
@@ -433,6 +424,10 @@ useEffect(() => {
     heading <= 360
   ) {
     headingRef.current = heading;
+
+    if (typeof map.setHeading === "function") {
+      map.setHeading(heading);
+    }
   }
 
   const position = L.latLng(lat, lng);
@@ -449,9 +444,7 @@ useEffect(() => {
     truckMarkerRef.current.setIcon(icon);
   }
 
-  // Detectar llegada visual al destino.
-  // La actualización oficial del estado se realiza en Supabase
-  // desde el motor de secuencia de app/drive/page.tsx.
+  // Detectar llegada y notificar al flujo operativo.
   if (
     destination &&
     isValidCoordinate(destination.latitude, destination.longitude)
@@ -465,27 +458,8 @@ useEffect(() => {
       position.distanceTo(destinationPosition);
 
     if (distanceToDestination <= ARRIVAL_RADIUS_METERS) {
-      setNavigation((previous) => ({
-        ...previous,
-        instruction: isES
-          ? "Has llegado a la parada"
-          : "You have arrived at the stop",
-        roadName: destination.address ?? "",
-        distanceToManeuver: 0,
-        routeDistance: 0,
-        routeDuration: 0,
-        isOffRoute: false,
-        isArrived: true,
-        isCalculating: false,
-        routeError: false,
-      }));
-    } else {
-      setNavigation((previous) =>
-        previous.isArrived
-          ? { ...previous, isArrived: false }
-          : previous
-      );
-    }
+     return;
+   }
   }
 
   // Actualizar la siguiente maniobra.
@@ -585,7 +559,8 @@ useEffect(() => {
       duration: 0.4,
     });
   }
-}, [lastLocation, destination, isES]);
+}, [lastLocation, destination, isES, onArrival]);
+
 
   // Calcular y actualizar la ruta.
   useEffect(() => {

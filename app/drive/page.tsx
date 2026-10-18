@@ -1740,12 +1740,20 @@ export default function DriverPage() {
     stop_order: number;
     stop_type: string;
   }): Promise<boolean> {
-    if (sequenceProcessing.current) return false;
+    if (sequenceProcessing.current) {
+      console.warn("SEQUENCE ENGINE - ARRIVAL SKIPPED: already processing");
+      return false;
+    }
 
     sequenceProcessing.current = true;
 
     try {
       if (!selectedDriverId || !selectedLoadId || !arrivedStop?.id) {
+        console.warn("SEQUENCE ENGINE - ARRIVAL SKIPPED: missing ids", {
+          selectedDriverId,
+          selectedLoadId,
+          arrivedStopId: arrivedStop?.id ?? null,
+        });
         return false;
       }
 
@@ -3342,6 +3350,7 @@ export default function DriverPage() {
               isES={isES}
               onArrival={(arrivedStop?: { id: string; stop_order: number; stop_type: string }) => {
                 const target = arrivedStop ?? navigationStop;
+                console.log("PAGE ARRIVAL RECEIVED:", target);
                 if (target) void processSequenceArrival(target);
               }}
             />

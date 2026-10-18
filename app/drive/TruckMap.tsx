@@ -490,6 +490,14 @@ useEffect(() => {
           at: now,
         };
 
+        console.log("TRUCKMAP ARRIVAL NOTIFIED:", {
+          stopId: destination.id,
+          stopOrder: destination.stop_order,
+          distanceMeters: Math.round(distanceToDestination),
+          attempt: attempts,
+          hasHandler: Boolean(onArrivalRef.current),
+        });
+
         onArrivalRef.current?.(destination);
       }
 

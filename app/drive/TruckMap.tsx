@@ -25,7 +25,7 @@ interface TruckMapProps {
   } | null;
   destination: NavigationStop | null;
   isES: boolean;
-    onArrival?: (stop: NavigationStop) => void;
+  onArrival?: (stop: NavigationStop) => void;
 }
 
 interface NavigationStep {
@@ -56,6 +56,8 @@ const ROUTE_REFRESH_INTERVAL_MS = 30_000;
 const REROUTE_COOLDOWN_MS = 12_000;
 const MIN_REROUTE_MOVEMENT_METERS = 15;
 const ROUTE_RETRY_INTERVAL_MS = 15_000;
+const ARRIVAL_RETRY_MS = 20_000;
+const ARRIVAL_MAX_ATTEMPTS = 3;
 
 function initialNavigation(isES: boolean): RouteState {
   return {
@@ -289,7 +291,15 @@ export default function TruckMap({
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
-  const arrivalNotifiedRef = useRef<string | null>(null);
+  const arrivalNotifiedRef = useRef<{
+    id: string;
+    attempts: number;
+    at: number;
+  } | null>(null);
+
+  // Siempre apunta al onArrival más reciente de la página (evita cierres viejos).
+  const onArrivalRef = useRef<TruckMapProps["onArrival"]>(onArrival);
+  onArrivalRef.current = onArrival;
 
   const truckMarkerRef = useRef<L.Marker | null>(null);
   const destinationMarkerRef = useRef<L.Marker | null>(null);
@@ -458,8 +468,33 @@ useEffect(() => {
       position.distanceTo(destinationPosition);
 
     if (distanceToDestination <= ARRIVAL_RADIUS_METERS) {
-     return;
-   }
+      // CORREGIDO: antes solo hacía "return" y nunca avisaba a la página,
+      // por eso las paradas no pasaban a at_pickup / at_delivery.
+      const now = Date.now();
+      const notified = arrivalNotifiedRef.current;
+
+      let canNotify = true;
+      let attempts = 1;
+
+      if (notified && notified.id === destination.id) {
+        attempts = notified.attempts + 1;
+        canNotify =
+          notified.attempts < ARRIVAL_MAX_ATTEMPTS &&
+          now - notified.at >= ARRIVAL_RETRY_MS;
+      }
+
+      if (canNotify) {
+        arrivalNotifiedRef.current = {
+          id: destination.id,
+          attempts,
+          at: now,
+        };
+
+        onArrivalRef.current?.(destination);
+      }
+
+      return;
+    }
   }
 
   // Actualizar la siguiente maniobra.
@@ -559,7 +594,7 @@ useEffect(() => {
       duration: 0.4,
     });
   }
-}, [lastLocation, destination, isES, onArrival]);
+}, [lastLocation, destination, isES]);
 
 
   // Calcular y actualizar la ruta.
@@ -592,6 +627,7 @@ useEffect(() => {
       lastReroutePositionRef.current = null;
       lastRerouteTimeRef.current = 0;
       offRouteRef.current = false;
+      arrivalNotifiedRef.current = null;
 
       setNavigation(initialNavigation(isES));
       return;

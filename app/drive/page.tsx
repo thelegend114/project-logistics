@@ -65,7 +65,8 @@ type HOS = {
   location: string | null;
 };
 
-type Document = {
+// Renombrado: "Document" tapaba el tipo global del DOM.
+type LoadDocument = {
   id: string;
   load_id: string | null;
   driver_id: string | null;
@@ -96,6 +97,17 @@ type SequenceStop = {
   longitude: number | null;
   status: string;
 };
+
+type DocumentStop = {
+  id: string;
+  stop_order: number;
+  stop_type: string;
+  address: string | null;
+  city: string | null;
+  state: string | null;
+};
+
+type DriverWorkStatus = "off_duty" | "hold" | "available" | "on_duty" | "driving";
 
 const LOAD_SELECT =
   "id, load_number, broker_name, customer_name, origin_city, origin_state, pickup_address, destination_city, destination_state, delivery_address, pickup_date, delivery_date, miles, rate, status, driver_id, truck_id, trailer_id, pickup_unlocked";
@@ -396,6 +408,17 @@ export default function DriverPage() {
     upload: isES ? "Subir" : "Upload",
     uploading: isES ? "Subiendo..." : "Uploading...",
 
+    deliveryStop: isES ? "Parada de entrega (POD)" : "Delivery stop (POD)",
+    selectDeliveryStop: isES ? "Seleccionar parada de entrega" : "Select delivery stop",
+    noDeliveryStops: isES
+      ? "Esta carga no tiene paradas de entrega registradas."
+      : "This load has no delivery stops registered.",
+    invalidFileType: isES
+      ? "Tipo de archivo no permitido. Usa PDF, JPG, PNG o WEBP."
+      : "File type not allowed. Use PDF, JPG, PNG or WEBP.",
+    dismiss: isES ? "Cerrar" : "Dismiss",
+    gotIt: isES ? "Entendido" : "Got it",
+
     selectDriverFirst: isES ? "Selecciona primero un conductor." : "Select a driver first.",
     selectLoadFirst: isES ? "Selecciona primero una carga." : "Select a load first.",
     chooseFileFirst: isES ? "Selecciona primero un archivo." : "Choose a file first.",
@@ -421,8 +444,8 @@ export default function DriverPage() {
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [loads, setLoads] = useState<Load[]>([]);
   const [hosEvents, setHosEvents] = useState<HOS[]>([]);
-  const [documents, setDocuments] = useState<Document[]>([]);
-  const [previousLoadDocuments, setPreviousLoadDocuments] = useState<Document[]>([]);
+  const [documents, setDocuments] = useState<LoadDocument[]>([]);
+  const [previousLoadDocuments, setPreviousLoadDocuments] = useState<LoadDocument[]>([]);
 
   const [selectedDriverId, setSelectedDriverId] = useState("");
   const [selectedLoadId, setSelectedLoadId] = useState("");
@@ -433,17 +456,11 @@ export default function DriverPage() {
   const [userRole, setUserRole] = useState("");
   const [authUserId, setAuthUserId] = useState("");
 
-  
-const [driverWorkStatus, setDriverWorkStatus] = useState<
-  "off_duty" | "hold" | "available" | "on_duty" | "driving"
->("off_duty");
+  const [driverWorkStatus, setDriverWorkStatus] = useState<DriverWorkStatus>("off_duty");
 
-const isDriveBlocked = (
-  status: "off_duty" | "hold" | "available" | "on_duty" | "driving"
-): boolean => {
-  return status === "off_duty" || status === "hold";
-};
-
+  const isDriveBlocked = (status: DriverWorkStatus): boolean => {
+    return status === "off_duty" || status === "hold";
+  };
 
   const [authReady, setAuthReady] = useState(false);
 
@@ -454,52 +471,62 @@ const isDriveBlocked = (
   const [lastGpsReceivedAt, setLastGpsReceivedAt] = useState<number | null>(null);
   const [gpsClockNow, setGpsClockNow] = useState(Date.now());
 
-  const [navigationStop, setNavigationStop] =
-  useState<SequenceStop | null>(null);
-
+  const [navigationStop, setNavigationStop] = useState<SequenceStop | null>(null);
 
   const [documentModalOpen, setDocumentModalOpen] = useState(false);
   const [documentType, setDocumentType] = useState("POD");
 
-  const [documentStops, setDocumentStops] = useState<
-  {
-    id: string;
-    stop_order: number;
-    stop_type: string;
-    address: string | null;
-    city: string | null;
-    state: string | null;
-  }[]
-  >([]);
-
-  const [selectedDocumentStopId, setSelectedDocumentStopId] =
-  useState(""); 
+  const [documentStops, setDocumentStops] = useState<DocumentStop[]>([]);
+  const [selectedDocumentStopId, setSelectedDocumentStopId] = useState("");
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [uploadingDocument, setUploadingDocument] = useState(false);
 
   const [clockNow, setClockNow] = useState(Date.now());
+  const [realtimeRetryKey, setRealtimeRetryKey] = useState(0);
 
   const gpsWatchId = useRef<number | null>(null);
   const gpsInsertInProgress = useRef(false);
   const sequenceProcessing = useRef(false);
+  const messageTimer = useRef<number | null>(null);
+  const realtimeRetryCount = useRef(0);
+  const startGpsRef = useRef<() => void>(() => {});
 
   function normalizeLoadStatus(status: string | null) {
     return status?.toLowerCase().replace(/ /g, "_") || "";
   }
 
+  // CORREGIDO: cancela el temporizador anterior para que un mensaje nuevo
+  // no sea borrado antes de tiempo por el timeout del mensaje previo.
   function showMessage(value: string) {
+    if (messageTimer.current !== null) {
+      window.clearTimeout(messageTimer.current);
+      messageTimer.current = null;
+    }
+
     setMessage(value);
-    window.setTimeout(() => {
+
+    messageTimer.current = window.setTimeout(() => {
       setMessage("");
-    }, 4000);
+      messageTimer.current = null;
+    }, 6000);
+  }
+
+  function dismissMessage() {
+    if (messageTimer.current !== null) {
+      window.clearTimeout(messageTimer.current);
+      messageTimer.current = null;
+    }
+    setMessage("");
   }
 
   function getCurrentLoad(loadList: Load[]) {
     return (
       loadList.find((load) => {
         const status = normalizeLoadStatus(load.status);
+
         return (
           status === "assigned" ||
+          status === "in_progress" ||
           status === "at_pickup" ||
           status === "in_transit" ||
           status === "at_delivery"
@@ -535,7 +562,7 @@ const isDriveBlocked = (
       .limit(500);
 
     if (error) {
-      setMessage(`HOS error: ${error.message}`);
+      showMessage(`HOS error: ${error.message}`);
       return;
     }
 
@@ -550,11 +577,11 @@ const isDriveBlocked = (
       .order("uploaded_at", { ascending: false });
 
     if (error) {
-      setMessage(`Documents error: ${error.message}`);
+      showMessage(`Documents error: ${error.message}`);
       return;
     }
 
-    setDocuments((data || []) as Document[]);
+    setDocuments((data || []) as LoadDocument[]);
   }
 
   async function loadPreviousLoadDocuments(loadId: string) {
@@ -570,7 +597,28 @@ const isDriveBlocked = (
       return;
     }
 
-    setPreviousLoadDocuments((data || []) as Document[]);
+    setPreviousLoadDocuments((data || []) as LoadDocument[]);
+  }
+
+  async function dismissLoadAlert(alert: Alert) {
+    // Se quita de pantalla de inmediato y luego se marca como vista en la base de datos.
+    setLoadAlerts((current) =>
+      current.filter((item) => String(item.load_id) !== String(alert.load_id))
+    );
+
+    if (!selectedDriverId || !alert.load_id) return;
+
+    const { error } = await supabase
+      .from("alerts")
+      .update({ seen_at: new Date().toISOString() })
+      .eq("driver_id", selectedDriverId)
+      .eq("load_id", alert.load_id)
+      .eq("alert_type", "load_assigned")
+      .is("seen_at", null);
+
+    if (error) {
+      console.error("ALERT MARK SEEN ERROR:", error);
+    }
   }
 
   async function setCurrentLoad(loadId: string): Promise<boolean> {
@@ -600,7 +648,9 @@ const isDriveBlocked = (
 
       const status = normalizeLoadStatus(selectedLoad.status);
 
-      if (!["assigned", "at_pickup", "in_transit", "at_delivery"].includes(status)) {
+      if (
+        !["assigned", "in_progress", "at_pickup", "in_transit", "at_delivery"].includes(status)
+      ) {
         showMessage(
           isES
             ? "Esta carga no está disponible para iniciar."
@@ -679,10 +729,10 @@ const isDriveBlocked = (
 
     const location = lastLocation
       ? JSON.stringify({
-        latitude: lastLocation.lat,
-        longitude: lastLocation.lng,
-        accuracy: lastLocation.accuracy,
-      })
+          latitude: lastLocation.lat,
+          longitude: lastLocation.lng,
+          accuracy: lastLocation.accuracy,
+        })
       : null;
 
     const { error } = await supabase.from("hos_events").insert({
@@ -765,9 +815,7 @@ const isDriveBlocked = (
     );
 
     if (String(selectedDriverId) === String(data.id)) {
-      setDriverWorkStatus(
-        normalizedWorkStatus as "off_duty" | "hold" | "available" | "on_duty" | "driving"
-      );
+      setDriverWorkStatus(normalizedWorkStatus as DriverWorkStatus);
     }
 
     if (nextStatus === "hold" || nextStatus === "off_duty") {
@@ -826,12 +874,6 @@ const isDriveBlocked = (
     }
 
     setSelectedDriverId(data.id);
-    setDriverWorkStatus(data.status as "off_duty" | "hold" | "available");
-    setDrivers((currentDrivers) =>
-      currentDrivers.map((driver) =>
-        driver.id === data.id ? { ...driver, status: data.status } : driver
-      )
-    );
   }
 
   const selectedDriver = useMemo(
@@ -853,6 +895,16 @@ const isDriveBlocked = (
       });
   }, [loads, selectedDriverId]);
 
+  const selectableLoads = useMemo(
+    () =>
+      driverLoads.filter((load) =>
+        ["assigned", "at_pickup", "in_transit", "at_delivery"].includes(
+          normalizeLoadStatus(load.status)
+        )
+      ),
+    [driverLoads]
+  );
+
   const selectedLoad = useMemo(
     () => driverLoads.find((load) => String(load.id) === String(selectedLoadId)) || null,
     [driverLoads, selectedLoadId]
@@ -863,89 +915,77 @@ const isDriveBlocked = (
   const previousDocumentsComplete = useMemo(() => {
     return ["POD", "BOL"].every((type) =>
       previousLoadDocuments.some(
-        (document) => document.document_type === type && document.status === "uploaded"
+        (doc) => doc.document_type === type && doc.status === "uploaded"
       )
     );
   }, [previousLoadDocuments]);
 
-
   useEffect(() => {
-  const timer = window.setInterval(() => {
-    setGpsClockNow(Date.now());
-  }, 10000);
+    const timer = window.setInterval(() => {
+      setGpsClockNow(Date.now());
+    }, 10000);
 
-  return () => window.clearInterval(timer);
-}, []);
+    return () => window.clearInterval(timer);
+  }, []);
 
-const gpsReceivingRecently =
-  lastGpsReceivedAt !== null &&
-  gpsClockNow - lastGpsReceivedAt < 90000;
+  const gpsReceivingRecently =
+    lastGpsReceivedAt !== null && gpsClockNow - lastGpsReceivedAt < 90000;
 
-const gpsSignalActive = gpsTracking || gpsReceivingRecently;
+  const gpsSignalActive = gpsTracking || gpsReceivingRecently;
 
-const gpsDisplayStatus = gpsTracking
-  ? gpsStatus
-  : gpsReceivingRecently
-    ? isES
-      ? "GPS recibido en tiempo real"
-      : "GPS received in real time"
-    : gpsStatus;
+  const gpsDisplayStatus = gpsTracking
+    ? gpsStatus
+    : gpsReceivingRecently
+      ? isES
+        ? "GPS recibido en tiempo real"
+        : "GPS received in real time"
+      : gpsStatus;
 
+  // CORREGIDO: antes faltaba el addEventListener, por lo que la reconexión
+  // del GPS al volver a la aplicación nunca se ejecutaba.
   useEffect(() => {
     const handleVisibilityChange = () => {
-      if (document.visibilityState === "visible") {
-        const isShiftActive =
-          driverWorkStatus === "driving" ||
-          driverWorkStatus === "on_duty" ||
-          driverWorkStatus === "available";
+      if (document.visibilityState !== "visible") return;
 
-        if (isShiftActive && gpsWatchId.current === null) {
-          console.log("Uber Guard: Reconectando GPS tras volver a la aplicación...");
-          startGpsTracking();
-        }
+      // "available" no se incluye: el botón Available detiene el GPS a propósito.
+      const isShiftActive = driverWorkStatus === "driving" || driverWorkStatus === "on_duty";
+
+      if (isShiftActive && gpsWatchId.current === null) {
+        console.log("Uber Guard: Reconectando GPS tras volver a la aplicación...");
+        startGpsRef.current();
       }
     };
-    
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [driverWorkStatus]);
 
-  
-useEffect(() => {
-  const rawStatus = selectedDriver?.status;
+  useEffect(() => {
+    const rawStatus = selectedDriver?.status;
 
-  if (!rawStatus) return;
+    if (!rawStatus) return;
 
-  const normalizedStatus = String(rawStatus)
-    .trim()
-    .toLowerCase()
-    .replace(/[\s-]+/g, "_");
+    const normalizedStatus = String(rawStatus)
+      .trim()
+      .toLowerCase()
+      .replace(/[\s-]+/g, "_");
 
-  const validStatuses = [
-    "off_duty",
-    "hold",
-    "available",
-    "on_duty",
-    "driving",
-  ] as const;
+    const validStatuses = ["off_duty", "hold", "available", "on_duty", "driving"] as const;
 
-  type DriverWorkStatus = (typeof validStatuses)[number];
+    const isValidStatus = (status: string): status is DriverWorkStatus => {
+      return validStatuses.some((validStatus) => validStatus === status);
+    };
 
-  const isValidStatus = (
-    status: string
-  ): status is DriverWorkStatus => {
-    return validStatuses.some((validStatus) => validStatus === status);
-  };
+    if (!isValidStatus(normalizedStatus)) {
+      console.warn("DRIVE: estado de conductor no reconocido:", rawStatus);
+      return;
+    }
 
-  if (!isValidStatus(normalizedStatus)) {
-    console.warn("DRIVE: estado de conductor no reconocido:", rawStatus);
-    return;
-  }
-
-  setDriverWorkStatus(normalizedStatus);
-}, [selectedDriver?.id, selectedDriver?.status]);
-
+    setDriverWorkStatus(normalizedStatus);
+  }, [selectedDriver?.id, selectedDriver?.status]);
 
   useEffect(() => {
     void loadInitialData();
@@ -956,6 +996,10 @@ useEffect(() => {
 
     return () => {
       window.clearInterval(timer);
+      if (messageTimer.current !== null) {
+        window.clearTimeout(messageTimer.current);
+        messageTimer.current = null;
+      }
       if (gpsWatchId.current !== null) {
         navigator.geolocation.clearWatch(gpsWatchId.current);
         gpsWatchId.current = null;
@@ -967,89 +1011,76 @@ useEffect(() => {
     if (!selectedDriverId) return;
 
     let isActive = true;
+    let retryTimer: number | null = null;
     const driverId = String(selectedDriverId);
 
     const channel = supabase.channel(`driver-channel-${driverId}`);
 
-    
-channel.on(
-  "postgres_changes",
-  {
-    event: "UPDATE",
-    schema: "public",
-    table: "drivers",
-  },
-  (payload) => {
-    if (!isActive) return;
+    channel.on(
+      "postgres_changes",
+      {
+        event: "UPDATE",
+        schema: "public",
+        table: "drivers",
+        filter: `id=eq.${driverId}`,
+      },
+      (payload) => {
+        if (!isActive) return;
 
-    // PRUEBA RAW: registrar el evento antes de filtrar por conductor.
-    console.log("REALTIME RAW DRIVERS EVENT:", payload);
+        console.log("REALTIME RAW DRIVERS EVENT:", payload);
 
-    const updatedDriver = payload.new as {
-      id: string;
-      status: string | null;
-      current_load_id: string | null;
-    };
+        const updatedDriver = payload.new as {
+          id: string;
+          status: string | null;
+          current_load_id: string | null;
+        };
 
-    const receivedDriverId = String(updatedDriver.id);
+        const receivedDriverId = String(updatedDriver.id);
 
-    console.log("REALTIME DRIVER ID RECEIVED:", receivedDriverId);
-    console.log("REALTIME DRIVER STATUS RECEIVED:", updatedDriver.status);
+        console.log("REALTIME DRIVER ID RECEIVED:", receivedDriverId);
+        console.log("REALTIME DRIVER STATUS RECEIVED:", updatedDriver.status);
 
-    // Ignorar los demás conductores después de registrar el RAW.
-    if (receivedDriverId !== driverId) {
-      console.log("REALTIME DRIVER IGNORED: different driver", {
-        receivedDriverId,
-        expectedDriverId: driverId,
-      });
-      return;
-    }
+        // Doble seguridad: ignorar cualquier otro conductor.
+        if (receivedDriverId !== driverId) {
+          console.log("REALTIME DRIVER IGNORED: different driver", {
+            receivedDriverId,
+            expectedDriverId: driverId,
+          });
+          return;
+        }
 
-    const normalizedStatus = String(
-      updatedDriver.status ?? ""
-    )
-      .trim()
-      .toLowerCase()
-      .replace(/[\s-]+/g, "_");
+        const normalizedStatus = String(updatedDriver.status ?? "")
+          .trim()
+          .toLowerCase()
+          .replace(/[\s-]+/g, "_");
 
-    console.log("DRIVE REALTIME DRIVER UPDATE:", {
-      id: receivedDriverId,
-      status: normalizedStatus,
-      current_load_id: updatedDriver.current_load_id,
-    });
+        console.log("DRIVE REALTIME DRIVER UPDATE:", {
+          id: receivedDriverId,
+          status: normalizedStatus,
+          current_load_id: updatedDriver.current_load_id,
+        });
 
-    setDrivers((currentDrivers) =>
-      currentDrivers.map((driver) =>
-        String(driver.id) === receivedDriverId
-          ? {
-              ...driver,
-              status: updatedDriver.status ?? driver.status,
-              current_load_id: updatedDriver.current_load_id,
-            }
-          : driver
-      )
+        setDrivers((currentDrivers) =>
+          currentDrivers.map((driver) =>
+            String(driver.id) === receivedDriverId
+              ? {
+                  ...driver,
+                  status: updatedDriver.status ?? driver.status,
+                  current_load_id: updatedDriver.current_load_id,
+                }
+              : driver
+          )
+        );
+
+        const validStatuses = ["off_duty", "hold", "available", "on_duty", "driving"] as const;
+
+        if (validStatuses.some((status) => status === normalizedStatus)) {
+          setDriverWorkStatus(normalizedStatus as DriverWorkStatus);
+        }
+
+        setSelectedLoadId(updatedDriver.current_load_id ?? "");
+      }
     );
-
-    const validStatuses = [
-      "off_duty",
-      "hold",
-      "available",
-      "on_duty",
-      "driving",
-    ] as const;
-
-    if (
-      validStatuses.some((status) => status === normalizedStatus)
-    ) {
-      setDriverWorkStatus(
-        normalizedStatus as (typeof validStatuses)[number]
-      );
-    }
-
-    setSelectedLoadId(updatedDriver.current_load_id ?? "");
-  }
-);
-
 
     channel.on(
       "postgres_changes",
@@ -1125,53 +1156,52 @@ channel.on(
       }
     );
 
-   
-channel.on(
-  "postgres_changes",
-  {
-    event: "INSERT",
-    schema: "public",
-    table: "gps_events",
-    filter: `driver_id=eq.${driverId}`,
-  },
-  (payload) => {
-   console.log("REALTIME RAW GPS EVENT:", payload);
+    channel.on(
+      "postgres_changes",
+      {
+        event: "INSERT",
+        schema: "public",
+        table: "gps_events",
+        filter: `driver_id=eq.${driverId}`,
+      },
+      (payload) => {
+        console.log("REALTIME RAW GPS EVENT:", payload);
 
-if (!isActive) {
-  console.log("GPS REALTIME IGNORED: subscription inactive");
-  return;
-}
+        if (!isActive) {
+          console.log("GPS REALTIME IGNORED: subscription inactive");
+          return;
+        }
 
-const gpsEvent = payload.new as {
-  id?: string;
-  driver_id?: string;
-  load_id?: string | null;
-  latitude: number;
-  longitude: number;
-  recorded_at?: string | null;
-};
+        const gpsEvent = payload.new as {
+          id?: string;
+          driver_id?: string;
+          load_id?: string | null;
+          latitude: number;
+          longitude: number;
+          recorded_at?: string | null;
+        };
 
-console.log("GPS REALTIME COORDINATES:", {
-  eventId: gpsEvent.id,
-  driverIdReceived: gpsEvent.driver_id,
-  loadIdReceived: gpsEvent.load_id,
-  latitude: gpsEvent.latitude,
-  longitude: gpsEvent.longitude,
-  recordedAt: gpsEvent.recorded_at,
-  receivedAt: new Date().toISOString(),
-});
+        console.log("GPS REALTIME COORDINATES:", {
+          eventId: gpsEvent.id,
+          driverIdReceived: gpsEvent.driver_id,
+          loadIdReceived: gpsEvent.load_id,
+          latitude: gpsEvent.latitude,
+          longitude: gpsEvent.longitude,
+          recordedAt: gpsEvent.recorded_at,
+          receivedAt: new Date().toISOString(),
+        });
 
-    setLastLocation({
-      lat: gpsEvent.latitude,
-      lng: gpsEvent.longitude,
-      accuracy: 0,
-      speed: null,
-      heading: null,
-    });
+        setLastLocation({
+          lat: gpsEvent.latitude,
+          lng: gpsEvent.longitude,
+          accuracy: 0,
+          speed: null,
+          heading: null,
+        });
 
-    setLastGpsReceivedAt(Date.now());
-  }
-);
+        setLastGpsReceivedAt(Date.now());
+      }
+    );
 
     channel.on(
       "postgres_changes",
@@ -1190,31 +1220,50 @@ console.log("GPS REALTIME COORDINATES:", {
     channel.subscribe((status, err) => {
       if (!isActive) return;
       console.log("DRIVE REALTIME SUBSCRIBE STATUS:", status, err);
+
+      if (status === "SUBSCRIBED") {
+        realtimeRetryCount.current = 0;
+        return;
+      }
+
       if (err || status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
         console.error("DRIVE REALTIME CONNECTION FAILED:", { status, error: err });
 
-        // Intentar reconexión limpia tras un fallo de red o socket cerrado (1006)
-        setTimeout(() => {
-          if (!isActive) return;
-          console.log("Intentando reconectar canal de Realtime...");
-          void supabase.removeChannel(channel);
-        }, 5000);
+        // CORREGIDO: antes solo se eliminaba el canal y nunca se volvía a suscribir.
+        // Ahora se reinicia este efecto (máximo 5 intentos) para crear un canal nuevo.
+        if (realtimeRetryCount.current < 5 && retryTimer === null) {
+          realtimeRetryCount.current += 1;
+
+          retryTimer = window.setTimeout(() => {
+            retryTimer = null;
+            if (!isActive) return;
+            console.log("Intentando reconectar canal de Realtime...");
+            setRealtimeRetryKey((key) => key + 1);
+          }, 5000);
+        }
       }
     });
 
     return () => {
       isActive = false;
+      if (retryTimer !== null) {
+        window.clearTimeout(retryTimer);
+        retryTimer = null;
+      }
       void supabase.removeChannel(channel);
     };
-  }, [selectedDriverId]);
+  }, [selectedDriverId, realtimeRetryKey]);
 
   useEffect(() => {
-    if (!selectedDriverId) return;
+    if (!selectedDriverId) {
+      setSelectedLoadId("");
+      return;
+    }
 
     const driverLoadsForEffect = loads.filter(
       (load) =>
         String(load.driver_id) === String(selectedDriverId) &&
-        ["assigned", "at_pickup", "in_transit", "at_delivery"].includes(
+        ["assigned", "in_progress", "at_pickup", "in_transit", "at_delivery"].includes(
           normalizeLoadStatus(load.status)
         )
     );
@@ -1229,8 +1278,8 @@ console.log("GPS REALTIME COORDINATES:", {
 
     const savedCurrentLoad = currentDriver?.current_load_id
       ? driverLoadsForEffect.find(
-        (load) => String(load.id) === String(currentDriver.current_load_id)
-      )
+          (load) => String(load.id) === String(currentDriver.current_load_id)
+        )
       : null;
 
     if (savedCurrentLoad) {
@@ -1238,10 +1287,11 @@ console.log("GPS REALTIME COORDINATES:", {
       return;
     }
 
-    const active = driverLoadsForEffect.find((load) => {
-      const status = normalizeLoadStatus(load.status);
-      return status === "at_pickup" || status === "in_transit" || status === "at_delivery";
-    });
+    const active = driverLoadsForEffect.find((load) =>
+      ["in_progress", "at_pickup", "in_transit", "at_delivery"].includes(
+        normalizeLoadStatus(load.status)
+      )
+    );
 
     if (active) {
       setSelectedLoadId(active.id);
@@ -1288,6 +1338,65 @@ console.log("GPS REALTIME COORDINATES:", {
     }
   }, [selectedLoadId]);
 
+  // NUEVO: cargar las paradas de la carga cuando se abre el modal de documentos.
+  // Sin esto el selector de parada del POD no tenía datos ni existía en pantalla.
+  useEffect(() => {
+    if (!documentModalOpen || !selectedLoadId) {
+      setDocumentStops([]);
+      return;
+    }
+
+    let cancelled = false;
+
+    void (async () => {
+      const { data, error } = await supabase
+        .from("load_stops")
+        .select("id, stop_order, stop_type, address, city, state")
+        .eq("load_id", selectedLoadId)
+        .order("stop_order", { ascending: true });
+
+      if (cancelled) return;
+
+      if (error) {
+        console.error("DOCUMENT STOPS LOAD ERROR:", error);
+        setDocumentStops([]);
+        return;
+      }
+
+      setDocumentStops(
+        (data || []).map((stop) => ({
+          id: String(stop.id),
+          stop_order: Number(stop.stop_order),
+          stop_type: String(stop.stop_type ?? "").trim().toLowerCase(),
+          address: stop.address ?? null,
+          city: stop.city ?? null,
+          state: stop.state ?? null,
+        }))
+      );
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [documentModalOpen, selectedLoadId]);
+
+  const deliveryStops = useMemo(
+    () =>
+      documentStops.filter((stop) => ["delivery", "dropoff", "drop_off"].includes(stop.stop_type)),
+    [documentStops]
+  );
+
+  // Si el POD solo tiene una parada de entrega posible, se selecciona sola.
+  useEffect(() => {
+    if (!documentModalOpen) return;
+    if (String(documentType).trim().toUpperCase() !== "POD") return;
+    if (selectedDocumentStopId) return;
+
+    if (deliveryStops.length === 1) {
+      setSelectedDocumentStopId(deliveryStops[0].id);
+    }
+  }, [documentModalOpen, documentType, deliveryStops, selectedDocumentStopId]);
+
   async function loadInitialData() {
     setLoading(true);
     setAuthReady(false);
@@ -1320,7 +1429,7 @@ console.log("GPS REALTIME COORDINATES:", {
         .maybeSingle();
 
       if (profileError) {
-        setMessage(`Profile error: ${profileError.message}`);
+        showMessage(`Profile error: ${profileError.message}`);
       }
 
       const role = profile?.role?.toLowerCase() || "";
@@ -1361,13 +1470,17 @@ console.log("GPS REALTIME COORDINATES:", {
         setDrivers([driver]);
         setSelectedDriverId(driver.id);
 
-        const { data: alertData } = await supabase
+        const { data: alertData, error: alertsError } = await supabase
           .from("alerts")
           .select("id, driver_id, load_id, alert_type, severity, title, message, status, seen_at, created_at")
           .eq("driver_id", driver.id)
           .eq("alert_type", "load_assigned")
           .is("seen_at", null)
           .order("created_at", { ascending: false });
+
+        if (alertsError) {
+          console.error("ALERTS LOAD ERROR:", alertsError);
+        }
 
         setLoadAlerts((alertData || []) as Alert[]);
 
@@ -1378,7 +1491,7 @@ console.log("GPS REALTIME COORDINATES:", {
           .order("pickup_date", { ascending: true, nullsFirst: true });
 
         if (driverLoadsError) {
-          setMessage(`Load error: ${driverLoadsError.message}`);
+          showMessage(`Load error: ${driverLoadsError.message}`);
           return;
         }
 
@@ -1427,9 +1540,7 @@ console.log("GPS REALTIME COORDINATES:", {
           .replace(/ /g, "_");
 
         if (["off_duty", "hold", "available", "on_duty", "driving"].includes(normalizedDriverStatus)) {
-          setDriverWorkStatus(
-            normalizedDriverStatus as "off_duty" | "hold" | "available" | "on_duty" | "driving"
-          );
+          setDriverWorkStatus(normalizedDriverStatus as DriverWorkStatus);
         }
 
         await loadDriverHos(driver.id);
@@ -1440,6 +1551,14 @@ console.log("GPS REALTIME COORDINATES:", {
         supabase.from("drivers").select(driverSelect).order("full_name", { ascending: true }),
         supabase.from("loads").select(LOAD_SELECT).order("created_at", { ascending: false }),
       ]);
+
+      if (driversResult.error) {
+        showMessage(`Driver error: ${driversResult.error.message}`);
+      }
+
+      if (loadsResult.error) {
+        showMessage(`Load error: ${loadsResult.error.message}`);
+      }
 
       const driverData = (driversResult.data || []) as Driver[];
       const loadData = (loadsResult.data || []) as Load[];
@@ -1486,7 +1605,7 @@ console.log("GPS REALTIME COORDINATES:", {
       }
     } catch (error) {
       console.error("DRIVE INITIALIZATION ERROR:", error);
-      setMessage(
+      showMessage(
         error instanceof Error
           ? `Drive initialization error: ${error.message}`
           : "Drive initialization error."
@@ -1529,9 +1648,7 @@ console.log("GPS REALTIME COORDINATES:", {
       return false;
     }
 
-    if (
-      latestHosEvent?.event_type?.trim().toLowerCase() === "home time"
-    ) {
+    if (latestHosEvent?.event_type?.trim().toLowerCase() === "home time") {
       showMessage(
         isES
           ? "No puedes iniciar la conducción mientras tu estado HOS sea Home Time."
@@ -1618,28 +1735,24 @@ console.log("GPS REALTIME COORDINATES:", {
     return true;
   }
 
-  
-async function processSequenceArrival(
-  arrivedStop: {
+  async function processSequenceArrival(arrivedStop: {
     id: string;
     stop_order: number;
     stop_type: string;
-  }
-): Promise<boolean> {
-  if (sequenceProcessing.current) return false;
+  }): Promise<boolean> {
+    if (sequenceProcessing.current) return false;
 
-  sequenceProcessing.current = true;
+    sequenceProcessing.current = true;
 
-  try {
-    if (!selectedDriverId || !selectedLoadId || !arrivedStop?.id) {
-      return false;
-    }
+    try {
+      if (!selectedDriverId || !selectedLoadId || !arrivedStop?.id) {
+        return false;
+      }
 
-    const driverId = selectedDriverId;
-    const loadId = selectedLoadId;
+      const driverId = selectedDriverId;
+      const loadId = selectedLoadId;
 
-    const { data: loadRecord, error: loadCheckError } =
-      await supabase
+      const { data: loadRecord, error: loadCheckError } = await supabase
         .from("loads")
         .select("id, driver_id, status")
         .eq("id", loadId)
@@ -1647,353 +1760,285 @@ async function processSequenceArrival(
         .neq("status", "cancelled")
         .maybeSingle();
 
-    if (loadCheckError || !loadRecord) {
-      console.error(
-        "SEQUENCE ENGINE - LOAD CHECK ERROR:",
-        loadCheckError
-      );
-      return false;
-    }
+      if (loadCheckError || !loadRecord) {
+        console.error("SEQUENCE ENGINE - LOAD CHECK ERROR:", loadCheckError);
+        return false;
+      }
 
-    const currentStop = await getCurrentSequenceStop(loadId);
+      const currentStop = await getCurrentSequenceStop(loadId);
 
-    if (!currentStop || currentStop.id !== arrivedStop.id) {
-      console.warn("SEQUENCE ENGINE - STALE ARRIVAL IGNORED:", {
-        arrivedStopId: arrivedStop.id,
-        currentStopId: currentStop?.id ?? null,
-      });
-      return false;
-    }
+      if (!currentStop || currentStop.id !== arrivedStop.id) {
+        console.warn("SEQUENCE ENGINE - STALE ARRIVAL IGNORED:", {
+          arrivedStopId: arrivedStop.id,
+          currentStopId: currentStop?.id ?? null,
+        });
+        return false;
+      }
 
-    const stopType = String(currentStop.stop_type ?? "")
-      .trim()
-      .toLowerCase();
+      const stopType = String(currentStop.stop_type ?? "")
+        .trim()
+        .toLowerCase();
 
-    if (stopType !== "pickup" && stopType !== "delivery") {
-      console.error(
-        "SEQUENCE ENGINE - UNKNOWN STOP TYPE:",
-        currentStop.stop_type
-      );
-      return false;
-    }
+      if (stopType !== "pickup" && stopType !== "delivery") {
+        console.error("SEQUENCE ENGINE - UNKNOWN STOP TYPE:", currentStop.stop_type);
+        return false;
+      }
 
-    const nextStopStatus =
-      stopType === "pickup" ? "at_pickup" : "at_delivery";
+      const nextStopStatus = stopType === "pickup" ? "at_pickup" : "at_delivery";
 
-    // No volver a procesar una parada que ya cambió de estado.
-    if (currentStop.status !== "pending") {
-      console.log("SEQUENCE ENGINE - STOP ALREADY PROCESSED:", {
-        stopId: currentStop.id,
-        status: currentStop.status,
-      });
-      return false;
-    }
+      // No volver a procesar una parada que ya cambió de estado.
+      if (currentStop.status !== "pending") {
+        console.log("SEQUENCE ENGINE - STOP ALREADY PROCESSED:", {
+          stopId: currentStop.id,
+          status: currentStop.status,
+        });
+        return false;
+      }
 
-    // Registrar la llegada a la parada exacta confirmada por el mapa.
-    const { data: updatedStop, error: stopError } = await supabase
-      .from("load_stops")
-      .update({ status: nextStopStatus })
-      .eq("id", currentStop.id)
-      .eq("load_id", loadId)
-      .eq("status", "pending")
-      .select("id, status")
-      .maybeSingle();
-
-    if (stopError || !updatedStop) {
-      console.error("SEQUENCE ENGINE - STOP UPDATE ERROR:", stopError);
-      return false;
-    }
-
-    // Sincronizar el estado de la carga.
-    const { data: updatedLoad, error: loadError } = await supabase
-      .from("loads")
-      .update({ status: nextStopStatus })
-      .eq("id", loadId)
-      .eq("driver_id", driverId)
-      .select(LOAD_SELECT)
-      .maybeSingle();
-
-    if (loadError || !updatedLoad) {
-      console.error("SEQUENCE ENGINE - LOAD UPDATE ERROR:", loadError);
-
-      await supabase
+      // Registrar la llegada a la parada exacta confirmada por el mapa.
+      const { data: updatedStop, error: stopError } = await supabase
         .from("load_stops")
-        .update({ status: "pending" })
+        .update({ status: nextStopStatus })
         .eq("id", currentStop.id)
-        .eq("status", nextStopStatus);
+        .eq("load_id", loadId)
+        .eq("status", "pending")
+        .select("id, status")
+        .maybeSingle();
 
-      return false;
-    }
+      if (stopError || !updatedStop) {
+        console.error("SEQUENCE ENGINE - STOP UPDATE ERROR:", stopError);
+        return false;
+      }
 
-    const { data: updatedDriver, error: driverError } = await supabase
-      .from("drivers")
-      .update({ status: "on_duty" })
-      .eq("id", driverId)
-      .select("id, status")
-      .maybeSingle();
-
-    if (driverError || !updatedDriver) {
-      console.error("SEQUENCE ENGINE - DRIVER UPDATE ERROR:", driverError);
-
-      await supabase
+      // Sincronizar el estado de la carga.
+      const { data: updatedLoad, error: loadError } = await supabase
         .from("loads")
-        .update({ status: loadRecord.status })
+        .update({ status: nextStopStatus })
         .eq("id", loadId)
         .eq("driver_id", driverId)
-        .eq("status", nextStopStatus);
+        .select(LOAD_SELECT)
+        .maybeSingle();
 
-      await supabase
-        .from("load_stops")
-        .update({ status: "pending" })
-        .eq("id", currentStop.id)
-        .eq("status", nextStopStatus);
+      if (loadError || !updatedLoad) {
+        console.error("SEQUENCE ENGINE - LOAD UPDATE ERROR:", loadError);
 
-      return false;
-    }
-
-    const hosSaved = await setHosStatus("On Duty");
-
-    if (!hosSaved) {
-      console.error("SEQUENCE ENGINE - HOS ON DUTY EVENT FAILED");
-
-      await supabase
-        .from("drivers")
-        .update({ status: "driving" })
-        .eq("id", driverId)
-        .eq("status", "on_duty");
-
-      await supabase
-        .from("loads")
-        .update({ status: loadRecord.status })
-        .eq("id", loadId)
-        .eq("driver_id", driverId)
-        .eq("status", nextStopStatus);
-
-      await supabase
-        .from("load_stops")
-        .update({ status: "pending" })
-        .eq("id", currentStop.id)
-        .eq("status", nextStopStatus);
-
-      setDriverWorkStatus("driving");
-      return false;
-    }
-
-    setDrivers((current) =>
-      current.map((driver) =>
-        driver.id === driverId
-          ? { ...driver, status: "on_duty" }
-          : driver
-      )
-    );
-
-    setDriverWorkStatus("on_duty");
-
-    setLoads((current) =>
-      current.map((load) =>
-        load.id === updatedLoad.id
-          ? (updatedLoad as Load)
-          : load
-      )
-    );
-
-    showMessage(
-      isES
-        ? `Llegada confirmada: ${stopType === "pickup" ? "Pickup" : "Delivery"} #${currentStop.stop_order}.`
-        : `Arrival confirmed: ${stopType === "pickup" ? "Pickup" : "Delivery"} #${currentStop.stop_order}.`
-    );
-
-    return true;
-  } catch (error) {
-    console.error("SEQUENCE ENGINE - UNEXPECTED ERROR:", error);
-    return false;
-  } finally {
-    sequenceProcessing.current = false;
-  }
-}
-
- async function updateLoadStatus(status: string): Promise<boolean> {
-  if (!selectedLoad) {
-    showMessage(text.selectLoadFirst);
-    return false;
-  }
-
-  if (!selectedDriverId) {
-    showMessage(
-      isES
-        ? "No hay un conductor seleccionado."
-        : "No driver is selected."
-    );
-    return false;
-  }
-
-  const loadId = selectedLoad.id;
-  const driverId = selectedDriverId;
-
-  const rawStatus = String(status).trim().toLowerCase();
-  const normalizedStatus =
-    rawStatus === "done"
-      ? "delivered"
-      : normalizeLoadStatus(rawStatus);
-
-  if (normalizedStatus !== "delivered") {
-    showMessage(
-      isES
-        ? "Las llegadas y el inicio del viaje son controlados automáticamente por GPS."
-        : "Arrivals and trip start are controlled automatically by GPS."
-    );
-    return false;
-  }
-
-  try {
-    const { data: stopData, error: stopError } = await supabase
-      .from("load_stops")
-      .select(
-        "id, load_id, stop_order, stop_type, address, city, state, scheduled_date, scheduled_time, status"
-      )
-      .eq("load_id", loadId)
-      .order("stop_order", { ascending: true });
-
-    if (stopError || !stopData || stopData.length === 0) {
-      console.error("DONE - LOAD STOPS ERROR:", stopError);
-
-      showMessage(
-        isES
-          ? "No se pudieron cargar las paradas de la carga."
-          : "Could not load the stops for this load."
-      );
-      return false;
-    }
-
-    const stops = stopData.map((stop) => ({
-      ...stop,
-      stop_order: Number(stop.stop_order),
-      stop_type: String(stop.stop_type ?? "")
-        .trim()
-        .toLowerCase(),
-      status: String(stop.status ?? "pending")
-        .trim()
-        .toLowerCase(),
-    }));
-
-    const finishedStatuses = [
-      "completed",
-      "complete",
-      "delivered",
-      "cancelled",
-      "canceled",
-    ];
-
-    const currentStopIndex = stops.findIndex(
-  (stop) => !finishedStatuses.includes(stop.status)
-);
-
-const allStopsAlreadyCompleted = currentStopIndex === -1;
-
-const currentStop = allStopsAlreadyCompleted
-  ? stops[stops.length - 1]
-  : stops[currentStopIndex];
-
-if (!currentStop) {
-  showMessage(
-    isES
-      ? "No se encontró una parada para esta carga."
-      : "No stop was found for this load."
-  );
-  return false;
-}
-
-    const isPickup = currentStop.stop_type === "pickup";
-    const isDelivery = currentStop.stop_type === "delivery";
-
-    if (!isPickup && !isDelivery) {
-      showMessage(
-        isES
-          ? "El tipo de parada no es válido."
-          : "The stop type is invalid."
-      );
-      return false;
-    }
-
-    const stopReached =
-  (isPickup && currentStop.status === "at_pickup") ||
-  (isDelivery && currentStop.status === "at_delivery");
-
-if (!allStopsAlreadyCompleted && !stopReached) {
-  showMessage(
-    isES
-      ? "La parada actual debe ser alcanzada por GPS antes de pulsar DONE."
-      : "The current stop must be reached by GPS before pressing DONE."
-  );
-  return false;
-}
-
-// Completar la parada actual solamente si todavía está pendiente.
-if (!allStopsAlreadyCompleted) {
-  const {
-    data: completedStop,
-    error: completedStopError,
-  } = await supabase
-    .from("load_stops")
-    .update({ status: "completed" })
-    .eq("id", currentStop.id)
-    .eq("status", currentStop.status)
-    .select("id, status")
-    .maybeSingle();
-
-  if (completedStopError || !completedStop) {
-    console.error(
-      "DONE - COMPLETE STOP ERROR:",
-      completedStopError
-    );
-
-    showMessage(
-      isES
-        ? "No se pudo completar la parada. Verifique su estado antes de volver a intentarlo."
-        : "Could not complete the stop. Verify its status before retrying."
-    );
-    return false;
-  }
-}
-
-      // Completar la parada actual solamente si todavía está pendiente.
-if (!allStopsAlreadyCompleted) {
-  const {
-    data: completedStop,
-    error: completedStopError,
-  } = await supabase
-    .from("load_stops")
-    .update({ status: "completed" })
-    .eq("id", currentStop.id)
-    .eq("status", currentStop.status)
-    .select("id, status")
-    .maybeSingle();
-
-  if (completedStopError || !completedStop) {
-    console.error(
-      "DONE - COMPLETE STOP ERROR:",
-      completedStopError
-    );
-
-    showMessage(
-      isES
-        ? "No se pudo completar la parada. Verifique su estado antes de volver a intentarlo."
-        : "Could not complete the stop. Verify its status before retrying."
-    );
-    return false;
-  }
-}
-
-    const remainingStops = stops.filter(
-      (stop) =>
-        stop.stop_order > currentStop.stop_order &&
-        !finishedStatuses.includes(stop.status)
-    );
-
-    // Todavía hay paradas: mantener la carga activa y avanzar el GPS.
-    if (remainingStops.length > 0) {
-      const { data: updatedLoad, error: loadError } =
         await supabase
+          .from("load_stops")
+          .update({ status: "pending" })
+          .eq("id", currentStop.id)
+          .eq("status", nextStopStatus);
+
+        return false;
+      }
+
+      const { data: updatedDriver, error: driverError } = await supabase
+        .from("drivers")
+        .update({ status: "on_duty" })
+        .eq("id", driverId)
+        .select("id, status")
+        .maybeSingle();
+
+      if (driverError || !updatedDriver) {
+        console.error("SEQUENCE ENGINE - DRIVER UPDATE ERROR:", driverError);
+
+        await supabase
+          .from("loads")
+          .update({ status: loadRecord.status })
+          .eq("id", loadId)
+          .eq("driver_id", driverId)
+          .eq("status", nextStopStatus);
+
+        await supabase
+          .from("load_stops")
+          .update({ status: "pending" })
+          .eq("id", currentStop.id)
+          .eq("status", nextStopStatus);
+
+        return false;
+      }
+
+      const hosSaved = await setHosStatus("On Duty");
+
+      if (!hosSaved) {
+        console.error("SEQUENCE ENGINE - HOS ON DUTY EVENT FAILED");
+
+        await supabase
+          .from("drivers")
+          .update({ status: "driving" })
+          .eq("id", driverId)
+          .eq("status", "on_duty");
+
+        await supabase
+          .from("loads")
+          .update({ status: loadRecord.status })
+          .eq("id", loadId)
+          .eq("driver_id", driverId)
+          .eq("status", nextStopStatus);
+
+        await supabase
+          .from("load_stops")
+          .update({ status: "pending" })
+          .eq("id", currentStop.id)
+          .eq("status", nextStopStatus);
+
+        setDriverWorkStatus("driving");
+        return false;
+      }
+
+      setDrivers((current) =>
+        current.map((driver) =>
+          driver.id === driverId ? { ...driver, status: "on_duty" } : driver
+        )
+      );
+
+      setDriverWorkStatus("on_duty");
+
+      setLoads((current) =>
+        current.map((load) => (load.id === updatedLoad.id ? (updatedLoad as Load) : load))
+      );
+
+      showMessage(
+        isES
+          ? `Llegada confirmada: ${stopType === "pickup" ? "Pickup" : "Delivery"} #${currentStop.stop_order}.`
+          : `Arrival confirmed: ${stopType === "pickup" ? "Pickup" : "Delivery"} #${currentStop.stop_order}.`
+      );
+
+      return true;
+    } catch (error) {
+      console.error("SEQUENCE ENGINE - UNEXPECTED ERROR:", error);
+      return false;
+    } finally {
+      sequenceProcessing.current = false;
+    }
+  }
+
+  async function updateLoadStatus(status: string): Promise<boolean> {
+    if (!selectedLoad) {
+      showMessage(text.selectLoadFirst);
+      return false;
+    }
+
+    if (!selectedDriverId) {
+      showMessage(isES ? "No hay un conductor seleccionado." : "No driver is selected.");
+      return false;
+    }
+
+    const loadId = selectedLoad.id;
+    const driverId = selectedDriverId;
+
+    const rawStatus = String(status).trim().toLowerCase();
+    const normalizedStatus = rawStatus === "done" ? "delivered" : normalizeLoadStatus(rawStatus);
+
+    if (normalizedStatus !== "delivered") {
+      showMessage(
+        isES
+          ? "Las llegadas y el inicio del viaje son controlados automáticamente por GPS."
+          : "Arrivals and trip start are controlled automatically by GPS."
+      );
+      return false;
+    }
+
+    try {
+      const { data: stopData, error: stopError } = await supabase
+        .from("load_stops")
+        .select(
+          "id, load_id, stop_order, stop_type, address, city, state, scheduled_date, scheduled_time, status"
+        )
+        .eq("load_id", loadId)
+        .order("stop_order", { ascending: true });
+
+      if (stopError || !stopData || stopData.length === 0) {
+        console.error("DONE - LOAD STOPS ERROR:", stopError);
+
+        showMessage(
+          isES
+            ? "No se pudieron cargar las paradas de la carga."
+            : "Could not load the stops for this load."
+        );
+        return false;
+      }
+
+      const stops = stopData.map((stop) => ({
+        ...stop,
+        stop_order: Number(stop.stop_order),
+        stop_type: String(stop.stop_type ?? "")
+          .trim()
+          .toLowerCase(),
+        status: String(stop.status ?? "pending")
+          .trim()
+          .toLowerCase(),
+      }));
+
+      const finishedStatuses = ["completed", "complete", "delivered", "cancelled", "canceled"];
+
+      const currentStopIndex = stops.findIndex((stop) => !finishedStatuses.includes(stop.status));
+
+      const allStopsAlreadyCompleted = currentStopIndex === -1;
+
+      const currentStop = allStopsAlreadyCompleted
+        ? stops[stops.length - 1]
+        : stops[currentStopIndex];
+
+      if (!currentStop) {
+        showMessage(
+          isES ? "No se encontró una parada para esta carga." : "No stop was found for this load."
+        );
+        return false;
+      }
+
+      const isPickup = currentStop.stop_type === "pickup";
+      const isDelivery = currentStop.stop_type === "delivery";
+
+      if (!isPickup && !isDelivery) {
+        showMessage(isES ? "El tipo de parada no es válido." : "The stop type is invalid.");
+        return false;
+      }
+
+      const stopReached =
+        (isPickup && currentStop.status === "at_pickup") ||
+        (isDelivery && currentStop.status === "at_delivery");
+
+      if (!allStopsAlreadyCompleted && !stopReached) {
+        showMessage(
+          isES
+            ? "La parada actual debe ser alcanzada por GPS antes de pulsar DONE."
+            : "The current stop must be reached by GPS before pressing DONE."
+        );
+        return false;
+      }
+
+      // CORREGIDO: este bloque estaba duplicado. El segundo intento nunca encontraba
+      // la parada (ya estaba "completed") y hacía fallar siempre el botón DONE.
+      // Completar la parada actual solamente si todavía no está completada.
+      if (!allStopsAlreadyCompleted) {
+        const { data: completedStop, error: completedStopError } = await supabase
+          .from("load_stops")
+          .update({ status: "completed" })
+          .eq("id", currentStop.id)
+          .eq("status", currentStop.status)
+          .select("id, status")
+          .maybeSingle();
+
+        if (completedStopError || !completedStop) {
+          console.error("DONE - COMPLETE STOP ERROR:", completedStopError);
+
+          showMessage(
+            isES
+              ? "No se pudo completar la parada. Verifique su estado antes de volver a intentarlo."
+              : "Could not complete the stop. Verify its status before retrying."
+          );
+          return false;
+        }
+      }
+
+      const remainingStops = stops.filter(
+        (stop) =>
+          stop.stop_order > currentStop.stop_order && !finishedStatuses.includes(stop.status)
+      );
+
+      // Todavía hay paradas: mantener la carga activa y avanzar el GPS.
+      if (remainingStops.length > 0) {
+        const { data: updatedLoad, error: loadError } = await supabase
           .from("loads")
           .update({ status: "in_transit" })
           .eq("id", loadId)
@@ -2001,11 +2046,138 @@ if (!allStopsAlreadyCompleted) {
           .select(LOAD_SELECT)
           .maybeSingle();
 
-      if (loadError || !updatedLoad) {
-        console.error(
-          "DONE - NEXT STOP LOAD ERROR:",
-          loadError
+        if (loadError || !updatedLoad) {
+          console.error("DONE - NEXT STOP LOAD ERROR:", loadError);
+
+          await supabase
+            .from("load_stops")
+            .update({ status: currentStop.status })
+            .eq("id", currentStop.id)
+            .eq("status", "completed");
+
+          showMessage(
+            isES
+              ? "No se pudo avanzar la carga. La parada fue restaurada."
+              : "The load could not advance. The stop was restored."
+          );
+          return false;
+        }
+
+        const { data: driverData, error: driverError } = await supabase
+          .from("drivers")
+          .update({
+            status: "driving",
+            current_load_id: loadId,
+          })
+          .eq("id", driverId)
+          .select("id, status, current_load_id")
+          .maybeSingle();
+
+        if (driverError || !driverData || driverData.status !== "driving") {
+          console.error("DONE - NEXT STOP DRIVER ERROR:", driverError);
+
+          await supabase
+            .from("loads")
+            .update({ status: selectedLoad.status })
+            .eq("id", loadId)
+            .eq("driver_id", driverId)
+            .eq("status", "in_transit");
+
+          await supabase
+            .from("load_stops")
+            .update({ status: currentStop.status })
+            .eq("id", currentStop.id)
+            .eq("status", "completed");
+
+          showMessage(
+            isES
+              ? "No se pudo actualizar el conductor. Se restauró el estado anterior."
+              : "Could not update the driver. The previous state was restored."
+          );
+          return false;
+        }
+
+        const hosSaved = await setHosStatus("Driving");
+
+        if (!hosSaved) {
+          console.error("DONE - HOS DRIVING EVENT FAILED");
+
+          await supabase
+            .from("drivers")
+            .update({ status: "on_duty" })
+            .eq("id", driverId)
+            .eq("status", "driving");
+
+          await supabase
+            .from("loads")
+            .update({ status: selectedLoad.status })
+            .eq("id", loadId)
+            .eq("driver_id", driverId)
+            .eq("status", "in_transit");
+
+          await supabase
+            .from("load_stops")
+            .update({ status: currentStop.status })
+            .eq("id", currentStop.id)
+            .eq("status", "completed");
+
+          setDriverWorkStatus("on_duty");
+
+          showMessage(
+            isES
+              ? "No se pudo registrar HOS. Se restauró el estado anterior."
+              : "Could not save HOS. The previous state was restored."
+          );
+          return false;
+        }
+
+        setLoads((current) =>
+          current.map((load) => (load.id === updatedLoad.id ? (updatedLoad as Load) : load))
         );
+
+        setDrivers((current) =>
+          current.map((driver) =>
+            driver.id === driverId
+              ? {
+                  ...driver,
+                  status: "driving",
+                  current_load_id: loadId,
+                }
+              : driver
+          )
+        );
+
+        setDriverWorkStatus("driving");
+
+        // Consultar Supabase para obtener la próxima parada pendiente
+        // y actualizar el destino sin esperar a que se mueva el GPS.
+        const nextNavigationStop = await getCurrentSequenceStop(loadId);
+
+        setNavigationStop(nextNavigationStop);
+
+        const nextStop = remainingStops[0];
+        const nextStopType = nextStop.stop_type === "pickup" ? "Pickup" : "Delivery";
+
+        showMessage(
+          isES
+            ? `${isPickup ? "Pickup" : "Delivery"} #${currentStop.stop_order} completado. Próxima parada: ${nextStopType} #${nextStop.stop_order}.`
+            : `${isPickup ? "Pickup" : "Delivery"} #${currentStop.stop_order} completed. Next stop: ${nextStopType} #${nextStop.stop_order}.`
+        );
+
+        return true;
+      }
+
+      // No quedan paradas: finalizar la carga.
+      const { data: updatedLoad, error: finalLoadError } = await supabase
+        .from("loads")
+        .update({ status: "delivered" })
+        .eq("id", loadId)
+        .eq("driver_id", driverId)
+        .select(LOAD_SELECT)
+        .maybeSingle();
+
+      if (finalLoadError || !updatedLoad) {
+        console.error("DONE - FINAL LOAD ERROR:", finalLoadError);
 
         await supabase
           .from("load_stops")
@@ -2015,41 +2187,31 @@ if (!allStopsAlreadyCompleted) {
 
         showMessage(
           isES
-            ? "No se pudo avanzar la carga. La parada fue restaurada."
-            : "The load could not advance. The stop was restored."
+            ? "No se pudo finalizar la carga. La parada fue restaurada."
+            : "The load could not be finalized. The stop was restored."
         );
         return false;
       }
 
-      const {
-        data: driverData,
-        error: driverError,
-      } = await supabase
+      const { data: finalDriver, error: finalDriverError } = await supabase
         .from("drivers")
         .update({
-          status: "driving",
-          current_load_id: loadId,
+          current_load_id: null,
+          status: "available",
         })
         .eq("id", driverId)
         .select("id, status, current_load_id")
         .maybeSingle();
 
-      if (
-        driverError ||
-        !driverData ||
-        driverData.status !== "driving"
-      ) {
-        console.error(
-          "DONE - NEXT STOP DRIVER ERROR:",
-          driverError
-        );
+      if (finalDriverError || !finalDriver || finalDriver.status !== "available") {
+        console.error("DONE - FINAL DRIVER ERROR:", finalDriverError);
 
         await supabase
           .from("loads")
-          .update({ status: selectedLoad.status })
+          .update({ status: "in_transit" })
           .eq("id", loadId)
           .eq("driver_id", driverId)
-          .eq("status", "in_transit");
+          .eq("status", "delivered");
 
         await supabase
           .from("load_stops")
@@ -2059,52 +2221,14 @@ if (!allStopsAlreadyCompleted) {
 
         showMessage(
           isES
-            ? "No se pudo actualizar el conductor. Se restauró el estado anterior."
-            : "Could not update the driver. The previous state was restored."
-        );
-        return false;
-      }
-
-      const hosSaved = await setHosStatus("Driving");
-
-      if (!hosSaved) {
-        console.error("DONE - HOS DRIVING EVENT FAILED");
-
-        await supabase
-          .from("drivers")
-          .update({ status: "on_duty" })
-          .eq("id", driverId)
-          .eq("status", "driving");
-
-        await supabase
-          .from("loads")
-          .update({ status: selectedLoad.status })
-          .eq("id", loadId)
-          .eq("driver_id", driverId)
-          .eq("status", "in_transit");
-
-        await supabase
-          .from("load_stops")
-          .update({ status: currentStop.status })
-          .eq("id", currentStop.id)
-          .eq("status", "completed");
-
-        setDriverWorkStatus("on_duty");
-
-        showMessage(
-          isES
-            ? "No se pudo registrar HOS. Se restauró el estado anterior."
-            : "Could not save HOS. The previous state was restored."
+            ? "No se pudo liberar al conductor. Se restauró la carga para volver a intentarlo."
+            : "Could not release the driver. The load was restored for retry."
         );
         return false;
       }
 
       setLoads((current) =>
-        current.map((load) =>
-          load.id === updatedLoad.id
-            ? (updatedLoad as Load)
-            : load
-        )
+        current.map((load) => (load.id === updatedLoad.id ? (updatedLoad as Load) : load))
       );
 
       setDrivers((current) =>
@@ -2112,177 +2236,57 @@ if (!allStopsAlreadyCompleted) {
           driver.id === driverId
             ? {
                 ...driver,
-                status: "driving",
-                current_load_id: loadId,
+                status: "available",
+                current_load_id: null,
               }
             : driver
         )
       );
 
-      setDriverWorkStatus("driving");
+      setSelectedLoadId("");
+      setDriverWorkStatus("available");
 
-      // Consultar Supabase para obtener la próxima parada pendiente
-      // y actualizar el destino sin esperar a que se mueva el GPS.
-      const nextNavigationStop =
-        await getCurrentSequenceStop(loadId);
-
-      setNavigationStop(nextNavigationStop);
-
-      const nextStop = remainingStops[0];
-      const nextStopType =
-        nextStop.stop_type === "pickup"
-          ? "Pickup"
-          : "Delivery";
+      // La ruta queda limpia cuando se completa la última parada.
+      setNavigationStop(null);
 
       showMessage(
         isES
-          ? `${isPickup ? "Pickup" : "Delivery"} #${currentStop.stop_order} completado. Próxima parada: ${nextStopType} #${nextStop.stop_order}.`
-          : `${isPickup ? "Pickup" : "Delivery"} #${currentStop.stop_order} completed. Next stop: ${nextStopType} #${nextStop.stop_order}.`
+          ? `Carga ${updatedLoad.load_number || ""} completada. El conductor queda disponible para la próxima asignación.`
+          : `Load ${updatedLoad.load_number || ""} completed. The driver is available for the next assignment.`
       );
 
       return true;
-    }
-
-    // No quedan paradas: finalizar la carga.
-    const {
-      data: updatedLoad,
-      error: finalLoadError,
-    } = await supabase
-      .from("loads")
-      .update({ status: "delivered" })
-      .eq("id", loadId)
-      .eq("driver_id", driverId)
-      .select(LOAD_SELECT)
-      .maybeSingle();
-
-    if (finalLoadError || !updatedLoad) {
-      console.error(
-        "DONE - FINAL LOAD ERROR:",
-        finalLoadError
-      );
-
-      await supabase
-        .from("load_stops")
-        .update({ status: currentStop.status })
-        .eq("id", currentStop.id)
-        .eq("status", "completed");
+    } catch (error) {
+      console.error("DONE - UNEXPECTED ERROR:", error);
 
       showMessage(
         isES
-          ? "No se pudo finalizar la carga. La parada fue restaurada."
-          : "The load could not be finalized. The stop was restored."
+          ? "Ocurrió un error inesperado al completar la parada."
+          : "An unexpected error occurred while completing the stop."
       );
+
       return false;
     }
-
-    const {
-      data: finalDriver,
-      error: finalDriverError,
-    } = await supabase
-      .from("drivers")
-      .update({
-        current_load_id: null,
-        status: "available",
-      })
-      .eq("id", driverId)
-      .select("id, status, current_load_id")
-      .maybeSingle();
-
-    if (
-      finalDriverError ||
-      !finalDriver ||
-      finalDriver.status !== "available"
-    ) {
-      console.error(
-        "DONE - FINAL DRIVER ERROR:",
-        finalDriverError
-      );
-
-      await supabase
-        .from("loads")
-        .update({ status: "in_transit" })
-        .eq("id", loadId)
-        .eq("driver_id", driverId)
-        .eq("status", "delivered");
-
-      await supabase
-        .from("load_stops")
-        .update({ status: currentStop.status })
-        .eq("id", currentStop.id)
-        .eq("status", "completed");
-
-      showMessage(
-        isES
-          ? "No se pudo liberar al conductor. Se restauró la carga para volver a intentarlo."
-          : "Could not release the driver. The load was restored for retry."
-      );
-      return false;
-    }
-
-    setLoads((current) =>
-      current.map((load) =>
-        load.id === updatedLoad.id
-          ? (updatedLoad as Load)
-          : load
-      )
-    );
-
-    setDrivers((current) =>
-      current.map((driver) =>
-        driver.id === driverId
-          ? {
-              ...driver,
-              status: "available",
-              current_load_id: null,
-            }
-          : driver
-      )
-    );
-
-    setSelectedLoadId("");
-    setDriverWorkStatus("available");
-
-    // La ruta queda limpia cuando se completa la última parada.
-    setNavigationStop(null);
-
-    showMessage(
-      isES
-        ? `Carga ${updatedLoad.load_number || ""} completada. El conductor queda disponible para la próxima asignación.`
-        : `Load ${updatedLoad.load_number || ""} completed. The driver is available for the next assignment.`
-    );
-
-    return true;
-  } catch (error) {
-    console.error("DONE - UNEXPECTED ERROR:", error);
-
-    showMessage(
-      isES
-        ? "Ocurrió un error inesperado al completar la parada."
-        : "An unexpected error occurred while completing the stop."
-    );
-
-    return false;
   }
-}
 
   async function saveGpsEvent(
     location: GPSLocation,
     driverId: string,
     loadId: string
   ): Promise<boolean> {
-    if (gpsInsertInProgress.current) { 
-  console.warn("GPS INSERT SKIPPED:", {
-    reason: "Previous GPS request is still in progress",
-    at: new Date().toISOString(),
-    latitude: location.lat,
-    longitude: location.lng,
-  });
+    if (gpsInsertInProgress.current) {
+      console.warn("GPS INSERT SKIPPED:", {
+        reason: "Previous GPS request is still in progress",
+        at: new Date().toISOString(),
+        latitude: location.lat,
+        longitude: location.lng,
+      });
 
-  return false;
-}
+      return false;
+    }
 
-gpsInsertInProgress.current = true;
-const gpsRequestStartedAt = Date.now();
+    gpsInsertInProgress.current = true;
+    const gpsRequestStartedAt = Date.now();
 
     try {
       const response = await fetch("/api/gps-events", {
@@ -2300,7 +2304,7 @@ const gpsRequestStartedAt = Date.now();
       });
 
       const result = await response.json().catch(() => null);
-       console.log("GPS API RESPONSE:", {
+      console.log("GPS API RESPONSE:", {
         durationMs: Date.now() - gpsRequestStartedAt,
         ok: response.ok,
         status: response.status,
@@ -2309,21 +2313,19 @@ const gpsRequestStartedAt = Date.now();
         savedLatitude: result?.data?.latitude,
         savedLongitude: result?.data?.longitude,
         savedAt: result?.data?.recorded_at,
-   });
+      });
+
       if (!response.ok) {
-  const responseText = await response.clone().text();
+        console.error("GPS API HTTP ERROR:", {
+          status: response.status,
+          statusText: response.statusText,
+          result,
+        });
 
-  console.error("GPS API HTTP ERROR:", {
-    status: response.status,
-    statusText: response.statusText,
-    body: responseText,
-    result,
-  });
-
-  setGpsDatabaseError(true);
-  setGpsStatus(text.gpsSyncError);
-  return false;
-}
+        setGpsDatabaseError(true);
+        setGpsStatus(text.gpsSyncError);
+        return false;
+      }
 
       setGpsDatabaseError(false);
       setGpsStatus(text.gpsActive);
@@ -2366,86 +2368,69 @@ const gpsRequestStartedAt = Date.now();
     setGpsTracking(true);
     setGpsStatus(text.gpsWaiting);
 
-  console.log(
-  "GPS: iniciando watchPosition");
-gpsWatchId.current = navigator.geolocation.watchPosition(
- async (position) => {
-  console.log(
-  "GPS: callback recibido",
-  position.timestamp
-);
-  const callbackNow = Date.now();
+    console.log("GPS: iniciando watchPosition");
 
-  console.log("GPS WATCH INTERVAL:", {
-    secondsSincePreviousCallback: lastGpsCallbackAt
-      ? Math.round((callbackNow - lastGpsCallbackAt) / 1000)
-      : null,
-    positionTimestamp: new Date(position.timestamp).toISOString(),
-    positionAgeMs: callbackNow - position.timestamp,
-    receivedAt: new Date(callbackNow).toISOString(),
-    latitude: position.coords.latitude,
-    longitude: position.coords.longitude,
-    accuracy: position.coords.accuracy,
-  });
+    gpsWatchId.current = navigator.geolocation.watchPosition(
+      async (position) => {
+        console.log("GPS: callback recibido", position.timestamp);
+        const callbackNow = Date.now();
 
-  lastGpsCallbackAt = callbackNow;
+        console.log("GPS WATCH INTERVAL:", {
+          secondsSincePreviousCallback: lastGpsCallbackAt
+            ? Math.round((callbackNow - lastGpsCallbackAt) / 1000)
+            : null,
+          positionTimestamp: new Date(position.timestamp).toISOString(),
+          positionAgeMs: callbackNow - position.timestamp,
+          receivedAt: new Date(callbackNow).toISOString(),
+          latitude: position.coords.latitude,
+          longitude: position.coords.longitude,
+          accuracy: position.coords.accuracy,
+        });
 
-  console.log("¡GPS RECIBIDO EXITOSAMENTE!", position.coords);
+        lastGpsCallbackAt = callbackNow;
 
-    console.log("GPS DIAGNOSTIC:", {
-      latitude: position.coords.latitude,
-      longitude: position.coords.longitude,
-      accuracy: position.coords.accuracy,
-      timestamp: position.timestamp,
-      receivedAt: new Date().toISOString(),
-    });
+        console.log("¡GPS RECIBIDO EXITOSAMENTE!", position.coords);
 
-    if (gpsWatchId.current === null) return;
+        if (gpsWatchId.current === null) return;
 
-    const location: GPSLocation = {
-      lat: position.coords.latitude,
-      lng: position.coords.longitude,
-      accuracy: position.coords.accuracy,
-      speed: position.coords.speed,
-      heading: position.coords.heading,
-    };
+        const location: GPSLocation = {
+          lat: position.coords.latitude,
+          lng: position.coords.longitude,
+          accuracy: position.coords.accuracy,
+          speed: position.coords.speed,
+          heading: position.coords.heading,
+        };
 
-    setLastLocation(location);
+        setLastLocation(location);
 
         const gpsSaved = await saveGpsEvent(location, driverId, loadId);
 
-console.log("GPS SAVE RESULT:", {
-  gpsSaved,
-  driverId,
-  loadId,
-  gpsWatchId: gpsWatchId.current,
-});
+        console.log("GPS SAVE RESULT:", {
+          gpsSaved,
+          driverId,
+          loadId,
+          gpsWatchId: gpsWatchId.current,
+        });
 
-if (gpsWatchId.current === null) {
-  console.error("GPS FLOW STOPPED: gpsWatchId is null");
-  return;
-}
+        if (gpsWatchId.current === null) {
+          console.error("GPS FLOW STOPPED: gpsWatchId is null");
+          return;
+        }
 
-if (!gpsSaved) {
-  console.error("GPS FLOW STOPPED: saveGpsEvent returned false");
-  return;
-}
+        if (!gpsSaved) {
+          console.error("GPS FLOW STOPPED: saveGpsEvent returned false");
+          return;
+        }
 
         try {
-  console.log("GPS CALLING SEQUENCE ARRIVAL:", {
-  location,
-  loadId,
-  gpsWatchId: gpsWatchId.current,
-});        
- // La llegada operativa ahora se procesa desde TruckMap mediante onArrival.
+          // La llegada operativa se procesa desde TruckMap mediante onArrival.
+          if (gpsWatchId.current === null) return;
 
-  if (gpsWatchId.current === null) return;
-
-  const nextStop = await getCurrentSequenceStop(loadId);
-  setNavigationStop(nextStop);
-} catch (sequenceError) {
-  console.error("SEQUENCE ENGINE GPS ERROR:", sequenceError);
-}
+          const nextStop = await getCurrentSequenceStop(loadId);
+          setNavigationStop(nextStop);
+        } catch (sequenceError) {
+          console.error("SEQUENCE ENGINE GPS ERROR:", sequenceError);
+        }
       },
       (error) => {
         console.error("GPS ERROR CODE:", error.code);
@@ -2480,142 +2465,141 @@ if (!gpsSaved) {
     );
   }
 
-  
-function stopGpsTracking() {
-  if (gpsWatchId.current !== null) {
-    navigator.geolocation.clearWatch(gpsWatchId.current);
-    gpsWatchId.current = null;
+  function stopGpsTracking() {
+    if (gpsWatchId.current !== null) {
+      navigator.geolocation.clearWatch(gpsWatchId.current);
+      gpsWatchId.current = null;
+    }
+
+    gpsInsertInProgress.current = false;
+
+    setGpsTracking(false);
+    setGpsDatabaseError(false);
+    setGpsStatus(text.gpsNotActive);
+
+    // Clear the active navigation destination when GPS is stopped.
+    setNavigationStop(null);
   }
 
-  gpsInsertInProgress.current = false;
-
-  setGpsTracking(false);
-  setGpsDatabaseError(false);
-  setGpsStatus(text.gpsNotActive);
-
-  // Clear the active navigation destination when GPS is stopped.
-  setNavigationStop(null);
-}
-
+  function closeDocumentModal() {
+    setDocumentModalOpen(false);
+    setSelectedFile(null);
+    setSelectedDocumentStopId("");
+  }
 
   async function uploadDocument() {
-  if (!selectedDriver) {
-    showMessage(text.selectDriverFirst);
-    return;
-  }
+    if (!selectedDriver) {
+      showMessage(text.selectDriverFirst);
+      return;
+    }
 
-  if (!selectedLoad) {
-    showMessage(text.selectLoadFirst);
-    return;
-  }
+    if (!selectedLoad) {
+      showMessage(text.selectLoadFirst);
+      return;
+    }
 
-  if (!selectedFile) {
-    showMessage(text.chooseFileFirst);
-    return;
-  }
+    if (!selectedFile) {
+      showMessage(text.chooseFileFirst);
+      return;
+    }
 
-  if (selectedFile.size > 15 * 1024 * 1024) {
-    showMessage(text.maxFileSize);
-    return;
-  }
+    if (selectedFile.size > 15 * 1024 * 1024) {
+      showMessage(text.maxFileSize);
+      return;
+    }
 
-  const normalizedDocumentType = String(documentType)
-    .trim()
-    .toUpperCase();
+    const allowedMimeTypes = ["application/pdf", "image/jpeg", "image/png", "image/webp"];
+    const hasAllowedExtension = /\.(pdf|jpe?g|png|webp)$/i.test(selectedFile.name);
 
-  if (
-    !["POD", "BOL", "RATE CONFIRMATION", "INVOICE", "OTHER"].includes(
-      normalizedDocumentType
-    )
-  ) {
-    showMessage(
-      isES ? "Seleccione un tipo de documento válido." : "Select a valid document type."
-    );
-    return;
-  }
+    if (!allowedMimeTypes.includes(selectedFile.type) && !hasAllowedExtension) {
+      showMessage(text.invalidFileType);
+      return;
+    }
 
-  let loadStopId: string | null = null;
+    const normalizedDocumentType = String(documentType).trim().toUpperCase();
 
-  if (normalizedDocumentType === "POD") {
-    if (!selectedDocumentStopId) {
+    if (!["POD", "BOL", "RATE CONFIRMATION", "INVOICE", "OTHER"].includes(normalizedDocumentType)) {
       showMessage(
-        isES
-          ? "Seleccione la parada de entrega para este POD."
-          : "Select the delivery stop for this POD."
+        isES ? "Seleccione un tipo de documento válido." : "Select a valid document type."
       );
       return;
     }
 
-    const { data: stop, error: stopError } = await supabase
-      .from("load_stops")
-      .select("id, load_id, stop_type")
-      .eq("id", selectedDocumentStopId)
-      .eq("load_id", selectedLoad.id)
-      .maybeSingle();
+    let loadStopId: string | null = null;
 
-    if (stopError || !stop) {
-      console.error("POD STOP VALIDATION ERROR:", stopError);
-      showMessage(
-        isES
-          ? "No se pudo verificar la parada seleccionada."
-          : "Could not verify the selected stop."
-      );
-      return;
+    if (normalizedDocumentType === "POD") {
+      if (!selectedDocumentStopId) {
+        showMessage(
+          isES
+            ? "Seleccione la parada de entrega para este POD."
+            : "Select the delivery stop for this POD."
+        );
+        return;
+      }
+
+      const { data: stop, error: stopError } = await supabase
+        .from("load_stops")
+        .select("id, load_id, stop_type")
+        .eq("id", selectedDocumentStopId)
+        .eq("load_id", selectedLoad.id)
+        .maybeSingle();
+
+      if (stopError || !stop) {
+        console.error("POD STOP VALIDATION ERROR:", stopError);
+        showMessage(
+          isES
+            ? "No se pudo verificar la parada seleccionada."
+            : "Could not verify the selected stop."
+        );
+        return;
+      }
+
+      const stopType = String(stop.stop_type ?? "")
+        .trim()
+        .toLowerCase();
+
+      if (!["delivery", "dropoff", "drop_off"].includes(stopType)) {
+        showMessage(
+          isES
+            ? "El POD debe estar asociado a una parada de entrega."
+            : "A POD must be linked to a delivery stop."
+        );
+        return;
+      }
+
+      loadStopId = stop.id;
     }
 
-    const stopType = String(stop.stop_type ?? "")
-      .trim()
-      .toLowerCase();
+    setUploadingDocument(true);
 
-    if (!["delivery", "dropoff", "drop_off"].includes(stopType)) {
-      showMessage(
-        isES
-          ? "El POD debe estar asociado a una parada de entrega."
-          : "A POD must be linked to a delivery stop."
-      );
-      return;
-    }
+    let storagePath: string | null = null;
 
-    loadStopId = stop.id;
-  }
+    try {
+      const safeName = selectedFile.name.replace(/[^a-zA-Z0-9._-]/g, "_");
 
-  setUploadingDocument(true);
+      const uniqueName = `${Date.now()}-${Math.random().toString(36).slice(2)}-${safeName}`;
 
-  let storagePath: string | null = null;
+      storagePath = `${selectedLoad.id}/${uniqueName}`;
 
-  try {
-    const safeName = selectedFile.name.replace(
-      /[^a-zA-Z0-9._-]/g,
-      "_"
-    );
+      const { error: uploadError } = await supabase.storage
+        .from("load-documents")
+        .upload(storagePath, selectedFile, {
+          cacheControl: "3600",
+          upsert: false,
+          contentType: selectedFile.type || undefined,
+        });
 
-    const uniqueName = `${Date.now()}-${Math.random()
-      .toString(36)
-      .slice(2)}-${safeName}`;
+      if (uploadError) {
+        console.error("DOCUMENT STORAGE UPLOAD ERROR:", uploadError);
+        showMessage(
+          isES
+            ? `Error al cargar: ${uploadError.message}`
+            : `Upload failed: ${uploadError.message}`
+        );
+        return;
+      }
 
-    storagePath = `${selectedLoad.id}/${uniqueName}`;
-
-    const { error: uploadError } = await supabase.storage
-      .from("load-documents")
-      .upload(storagePath, selectedFile, {
-        cacheControl: "3600",
-        upsert: false,
-        contentType: selectedFile.type,
-      });
-
-    if (uploadError) {
-      console.error("DOCUMENT STORAGE UPLOAD ERROR:", uploadError);
-      showMessage(
-        isES
-          ? `Error al cargar: ${uploadError.message}`
-          : `Upload failed: ${uploadError.message}`
-      );
-      return;
-    }
-
-    const { error: documentError } = await supabase
-      .from("documents")
-      .insert({
+      const { error: documentError } = await supabase.from("documents").insert({
         load_id: selectedLoad.id,
         driver_id: selectedDriver.id,
         document_type: normalizedDocumentType,
@@ -2625,47 +2609,60 @@ function stopGpsTracking() {
         status: "uploaded",
       });
 
-    if (documentError) {
-      console.error("DOCUMENT DATABASE INSERT ERROR:", documentError);
+      if (documentError) {
+        console.error("DOCUMENT DATABASE INSERT ERROR:", documentError);
 
-      const { error: cleanupError } = await supabase.storage
-        .from("load-documents")
-        .remove([storagePath]);
+        const { error: cleanupError } = await supabase.storage
+          .from("load-documents")
+          .remove([storagePath]);
 
-      if (cleanupError) {
-        console.error("DOCUMENT STORAGE CLEANUP ERROR:", cleanupError);
+        if (cleanupError) {
+          console.error("DOCUMENT STORAGE CLEANUP ERROR:", cleanupError);
+        }
+
+        showMessage(
+          isES
+            ? `Error al registrar el documento: ${documentError.message}`
+            : `Document registration failed: ${documentError.message}`
+        );
+        return;
       }
 
-      showMessage(
-        isES
-          ? `Error al registrar el documento: ${documentError.message}`
-          : `Document registration failed: ${documentError.message}`
-      );
-      return;
+      await loadDocuments(selectedLoad.id);
+      closeDocumentModal();
+      showMessage(text.documentUploadSuccess);
+    } catch (error) {
+      console.error("DOCUMENT UPLOAD ERROR:", error);
+      showMessage(text.unexpectedUploadError);
+    } finally {
+      setUploadingDocument(false);
     }
-
-    await loadDocuments(selectedLoad.id);
-    setSelectedFile(null);
-    setSelectedDocumentStopId("");
-    setDocumentModalOpen(false);
-    showMessage(text.documentUploadSuccess);
-  } catch (error) {
-    console.error("DOCUMENT UPLOAD ERROR:", error);
-    showMessage(text.unexpectedUploadError);
-  } finally {
-    setUploadingDocument(false);
   }
-}
 
-  function viewDocument(path: string | null) {
+  async function viewDocument(path: string | null) {
     if (!path) {
       showMessage(text.noStoragePath);
       return;
     }
 
+    // Se usa URL firmada (funciona con buckets privados y públicos).
+    const { data: signed, error: signedError } = await supabase.storage
+      .from("load-documents")
+      .createSignedUrl(path, 60 * 10);
+
+    if (!signedError && signed?.signedUrl) {
+      window.open(signed.signedUrl, "_blank");
+      return;
+    }
+
+    console.error("DOCUMENT SIGNED URL ERROR:", signedError);
+
     const { data } = supabase.storage.from("load-documents").getPublicUrl(path);
     window.open(data.publicUrl, "_blank");
   }
+
+  // Mantiene la referencia siempre al día para el reconectado por visibilitychange.
+  startGpsRef.current = startGpsTracking;
 
   const latestHosEvent = hosEvents[0] || null;
   const latestHosTimestamp = latestHosEvent?.event_time
@@ -2681,8 +2678,8 @@ function stopGpsTracking() {
 
   const driveElapsedMs =
     latestStatusNormalized === "driving" &&
-      latestHosTimestamp !== null &&
-      Number.isFinite(latestHosTimestamp)
+    latestHosTimestamp !== null &&
+    Number.isFinite(latestHosTimestamp)
       ? Math.max(0, clockNow - latestHosTimestamp)
       : 0;
 
@@ -2792,15 +2789,41 @@ function stopGpsTracking() {
       </div>
     );
   }
-  const uniqueLoadAlerts = loadAlerts.filter(
-  (alert, index, alerts) =>
-    alerts.findIndex(
-      (item) => item.load_id === alert.load_id
-    ) === index
-);
 
-return (
+  const uniqueLoadAlerts = loadAlerts.filter(
+    (alert, index, alerts) =>
+      alerts.findIndex((item) => item.load_id === alert.load_id) === index
+  );
+
+  const isPodSelected = String(documentType).trim().toUpperCase() === "POD";
+
+  return (
     <div className="space-y-6">
+      {/* CORREGIDO: la notificación ahora es fija y está por encima del modal (z-[100]).
+          Antes se dibujaba arriba de la página y quedaba oculta detrás del modal o fuera de pantalla. */}
+      {message && (
+        <div className="pointer-events-none fixed inset-x-0 top-4 z-[100] flex justify-center px-4">
+          <div
+            role="status"
+            aria-live="polite"
+            className="pointer-events-auto flex w-full max-w-lg items-start gap-3 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800 shadow-lg"
+          >
+            <div className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-blue-600 text-xs font-bold text-white">
+              i
+            </div>
+            <div className="flex-1">{message}</div>
+            <button
+              type="button"
+              onClick={dismissMessage}
+              aria-label={text.dismiss}
+              className="shrink-0 rounded-md px-1.5 text-base font-bold leading-none text-blue-700 hover:bg-blue-100"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+      )}
+
       <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
         <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
           <div>
@@ -2813,59 +2836,59 @@ return (
             <p className="mt-1 text-sm text-slate-500">{text.subtitle}</p>
           </div>
 
-          {[
-            "owner",
-            "admin",
-            "dispatcher",
-            "safety",
-            "accounting",
-            "maintenance",
-          ].includes(userRole) && (
-              <div className="w-full lg:w-72">
-                <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-slate-500">
-                  {text.activeDriver}
-                </label>
+          {["owner", "admin", "dispatcher", "safety", "accounting", "maintenance"].includes(
+            userRole
+          ) && (
+            <div className="w-full lg:w-72">
+              <label className="mb-2 block text-xs font-semibold uppercase tracking-wide text-slate-500">
+                {text.activeDriver}
+              </label>
 
-                <select
-                  value={selectedDriverId}
-                  onChange={(e) => {
-                    const driverId = e.target.value;
-                    setSelectedDriverId(driverId);
-                    localStorage.setItem("project-logistics-admin-selected-driver", driverId);
-                  }}
-                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-medium text-slate-900 outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-100"
-                >
-                  {drivers.map((driver) => (
-                    <option key={driver.id} value={driver.id}>
-                      {driver.full_name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            )}
+              <select
+                value={selectedDriverId}
+                onChange={(e) => {
+                  const driverId = e.target.value;
+                  setSelectedDriverId(driverId);
+                  localStorage.setItem("project-logistics-admin-selected-driver", driverId);
+                }}
+                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-medium text-slate-900 outline-none transition focus:border-slate-400 focus:ring-2 focus:ring-slate-100"
+              >
+                {drivers.map((driver) => (
+                  <option key={driver.id} value={driver.id}>
+                    {driver.full_name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
         </div>
       </section>
 
-      {message && (
-        <div className="flex items-start gap-3 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800 shadow-sm">
-          <div className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-blue-600 text-xs font-bold text-white">
-            i
-          </div>
-          <div>{message}</div>
-        </div>
-      )}
-
-
       {uniqueLoadAlerts.length > 0 && (
-        <div className="mt-3 flex items-start gap-3 rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800 shadow-sm">
-          <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-red-600 text-xs font-bold text-white">
-           {uniqueLoadAlerts.length}
-          </div>
+        <div className="space-y-2">
+          {uniqueLoadAlerts.map((alert) => (
+            <div
+              key={alert.id}
+              className="flex items-start gap-3 rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800 shadow-sm"
+            >
+              <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-red-600 text-xs font-bold text-white">
+                !
+              </div>
 
-          <div className="flex-1">
-            <div className="font-bold">{uniqueLoadAlerts[0].title}</div>
-            <div className="mt-1">{uniqueLoadAlerts[0].message}</div>
-          </div>
+              <div className="flex-1">
+                <div className="font-bold">{alert.title}</div>
+                <div className="mt-1">{alert.message}</div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => void dismissLoadAlert(alert)}
+                className="shrink-0 rounded-lg border border-red-300 bg-white px-3 py-1.5 text-xs font-bold text-red-700 hover:bg-red-100"
+              >
+                {text.gotIt}
+              </button>
+            </div>
+          ))}
         </div>
       )}
 
@@ -2911,10 +2934,11 @@ return (
                       await setHosStatus("Off Duty");
                       stopGpsTracking();
                     }}
-                    className={`rounded-xl border px-3 py-2 text-xs font-semibold transition ${driverWorkStatus === "off_duty"
-                      ? "border-slate-900 bg-slate-900 text-white"
-                      : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
-                      }`}
+                    className={`rounded-xl border px-3 py-2 text-xs font-semibold transition ${
+                      driverWorkStatus === "off_duty"
+                        ? "border-slate-900 bg-slate-900 text-white"
+                        : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                    }`}
                   >
                     {isES ? "Tiempo en casa" : "Home Time"}
                   </button>
@@ -2926,10 +2950,11 @@ return (
                       await setHosStatus("Sleeper");
                       stopGpsTracking();
                     }}
-                    className={`rounded-xl border px-3 py-2 text-xs font-semibold transition ${driverWorkStatus === "hold"
-                      ? "border-slate-900 bg-slate-900 text-white"
-                      : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
-                      }`}
+                    className={`rounded-xl border px-3 py-2 text-xs font-semibold transition ${
+                      driverWorkStatus === "hold"
+                        ? "border-slate-900 bg-slate-900 text-white"
+                        : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                    }`}
                   >
                     Hold
                   </button>
@@ -2941,10 +2966,11 @@ return (
                       await setHosStatus("Off Duty");
                       stopGpsTracking();
                     }}
-                    className={`rounded-xl border px-3 py-2 text-xs font-semibold transition ${driverWorkStatus === "available"
-                      ? "border-slate-900 bg-slate-900 text-white"
-                      : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
-                      }`}
+                    className={`rounded-xl border px-3 py-2 text-xs font-semibold transition ${
+                      driverWorkStatus === "available"
+                        ? "border-slate-900 bg-slate-900 text-white"
+                        : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                    }`}
                   >
                     {isES ? "Disponible" : "Available"}
                   </button>
@@ -2992,88 +3018,76 @@ return (
               <p className="mt-1 text-sm text-slate-500">{text.gpsAssociated}</p>
             </div>
 
-            
+            {/* CORREGIDO: para el rol "driver" las tarjetas ahora son botones y permiten
+                elegir la carga actual. Antes eran solo texto y no se podía seleccionar. */}
+            {userRole === "driver" ? (
+              <div className="w-full space-y-3 sm:w-80">
+                {selectableLoads.map((load) => {
+                  const isCurrent = String(load.id) === String(selectedLoadId);
 
-{userRole === "driver" ? (
-  <div className="space-y-3">
-    {driverLoads
-      .filter((load) =>
-        ["assigned", "at_pickup", "in_transit", "at_delivery"].includes(
-          normalizeLoadStatus(load.status)
-        )
-      )
-      .map((load) => (
-        <div
-          key={load.id}
-          className={`rounded-xl border p-4 ${
-            String(load.id) === String(selectedLoadId)
-              ? "border-blue-500 bg-blue-50"
-              : "border-slate-200 bg-white"
-          }`}
-        >
-          <p className="font-semibold text-slate-900">
-            {load.load_number || load.id}
-          </p>
+                  return (
+                    <button
+                      type="button"
+                      key={load.id}
+                      onClick={() => {
+                        if (!isCurrent) void setCurrentLoad(String(load.id));
+                      }}
+                      className={`w-full rounded-xl border p-4 text-left transition ${
+                        isCurrent
+                          ? "border-blue-500 bg-blue-50"
+                          : "border-slate-200 bg-white hover:bg-slate-50"
+                      }`}
+                    >
+                      <p className="font-semibold text-slate-900">{load.load_number || load.id}</p>
 
-          <p className="mt-1 text-sm text-slate-600">
-            {load.origin_city || "—"} → {load.destination_city || "—"}
-          </p>
+                      <p className="mt-1 text-sm text-slate-600">
+                        {load.origin_city || "—"} → {load.destination_city || "—"}
+                      </p>
 
-          <p className="mt-2 text-xs text-slate-500">
-            {String(load.id) === String(selectedLoadId)
-              ? isES
-                ? "Carga actual"
-                : "Current load"
-              : isES
-                ? "Carga asignada"
-                : "Assigned load"}
-          </p>
-        </div>
-      ))}
+                      <p className="mt-2 text-xs text-slate-500">
+                        {isCurrent
+                          ? isES
+                            ? "Carga actual"
+                            : "Current load"
+                          : isES
+                            ? "Carga asignada"
+                            : "Assigned load"}
+                      </p>
+                    </button>
+                  );
+                })}
 
-    {driverLoads.filter((load) =>
-      ["assigned", "at_pickup", "in_transit", "at_delivery"].includes(
-        normalizeLoadStatus(load.status)
-      )
-    ).length === 0 && (
-      <p className="rounded-xl border border-slate-200 p-4 text-sm text-slate-500">
-        {isES
-          ? "No tienes cargas asignadas pendientes."
-          : "You have no pending assigned loads."}
-      </p>
-    )}
-  </div>
-) : (
-  <select
-    value={selectedLoadId}
-    onChange={(e) => {
-      void setCurrentLoad(e.target.value);
-    }}
-    className="w-full rounded-xl border px-3 py-2"
-  >
-    <option value="">{text.selectLoad}</option>
+                {selectableLoads.length === 0 && (
+                  <p className="rounded-xl border border-slate-200 p-4 text-sm text-slate-500">
+                    {isES
+                      ? "No tienes cargas asignadas pendientes."
+                      : "You have no pending assigned loads."}
+                  </p>
+                )}
+              </div>
+            ) : (
+              <select
+                value={selectedLoadId}
+                onChange={(e) => {
+                  void setCurrentLoad(e.target.value);
+                }}
+                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-900 sm:w-64"
+              >
+                <option value="">{text.selectLoad}</option>
 
-    {driverLoads
-      .filter((load) =>
-        ["assigned", "at_pickup", "in_transit", "at_delivery"].includes(
-          normalizeLoadStatus(load.status)
-        )
-      )
-      .map((load) => (
-        <option key={load.id} value={load.id}>
-          {load.load_number || load.id}
-        </option>
-      ))}
-  </select>
-)}
-
-
+                {selectableLoads.map((load) => (
+                  <option key={load.id} value={load.id}>
+                    {load.load_number || load.id}
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
 
           {selectedLoad &&
-            driverWorkStatus !== "off_duty" &&
-            driverWorkStatus !== "hold" &&
-            latestHosEvent?.event_type?.trim().toLowerCase() !== "home time" ? (
+          driverWorkStatus !== "off_duty" &&
+          driverWorkStatus !== "hold" &&
+          latestHosEvent?.event_type?.trim().toLowerCase() !== "home time" ? (
             <div className="mt-6">
               <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
                 <div>
@@ -3104,8 +3118,9 @@ return (
                 />
                 <InfoBox
                   title={text.destination}
-                  value={`${selectedLoad.destination_city || "—"}, ${selectedLoad.destination_state || "—"
-                    }`}
+                  value={`${selectedLoad.destination_city || "—"}, ${
+                    selectedLoad.destination_state || "—"
+                  }`}
                 />
                 <InfoBox title={text.miles} value={`${selectedLoad.miles ?? 0} mi`} />
                 <InfoBox title={text.rate} value={formatMoney(selectedLoad.rate)} />
@@ -3115,7 +3130,7 @@ return (
                   value={
                     selectedLoad.pickup_unlocked
                       ? selectedLoad.pickup_address ||
-                      `${selectedLoad.origin_city || "—"}, ${selectedLoad.origin_state || "—"}`
+                        `${selectedLoad.origin_city || "—"}, ${selectedLoad.origin_state || "—"}`
                       : isES
                         ? "Dirección de Pickup bloqueada"
                         : "Pickup address locked"
@@ -3126,43 +3141,45 @@ return (
                   title={isES ? "Dirección de Delivery" : "Delivery Address"}
                   value={
                     selectedLoad.delivery_address ||
-                    `${selectedLoad.destination_city || "—"}, ${selectedLoad.destination_state || "—"
+                    `${selectedLoad.destination_city || "—"}, ${
+                      selectedLoad.destination_state || "—"
                     }`
                   }
                 />
               </div>
 
               <div className="mt-6 grid grid-cols-2 gap-2 sm:grid-cols-3">
-               <PrimaryButton
-  label="START DRIVE"
-  active={
-    driverWorkStatus === "driving" &&
-    normalizeLoadStatus(selectedLoad.status) === "assigned"
-  }
-  disabled={
-    latestHosEvent?.event_type?.trim().toLowerCase() === "home time" ||
-    isDriveBlocked(driverWorkStatus)
-  }
-  onClick={() => {
-    if (
-      latestHosEvent?.event_type?.trim().toLowerCase() === "home time" ||
-      isDriveBlocked(driverWorkStatus)
-    ) {
-      return;
-    }
+                <PrimaryButton
+                  label="START DRIVE"
+                  active={
+                    driverWorkStatus === "driving" &&
+                    normalizeLoadStatus(selectedLoad.status) === "assigned"
+                  }
+                  disabled={
+                    latestHosEvent?.event_type?.trim().toLowerCase() === "home time" ||
+                    isDriveBlocked(driverWorkStatus)
+                  }
+                  onClick={() => {
+                    if (
+                      latestHosEvent?.event_type?.trim().toLowerCase() === "home time" ||
+                      isDriveBlocked(driverWorkStatus)
+                    ) {
+                      return;
+                    }
 
-    void startDrive();
-  }}
-/>
+                    void startDrive();
+                  }}
+                />
 
                 <button
                   type="button"
                   disabled
-                  className={`min-h-10 cursor-default rounded-xl border px-3 py-2 text-xs font-semibold transition disabled:opacity-100 ${normalizeLoadStatus(selectedLoad.status) === "at_pickup" ||
+                  className={`min-h-10 cursor-default rounded-xl border px-3 py-2 text-xs font-semibold transition disabled:opacity-100 ${
+                    normalizeLoadStatus(selectedLoad.status) === "at_pickup" ||
                     (selectedLoad.status && selectedLoad.status.toLowerCase().includes("pickup"))
-                    ? "border-amber-500 bg-amber-100 text-amber-900 shadow-sm font-bold animate-pulse"
-                    : "border-slate-200 bg-white text-slate-500"
-                    }`}
+                      ? "animate-pulse border-amber-500 bg-amber-100 font-bold text-amber-900 shadow-sm"
+                      : "border-slate-200 bg-white text-slate-500"
+                  }`}
                 >
                   AT PICKUP
                 </button>
@@ -3170,10 +3187,11 @@ return (
                 <button
                   type="button"
                   disabled
-                  className={`min-h-10 cursor-default rounded-xl border px-3 py-2 text-xs font-semibold transition disabled:opacity-100 ${normalizeLoadStatus(selectedLoad.status) === "in_transit"
-                    ? "border-blue-500 bg-blue-100 text-blue-900 shadow-sm font-bold"
-                    : "border-slate-200 bg-white text-slate-500"
-                    }`}
+                  className={`min-h-10 cursor-default rounded-xl border px-3 py-2 text-xs font-semibold transition disabled:opacity-100 ${
+                    normalizeLoadStatus(selectedLoad.status) === "in_transit"
+                      ? "border-blue-500 bg-blue-100 font-bold text-blue-900 shadow-sm"
+                      : "border-slate-200 bg-white text-slate-500"
+                  }`}
                 >
                   START TRIP
                 </button>
@@ -3181,10 +3199,11 @@ return (
                 <button
                   type="button"
                   disabled
-                  className={`min-h-10 cursor-default rounded-xl border px-3 py-2 text-xs font-semibold transition disabled:opacity-100 ${normalizeLoadStatus(selectedLoad.status) === "at_delivery"
-                    ? "border-purple-500 bg-purple-100 text-purple-900 shadow-sm font-bold animate-pulse"
-                    : "border-slate-200 bg-white text-slate-500"
-                    }`}
+                  className={`min-h-10 cursor-default rounded-xl border px-3 py-2 text-xs font-semibold transition disabled:opacity-100 ${
+                    normalizeLoadStatus(selectedLoad.status) === "at_delivery"
+                      ? "animate-pulse border-purple-500 bg-purple-100 font-bold text-purple-900 shadow-sm"
+                      : "border-slate-200 bg-white text-slate-500"
+                  }`}
                 >
                   AT DELIVERY
                 </button>
@@ -3193,12 +3212,10 @@ return (
                   label="Done"
                   active={normalizeLoadStatus(selectedLoad.status) === "delivered"}
                   onClick={() => {
-                    void (async () => {
-                      await updateLoadStatus("done");
-                    })();
+                    void updateLoadStatus("done");
                   }}
                 />
-              </div> 
+              </div>
 
               <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs leading-5 text-slate-600">
                 {isES
@@ -3227,42 +3244,43 @@ return (
             </div>
 
             <span
-              className={`rounded-full border px-3 py-1.5 text-xs font-bold ${gpsTracking
-                ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                : "border-slate-200 bg-slate-50 text-slate-500"
-                }`}
+              className={`rounded-full border px-3 py-1.5 text-xs font-bold ${
+                gpsTracking
+                  ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                  : "border-slate-200 bg-slate-50 text-slate-500"
+              }`}
             >
               {gpsTracking
-              ? text.live
-              : gpsReceivingRecently
-              ? isES
-              ? "RECIBIENDO"
-              : "RECEIVING"
-              : text.off}
+                ? text.live
+                : gpsReceivingRecently
+                  ? isES
+                    ? "RECIBIENDO"
+                    : "RECEIVING"
+                  : text.off}
             </span>
           </div>
 
           <div
-            className={`mt-5 rounded-xl border p-5 ${gpsTracking
-              ? gpsDatabaseError
-                ? "border-amber-200 bg-amber-50"
-                : "border-emerald-200 bg-emerald-50"
-              : "border-slate-200 bg-slate-50"
-              }`}
+            className={`mt-5 rounded-xl border p-5 ${
+              gpsTracking
+                ? gpsDatabaseError
+                  ? "border-amber-200 bg-amber-50"
+                  : "border-emerald-200 bg-emerald-50"
+                : "border-slate-200 bg-slate-50"
+            }`}
           >
             <div className="flex items-center gap-3">
               <span
-                className={`h-3 w-3 rounded-full ${gpsTracking
-                  ? gpsDatabaseError
-                  ? "animate-pulse bg-amber-500"
-                  : "animate-pulse bg-emerald-500"
-                  : "bg-slate-400"
-                  }`}
+                className={`h-3 w-3 rounded-full ${
+                  gpsTracking
+                    ? gpsDatabaseError
+                      ? "animate-pulse bg-amber-500"
+                      : "animate-pulse bg-emerald-500"
+                    : "bg-slate-400"
+                }`}
               />
 
-              <div className="font-bold text-slate-900">
-                  {gpsDisplayStatus}
-             </div>
+              <div className="font-bold text-slate-900">{gpsDisplayStatus}</div>
             </div>
 
             <div className="mt-2 text-xs text-slate-500">
@@ -3284,21 +3302,16 @@ return (
                 <MetricValue label={text.accuracy} value={`${Math.round(lastLocation.accuracy)} m`} />
                 <MetricValue
                   label={text.speed}
-                  value={
-                    lastLocation.speed !== null ? `${lastLocation.speed.toFixed(2)} m/s` : "—"
-                  }
+                  value={lastLocation.speed !== null ? `${lastLocation.speed.toFixed(2)} m/s` : "—"}
                 />
                 <MetricValue
                   label={text.heading}
-                  value={
-                    lastLocation.heading !== null ? `${Math.round(lastLocation.heading)}°` : "—"
-                  }
+                  value={lastLocation.heading !== null ? `${Math.round(lastLocation.heading)}°` : "—"}
                 />
               </div>
             )}
           </div>
 
-          
           <div className="mt-5 overflow-hidden rounded-xl border border-slate-200 bg-white">
             <div className="border-b border-slate-200 px-4 py-3">
               <h3 className="text-sm font-bold text-slate-900">
@@ -3315,30 +3328,33 @@ return (
               </p>
             </div>
 
-            
-<TruckMap
-  lastLocation={lastLocation}
-  destination={navigationStop}
-  isES={isES}
-  onArrival={(stop) => {
-    void processSequenceArrival(stop);
-  }}
-/>
-
+            {/* RESTAURADO: onArrival estaba vacío, por lo que ninguna parada pasaba a
+                at_pickup / at_delivery y el botón DONE nunca podía funcionar.
+                Los guardas de processSequenceArrival evitan procesos duplicados. */}
+            <TruckMap
+              lastLocation={lastLocation}
+              destination={navigationStop}
+              isES={isES}
+              onArrival={(arrivedStop?: { id: string; stop_order: number; stop_type: string }) => {
+                const target = arrivedStop ?? navigationStop;
+                if (target) void processSequenceArrival(target);
+              }}
+            />
           </div>
 
           <div className="mt-4">
             <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-bold text-slate-700">
               {gpsTracking
-              ? text.gpsActive
-              : gpsReceivingRecently
-              ? isES
-              ? "Recibiendo ubicación GPS del teléfono"
-              : "Receiving GPS location from phone"
-              : text.gpsNotActive}
+                ? text.gpsActive
+                : gpsReceivingRecently
+                  ? isES
+                    ? "Recibiendo ubicación GPS del teléfono"
+                    : "Receiving GPS location from phone"
+                  : text.gpsNotActive}
             </div>
           </div>
-         </div>
+        </div>
+
         <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
           <div>
             <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">
@@ -3359,10 +3375,12 @@ return (
             ].map((status) => (
               <div
                 key={status.value}
-                className={`rounded-xl border px-3 py-3 text-center text-sm font-bold transition ${latestStatusNormalized === status.value.toLowerCase()
-                  ? "border-slate-900 bg-slate-900 text-white"
-                  : "border-slate-200 bg-white text-slate-700"
-                  }`}
+                className={`rounded-xl border px-3 py-3 text-center text-sm font-bold transition ${
+                  // CORREGIDO: antes "off duty" nunca coincidía con "off_duty".
+                  latestStatusNormalized === status.value.toLowerCase().replace(/[\s-]+/g, "_")
+                    ? "border-slate-900 bg-slate-900 text-white"
+                    : "border-slate-200 bg-white text-slate-700"
+                }`}
               >
                 {status.label}
               </div>
@@ -3431,9 +3449,7 @@ return (
             description={text.shiftClockDescription}
             limit="14h"
             value={formatClock(shiftRemainingMs)}
-            detail={
-              shiftRemainingMs === 0 ? text.shiftLimitReached : text.currentShiftCalculation
-            }
+            detail={shiftRemainingMs === 0 ? text.shiftLimitReached : text.currentShiftCalculation}
           />
 
           <ClockBox
@@ -3502,29 +3518,27 @@ return (
                 </thead>
 
                 <tbody>
-                  {documents.map((document) => (
+                  {documents.map((doc) => (
                     <tr
-                      key={document.id}
+                      key={doc.id}
                       className="border-b border-slate-100 last:border-b-0 hover:bg-slate-50"
                     >
                       <td className="px-4 py-3 text-sm font-semibold text-slate-800">
-                        {document.document_type || "—"}
+                        {doc.document_type || "—"}
                       </td>
-                      <td className="px-4 py-3 text-sm text-slate-600">
-                        {document.file_name || "—"}
-                      </td>
+                      <td className="px-4 py-3 text-sm text-slate-600">{doc.file_name || "—"}</td>
                       <td className="px-4 py-3">
                         <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700">
-                          {document.status || "—"}
+                          {doc.status || "—"}
                         </span>
                       </td>
                       <td className="px-4 py-3 text-sm text-slate-500">
-                        {formatDateTime(document.uploaded_at)}
+                        {formatDateTime(doc.uploaded_at)}
                       </td>
                       <td className="px-4 py-3">
                         <button
                           type="button"
-                          onClick={() => viewDocument(document.storage_path)}
+                          onClick={() => void viewDocument(doc.storage_path)}
                           className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-700 shadow-sm transition hover:bg-slate-50"
                         >
                           {text.view}
@@ -3541,7 +3555,7 @@ return (
 
       {documentModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4">
-          <div className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white shadow-2xl">
+          <div className="max-h-full w-full max-w-lg overflow-y-auto rounded-2xl border border-slate-200 bg-white shadow-2xl">
             <div className="border-b border-slate-200 px-6 py-5">
               <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">
                 {text.loadDocuments}
@@ -3560,7 +3574,10 @@ return (
 
                 <select
                   value={documentType}
-                  onChange={(e) => setDocumentType(e.target.value)}
+                  onChange={(e) => {
+                    setDocumentType(e.target.value);
+                    setSelectedDocumentStopId("");
+                  }}
                   className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-900 outline-none focus:border-slate-400 focus:ring-2 focus:ring-slate-100"
                 >
                   <option value="POD">POD</option>
@@ -3571,6 +3588,39 @@ return (
                 </select>
               </div>
 
+              {/* NUEVO: selector de parada de entrega. El POD lo exige (regla existente en
+                  uploadDocument) pero antes no había ningún campo para elegirla. */}
+              {isPodSelected && (
+                <div>
+                  <label className="mb-2 block text-xs font-bold uppercase tracking-wide text-slate-500">
+                    {text.deliveryStop}
+                  </label>
+
+                  {deliveryStops.length === 0 ? (
+                    <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800">
+                      {text.noDeliveryStops}
+                    </div>
+                  ) : (
+                    <select
+                      value={selectedDocumentStopId}
+                      onChange={(e) => setSelectedDocumentStopId(e.target.value)}
+                      className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-900 outline-none focus:border-slate-400 focus:ring-2 focus:ring-slate-100"
+                    >
+                      <option value="">{text.selectDeliveryStop}</option>
+                      {deliveryStops.map((stop) => (
+                        <option key={stop.id} value={stop.id}>
+                          {`#${stop.stop_order} · ${
+                            [stop.city, stop.state].filter(Boolean).join(", ") ||
+                            stop.address ||
+                            "—"
+                          }`}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+              )}
+
               <div>
                 <label className="mb-2 block text-xs font-bold uppercase tracking-wide text-slate-500">
                   {text.chooseFile}
@@ -3579,7 +3629,7 @@ return (
                 <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-4">
                   <input
                     type="file"
-                    accept=".pdf,.jpg,.jpeg,.png,.webp"
+                    accept=".pdf,.jpg,.jpeg,.png,.webp,application/pdf,image/jpeg,image/png,image/webp"
                     onChange={(e) => setSelectedFile(e.target.files?.[0] || null)}
                     className="block w-full text-sm text-slate-600 file:mr-4 file:rounded-lg file:border-0 file:bg-slate-900 file:px-3 file:py-2 file:text-xs file:font-bold file:text-white hover:file:bg-slate-800"
                   />
@@ -3598,10 +3648,7 @@ return (
             <div className="flex justify-end gap-2 border-t border-slate-200 px-6 py-4">
               <button
                 type="button"
-                onClick={() => {
-                  setDocumentModalOpen(false);
-                  setSelectedFile(null);
-                }}
+                onClick={closeDocumentModal}
                 className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
               >
                 {text.cancel}
@@ -3611,8 +3658,9 @@ return (
                 type="button"
                 onClick={() => void uploadDocument()}
                 disabled={uploadingDocument}
-                className={`rounded-xl px-4 py-2.5 text-sm font-bold text-white ${uploadingDocument ? "cursor-not-allowed bg-slate-400" : "bg-slate-900 hover:bg-slate-800"
-                  }`}
+                className={`rounded-xl px-4 py-2.5 text-sm font-bold text-white ${
+                  uploadingDocument ? "cursor-not-allowed bg-slate-400" : "bg-slate-900 hover:bg-slate-800"
+                }`}
               >
                 {uploadingDocument ? text.uploading : text.upload}
               </button>
@@ -3685,7 +3733,6 @@ function ClockBox({
   );
 }
 
-
 function PrimaryButton({
   label,
   onClick,
@@ -3702,12 +3749,13 @@ function PrimaryButton({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className={`rounded-xl border px-4 py-2.5 text-sm font-bold transition ${disabled
-        ? "cursor-not-allowed border-slate-200 bg-slate-200 text-slate-400 opacity-70"
-        : active
-          ? "border-slate-900 bg-slate-900 text-white"
-          : "border-slate-200 bg-white text-slate-900 hover:bg-slate-50"
-        }`}
+      className={`rounded-xl border px-4 py-2.5 text-sm font-bold transition ${
+        disabled
+          ? "cursor-not-allowed border-slate-200 bg-slate-200 text-slate-400 opacity-70"
+          : active
+            ? "border-slate-900 bg-slate-900 text-white"
+            : "border-slate-200 bg-white text-slate-900 hover:bg-slate-50"
+      }`}
     >
       {label}
     </button>
@@ -3727,10 +3775,11 @@ function SecondaryButton({
     <button
       type="button"
       onClick={onClick}
-      className={`rounded-xl border px-4 py-2.5 text-sm font-bold transition ${active
-        ? "border-slate-900 bg-slate-900 text-white"
-        : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
-        }`}
+      className={`rounded-xl border px-4 py-2.5 text-sm font-bold transition ${
+        active
+          ? "border-slate-900 bg-slate-900 text-white"
+          : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+      }`}
     >
       {label}
     </button>

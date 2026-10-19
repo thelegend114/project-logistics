@@ -2236,7 +2236,7 @@ async function updateLoadStatus(status: string): Promise<boolean> {
         return false;
       }
 
-      if (currentStop.status === "at_pickup") {
+     if (currentLoadStatus === "at_pickup") {
         showMessage(
           isES ? "La recogida ya está confirmada." : "Pickup is already confirmed."
         );
@@ -2284,7 +2284,7 @@ async function updateLoadStatus(status: string): Promise<boolean> {
 }
      const { data: updatedLoad, error: updateLoadError } = await supabase
   .from("loads")
-  .update({ status: "in_progress" })
+  .update({ status: "at_pickup" })
   .eq("id", loadId)
   .eq("driver_id", driverId)
   .select(LOAD_SELECT)
@@ -2576,19 +2576,23 @@ async function updateLoadStatus(status: string): Promise<boolean> {
 
     // 6. DONE: validar primero la parada y los documentos.
     if (targetStatus === "delivered") {
-      const expectedStopStatus =
-        currentStop.stop_type === "pickup"
-          ? "at_pickup"
-          : "at_delivery";
+      const expectedLoadArrivalStatus =
+  currentStop.stop_type === "pickup"
+    ? "at_pickup"
+    : "at_delivery";
 
-      if (currentStop.status !== expectedStopStatus) {
-        showMessage(
-          isES
-            ? "Confirma la llegada con AT PICKUP o AT DELIVERY antes de pulsar DONE."
-            : "Confirm arrival with AT PICKUP or AT DELIVERY before pressing DONE."
-        );
-        return false;
-      }
+if (currentLoadStatus !== expectedLoadArrivalStatus) {
+  showMessage(
+    isES
+      ? "Confirma la llegada con AT PICKUP o AT DELIVERY antes de pulsar DONE."
+      : "Confirm arrival with AT PICKUP or AT DELIVERY before pressing DONE."
+  );
+  return false;
+}
+
+// load_stops solo admite pending, in_progress y completed.
+// Conservamos el estado real de la parada para completarla correctamente.
+const expectedStopStatus = currentStop.status;
 
       const nextStop = stops.find(
         (stop) =>
@@ -3908,28 +3912,39 @@ async function updateLoadStatus(status: string): Promise<boolean> {
                 <InfoBox title={text.pickup} value={formatDate(selectedLoad.pickup_date)} />
                 <InfoBox
                   title={isES ? "Dirección de Pickup" : "Pickup Address"}
-                  value={
-                    selectedLoad.pickup_unlocked
-                      ? selectedLoad.pickup_address ||
-                        `${selectedLoad.origin_city || "—"}, ${selectedLoad.origin_state || "—"}`
-                      : isES
-                        ? "Dirección de Pickup bloqueada"
-                        : "Pickup address locked"
-                  }
+              
+value={
+  navigationStop?.stop_type === "pickup" &&
+  navigationStop?.address
+    ? navigationStop.address
+    : selectedLoad.pickup_unlocked
+      ? selectedLoad.pickup_address ||
+        `${selectedLoad.origin_city || "—"}, ${selectedLoad.origin_state || "—"}`
+      : isES
+        ? "Dirección de Pickup bloqueada"
+        : "Pickup address locked"
+}
+
                 />
                 <InfoBox title={text.delivery} value={formatDate(selectedLoad.delivery_date)} />
                 <InfoBox
                   title={isES ? "Dirección de Delivery" : "Delivery Address"}
-                  value={
-                    selectedLoad.delivery_address ||
-                    `${selectedLoad.destination_city || "—"}, ${
-                      selectedLoad.destination_state || "—"
-                    }`
-                  }
+                  
+value={
+  navigationStop?.stop_type === "delivery" &&
+  navigationStop?.address
+    ? navigationStop.address
+    : selectedLoad.delivery_address ||
+      `${selectedLoad.destination_city || "—"}, ${
+        selectedLoad.destination_state || "—"
+      }`
+}
+
                 />
               </div>
 
-              <div className="mt-6 grid grid-cols-2 gap-2 sm:grid-cols-3">
+             
+<div className="mt-6 grid grid-cols-2 gap-2 sm:grid-cols-3">
   <PrimaryButton
     label="START DRIVE"
     active={driverWorkStatus === "driving"}
@@ -3968,7 +3983,7 @@ async function updateLoadStatus(status: string): Promise<boolean> {
   />
 
   <SecondaryButton
-    label="Done"
+    label="DONE"
     active={normalizeLoadStatus(selectedLoad.status) === "delivered"}
     onClick={() => void updateLoadStatus("done")}
   />
@@ -3979,6 +3994,7 @@ async function updateLoadStatus(status: string): Promise<boolean> {
     ? "Los cambios de estado se realizan manualmente con los botones. El GPS solo rastrea la ubicación."
     : "Status changes are made manually with the buttons. GPS only tracks location."}
 </div>
+
             </div>
           ) : (
             <div className="mt-6 rounded-xl border border-dashed border-slate-200 bg-slate-50 p-8 text-center">

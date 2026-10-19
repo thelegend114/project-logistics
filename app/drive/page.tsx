@@ -1623,117 +1623,232 @@ export default function DriverPage() {
     }
   }
 
-  async function startDrive(): Promise<boolean> {
-    if (!selectedLoad) {
-      showMessage(text.selectLoadFirst);
-      return false;
-    }
+ 
+async function startDrive(): Promise<boolean> {
+  if (!selectedLoad) {
+    showMessage(text.selectLoadFirst);
+    return false;
+  }
 
-    if (!selectedDriver) {
-      showMessage(text.selectDriverFirst);
-      return false;
-    }
+  if (!selectedDriver) {
+    showMessage(text.selectDriverFirst);
+    return false;
+  }
 
-    if (!navigator.geolocation) {
-      showMessage(text.browserNoGps);
-      return false;
-    }
+  if (!navigator.geolocation) {
+    showMessage(text.browserNoGps);
+    return false;
+  }
 
-    if (gpsWatchId.current !== null && !gpsTracking) {
+  if (gpsWatchId.current !== null && !gpsTracking) {
+    showMessage(
+      isES
+        ? "El estado del GPS no está sincronizado. Detén el GPS e inténtalo nuevamente."
+        : "GPS state is not synchronized. Stop GPS and try again."
+    );
+    return false;
+  }
+
+  if (
+    latestHosEvent?.event_type?.trim().toLowerCase() === "home time"
+  ) {
+    showMessage(
+      isES
+        ? "No puedes iniciar la conducción mientras tu estado HOS sea Home Time."
+        : "You cannot start driving while your HOS status is Home Time."
+    );
+    return false;
+  }
+
+  const loadId = selectedLoad.id;
+  const driverId = selectedDriver.id;
+  const loadNumber = selectedLoad.load_number || "";
+  const previousDriverStatus = selectedDriver.status;
+  const previousCurrentLoadId = selectedDriver.current_load_id ?? null;
+  const currentStatus = normalizeLoadStatus(selectedLoad.status);
+
+  // START DRIVE puede comenzar una carga asignada o continuar
+  // una carga cuyo flujo de paradas ya está en progreso.
+  if (!["assigned", "in_progress"].includes(currentStatus)) {
+    showMessage(
+      isES
+        ? "START DRIVE solo puede iniciar una carga asignada o continuar una carga en progreso."
+        : "START DRIVE can only begin an assigned load or continue a load in progress."
+    );
+    return false;
+  }
+
+  if (!selectedLoad.pickup_unlocked) {
+    showMessage(
+      isES
+        ? "Esta carga está bloqueada hasta que corresponda iniciar el período de trabajo."
+        : "This load is locked until it is eligible to begin the work period."
+    );
+    return false;
+  }
+
+  if (selectedLoad.pickup_date) {
+    const pickupTime = new Date(selectedLoad.pickup_date).getTime();
+
+    if (!Number.isNaN(pickupTime) && pickupTime > Date.now()) {
       showMessage(
         isES
-          ? "El estado del GPS no está sincronizado. Detén el GPS e inténtalo nuevamente."
-          : "GPS state is not synchronized. Stop GPS and try again."
+          ? "Esta carga todavía es futura."
+          : "This load is still scheduled for the future."
       );
       return false;
     }
+  }
 
-    if (latestHosEvent?.event_type?.trim().toLowerCase() === "home time") {
+  // Verificar en Supabase que la carga continúa asignada al conductor.
+  const { data: loadCheck, error: loadCheckError } = await supabase
+    .from("loads")
+    .select("id, driver_id, status, pickup_unlocked, pickup_date")
+    .eq("id", loadId)
+    .eq("driver_id", driverId)
+    .maybeSingle();
+
+  if (
+    loadCheckError ||
+    !loadCheck ||
+    !["assigned", "in_progress"].includes(
+      normalizeLoadStatus(loadCheck.status)
+    )
+  ) {
+    console.error("START DRIVE LOAD CHECK:", loadCheckError, loadCheck);
+
+    showMessage(
+      isES
+        ? "La carga ya no está disponible para iniciar o continuar."
+        : "The load is no longer available to start or continue."
+    );
+    return false;
+  }
+
+  if (!loadCheck.pickup_unlocked) {
+    showMessage(
+      isES
+        ? "La carga continúa bloqueada en Supabase."
+        : "The load is still locked in Supabase."
+    );
+    return false;
+  }
+
+  if (loadCheck.pickup_date) {
+    const pickupTime = new Date(loadCheck.pickup_date).getTime();
+
+    if (!Number.isNaN(pickupTime) && pickupTime > Date.now()) {
       showMessage(
         isES
-          ? "No puedes iniciar la conducción mientras tu estado HOS sea Home Time."
-          : "You cannot start driving while your HOS status is Home Time."
+          ? "La fecha de recogida todavía es futura."
+          : "The pickup date is still in the future."
       );
       return false;
     }
+  }
 
-    const loadId = selectedLoad.id;
-    const driverId = selectedDriver.id;
-    const loadNumber = selectedLoad.load_number || "";
+  // Conservar el vínculo de la carga activa con el conductor.
+  const currentLoadSaved = await setCurrentLoad(loadId);
 
-    if (normalizeLoadStatus(selectedLoad.status) !== "assigned") {
-      showMessage(
-        isES
-          ? "START DRIVE solamente puede comenzar una carga asignada."
-          : "START DRIVE can only begin an assigned load."
-      );
-      return false;
-    }
+  if (!currentLoadSaved) {
+    return false;
+  }
 
-    if (!selectedLoad.pickup_unlocked) {
-      showMessage(
-        isES
-          ? "Esta carga está bloqueada hasta que corresponda iniciar el período de trabajo."
-          : "This load is locked until it is eligible to begin the work period."
-      );
-      return false;
-    }
+  const { data: driverData, error: driverError } = await supabase
+    .from("drivers")
+    .update({ status: "driving" })
+    .eq("id", driverId)
+    .select("id, status")
+    .maybeSingle();
 
-    if (selectedLoad.pickup_date) {
-      const pickupTime = new Date(selectedLoad.pickup_date).getTime();
-      if (!Number.isNaN(pickupTime) && pickupTime > Date.now()) {
-        showMessage(
-          isES
-            ? "Esta carga todavía es futura."
-            : "This load is still scheduled for the future."
-        );
-        return false;
-      }
-    }
+  if (
+    driverError ||
+    !driverData ||
+    driverData.status !== "driving"
+  ) {
+    console.error("START DRIVE DRIVER UPDATE:", driverError, driverData);
 
-    const currentLoadSaved = await setCurrentLoad(loadId);
-    if (!currentLoadSaved) return false;
+    showMessage(
+      isES
+        ? `No se pudo guardar Driving: ${driverError?.message ?? "No se confirmó la actualización."}`
+        : `Could not save Driving: ${driverError?.message ?? "The update was not confirmed."}`
+    );
+    return false;
+  }
 
-    const { data: driverData, error: driverError } = await supabase
+  // Registrar HOS antes de iniciar el GPS.
+  const hosSaved = await setHosStatus("Driving");
+
+  if (!hosSaved) {
+    console.error("START DRIVE HOS FAILED");
+
+    const { error: rollbackError } = await supabase
       .from("drivers")
-      .update({ status: "driving" })
+      .update({
+        status: previousDriverStatus,
+        current_load_id: previousCurrentLoadId,
+      })
       .eq("id", driverId)
-      .select("id, status")
-      .single();
+      .eq("status", "driving");
 
-    if (driverError || !driverData || driverData.status !== "driving") {
+    if (rollbackError) {
+      console.error("START DRIVE ROLLBACK FAILED:", rollbackError);
+
       showMessage(
         isES
-          ? `No se pudo guardar Driving: ${driverError?.message ?? `Estado recibido: ${driverData?.status ?? "sin datos"}`}`
-          : `Could not save Driving: ${driverError?.message ?? `Received status: ${driverData?.status ?? "no data"}`}`
+          ? "Falló HOS y no se pudo restaurar el conductor. Verifica Supabase antes de continuar."
+          : "HOS failed and the driver could not be restored. Verify Supabase before continuing."
       );
       return false;
     }
 
     setDrivers((current) =>
-      current.map((driver) => (driver.id === driverId ? { ...driver, status: "driving" } : driver))
+      current.map((driver) =>
+        driver.id === driverId
+          ? {
+              ...driver,
+              status: previousDriverStatus,
+              current_load_id: previousCurrentLoadId,
+            }
+          : driver
+      )
     );
 
-    setDriverWorkStatus("driving");
-
-    const hosSaved = await setHosStatus("Driving");
-    if (!hosSaved) {
-      showMessage(
-        isES
-          ? "No se pudo guardar el evento HOS. El GPS no se iniciará."
-          : "Could not save the HOS event. GPS will not start."
-      );
-      return false;
-    }
-
-    startGpsTracking();
+   setDriverWorkStatus(
+  (previousDriverStatus ?? "available") as DriverWorkStatus
+);
 
     showMessage(
-      isES ? `START DRIVE iniciado para ${loadNumber}.` : `START DRIVE started for ${loadNumber}.`
+      isES
+        ? "No se guardó HOS. Se restauró el estado anterior del conductor y no se inició el GPS."
+        : "HOS was not saved. The driver's previous status was restored and GPS was not started."
     );
 
-    return true;
+    return false;
   }
+
+  setDrivers((current) =>
+    current.map((driver) =>
+      driver.id === driverId
+        ? { ...driver, status: "driving", current_load_id: loadId }
+        : driver
+    )
+  );
+
+  setDriverWorkStatus("driving");
+
+  // Mantener la función de rastreo existente sin cambios.
+  startGpsTracking();
+
+  showMessage(
+    isES
+      ? `START DRIVE iniciado para ${loadNumber}.`
+      : `START DRIVE started for ${loadNumber}.`
+  );
+
+  return true;
+}
+
 
   async function processSequenceArrival(arrivedStop: {
     id: string;
@@ -1925,262 +2040,729 @@ export default function DriverPage() {
     }
   }
 
-  async function updateLoadStatus(status: string): Promise<boolean> {
-    if (!selectedLoad) {
-      showMessage(text.selectLoadFirst);
-      return false;
-    }
+  
 
-    if (!selectedDriverId) {
-      showMessage(isES ? "No hay un conductor seleccionado." : "No driver is selected.");
-      return false;
-    }
+async function updateLoadStatus(status: string): Promise<boolean> {
+  if (!selectedLoad) {
+    showMessage(text.selectLoadFirst);
+    return false;
+  }
 
-    const loadId = selectedLoad.id;
-    const driverId = selectedDriverId;
+  if (!selectedDriverId) {
+    showMessage(
+      isES
+        ? "No hay un conductor seleccionado."
+        : "No driver is selected."
+    );
+    return false;
+  }
 
-    const rawStatus = String(status).trim().toLowerCase();
-    const normalizedStatus = rawStatus === "done" ? "delivered" : normalizeLoadStatus(rawStatus);
+  const loadId = selectedLoad.id;
+  const driverId = selectedDriverId;
+  const requestedStatus = String(status).trim().toLowerCase();
 
-    if (normalizedStatus !== "delivered") {
+  const targetStatus =
+    requestedStatus === "done"
+      ? "delivered"
+      : normalizeLoadStatus(requestedStatus);
+
+  const allowedTargets = [
+    "at_pickup",
+    "in_transit",
+    "at_delivery",
+    "delivered",
+  ];
+
+  if (!allowedTargets.includes(targetStatus)) {
+    showMessage(
+      isES ? "Estado solicitado no válido." : "Invalid requested status."
+    );
+    return false;
+  }
+
+  const finishedStatuses = [
+    "completed",
+    "complete",
+    "delivered",
+    "cancelled",
+    "canceled",
+  ];
+
+  try {
+    // 1. Leer el estado real de la carga en Supabase.
+    const { data: loadRecord, error: loadError } = await supabase
+      .from("loads")
+      .select("id, driver_id, status, load_number")
+      .eq("id", loadId)
+      .eq("driver_id", driverId)
+      .maybeSingle();
+
+    if (loadError || !loadRecord) {
+      console.error("MANUAL STATUS - LOAD VALIDATION:", loadError);
       showMessage(
-        isES
-          ? "Las llegadas y el inicio del viaje son controlados automáticamente por GPS."
-          : "Arrivals and trip start are controlled automatically by GPS."
+        isES ? "No se pudo verificar la carga." : "Could not verify the load."
       );
       return false;
     }
 
-    try {
-      const { data: stopData, error: stopError } = await supabase
-        .from("load_stops")
-        .select(
-          "id, load_id, stop_order, stop_type, address, city, state, scheduled_date, scheduled_time, status"
+    const originalLoadStatus = String(
+      loadRecord.status ?? "assigned"
+    ).trim();
+
+    const currentLoadStatus = normalizeLoadStatus(originalLoadStatus);
+
+    const { data: driverRecord, error: driverReadError } = await supabase
+      .from("drivers")
+      .select("id, status, current_load_id")
+      .eq("id", driverId)
+      .maybeSingle();
+
+    if (driverReadError || !driverRecord) {
+      console.error("MANUAL STATUS - DRIVER VALIDATION:", driverReadError);
+      showMessage(
+        isES
+          ? "No se pudo verificar el conductor."
+          : "Could not verify the driver."
+      );
+      return false;
+    }
+
+    if (
+      driverRecord.current_load_id &&
+      driverRecord.current_load_id !== loadId
+    ) {
+      showMessage(
+        isES
+          ? "El conductor tiene otra carga activa."
+          : "The driver has another active load."
+      );
+      return false;
+    }
+
+    // 2. Leer y ordenar las paradas desde la fuente de verdad.
+    const { data: stopData, error: stopError } = await supabase
+      .from("load_stops")
+      .select(
+        "id, load_id, stop_order, stop_type, address, city, state, latitude, longitude, status"
+      )
+      .eq("load_id", loadId)
+      .order("stop_order", { ascending: true });
+
+    if (stopError || !stopData || stopData.length === 0) {
+      console.error("MANUAL STATUS - STOPS:", stopError);
+      showMessage(
+        isES
+          ? "No se pudieron verificar las paradas."
+          : "Could not verify stops."
+      );
+      return false;
+    }
+
+    const stops = stopData.map((stop) => ({
+      ...stop,
+      stop_order: Number(stop.stop_order),
+      stop_type: String(stop.stop_type ?? "").trim().toLowerCase(),
+      status: normalizeLoadStatus(stop.status ?? "pending"),
+    }));
+
+    const invalidStop = stops.find(
+      (stop) =>
+        !Number.isFinite(stop.stop_order) ||
+        !["pickup", "delivery"].includes(stop.stop_type)
+    );
+
+    if (invalidStop) {
+      console.error("MANUAL STATUS - INVALID STOP:", invalidStop);
+      showMessage(
+        isES
+          ? "Hay una parada con datos inválidos. No se puede continuar."
+          : "A stop contains invalid data. Cannot continue."
+      );
+      return false;
+    }
+
+    const currentStop = stops.find(
+      (stop) => !finishedStatuses.includes(stop.status)
+    );
+
+    if (!currentStop) {
+      showMessage(
+        isES
+          ? "No quedan paradas pendientes."
+          : "There are no remaining stops."
+      );
+      return false;
+    }
+
+    const refreshLoadInUI = (updatedLoad: typeof selectedLoad) => {
+      setLoads((current) =>
+        current.map((load) =>
+          load.id === updatedLoad.id
+            ? (updatedLoad as Load)
+            : load
         )
+      );
+    };
+
+    const refreshNavigation = async () => {
+      const nextStop = await getCurrentSequenceStop(loadId);
+      setNavigationStop(nextStop);
+    };
+
+    // 3. AT PICKUP: solo para la siguiente recogida de la secuencia.
+    if (targetStatus === "at_pickup") {
+      if (currentStop.stop_type !== "pickup") {
+        showMessage(
+          isES
+            ? "La siguiente parada no es una recogida."
+            : "The next stop is not a pickup."
+        );
+        return false;
+      }
+
+      if (
+        ![
+          "assigned",
+          "in_progress",
+          "at_pickup",
+          "in_transit",
+        ].includes(currentLoadStatus)
+      ) {
+        showMessage(
+          isES
+            ? "No se puede confirmar la recogida en el estado actual."
+            : "Pickup cannot be confirmed in the current state."
+        );
+        return false;
+      }
+
+      if (currentStop.status === "at_pickup") {
+        showMessage(
+          isES ? "La recogida ya está confirmada." : "Pickup is already confirmed."
+        );
+        return true;
+      }
+
+      if (finishedStatuses.includes(currentStop.status)) {
+        showMessage(
+          isES
+            ? "Esta parada ya está completada."
+            : "This stop is already completed."
+        );
+        return false;
+      }
+
+      const { data: updatedStop, error: updateStopError } = await supabase
+        .from("load_stops")
+        .update({ status: "at_pickup" })
+        .eq("id", currentStop.id)
         .eq("load_id", loadId)
-        .order("stop_order", { ascending: true });
+        .eq("status", currentStop.status)
+        .select("id")
+        .maybeSingle();
 
-      if (stopError || !stopData || stopData.length === 0) {
-        console.error("DONE - LOAD STOPS ERROR:", stopError);
-
+      if (updateStopError || !updatedStop) {
+        console.error("MANUAL AT PICKUP:", updateStopError);
         showMessage(
           isES
-            ? "No se pudieron cargar las paradas de la carga."
-            : "Could not load the stops for this load."
+            ? "No se pudo actualizar la recogida."
+            : "Could not update the pickup."
         );
         return false;
       }
 
-      const stops = stopData.map((stop) => ({
-        ...stop,
-        stop_order: Number(stop.stop_order),
-        stop_type: String(stop.stop_type ?? "")
-          .trim()
-          .toLowerCase(),
-        status: String(stop.status ?? "pending")
-          .trim()
-          .toLowerCase(),
-      }));
+      const { data: updatedLoad, error: updateLoadError } = await supabase
+        .from("loads")
+        .update({ status: "at_pickup" })
+        .eq("id", loadId)
+        .eq("driver_id", driverId)
+        .select(LOAD_SELECT)
+        .maybeSingle();
 
-      const finishedStatuses = ["completed", "complete", "delivered", "cancelled", "canceled"];
+      if (updateLoadError || !updatedLoad) {
+        console.error("MANUAL AT PICKUP LOAD:", updateLoadError);
 
-      const currentStopIndex = stops.findIndex((stop) => !finishedStatuses.includes(stop.status));
-
-      const allStopsAlreadyCompleted = currentStopIndex === -1;
-
-      const currentStop = allStopsAlreadyCompleted
-        ? stops[stops.length - 1]
-        : stops[currentStopIndex];
-
-      if (!currentStop) {
-        showMessage(
-          isES ? "No se encontró una parada para esta carga." : "No stop was found for this load."
-        );
-        return false;
-      }
-
-      const isPickup = currentStop.stop_type === "pickup";
-      const isDelivery = currentStop.stop_type === "delivery";
-
-      if (!isPickup && !isDelivery) {
-        showMessage(isES ? "El tipo de parada no es válido." : "The stop type is invalid.");
-        return false;
-      }
-
-      const stopReached =
-        (isPickup && currentStop.status === "at_pickup") ||
-        (isDelivery && currentStop.status === "at_delivery");
-
-      if (!allStopsAlreadyCompleted && !stopReached) {
-        showMessage(
-          isES
-            ? "La parada actual debe ser alcanzada por GPS antes de pulsar DONE."
-            : "The current stop must be reached by GPS before pressing DONE."
-        );
-        return false;
-      }
-
-      // CORREGIDO: este bloque estaba duplicado. El segundo intento nunca encontraba
-      // la parada (ya estaba "completed") y hacía fallar siempre el botón DONE.
-      // Completar la parada actual solamente si todavía no está completada.
-      if (!allStopsAlreadyCompleted) {
-        const { data: completedStop, error: completedStopError } = await supabase
+        const { error: rollbackError } = await supabase
           .from("load_stops")
-          .update({ status: "completed" })
+          .update({ status: currentStop.status })
           .eq("id", currentStop.id)
-          .eq("status", currentStop.status)
-          .select("id, status")
-          .maybeSingle();
+          .eq("status", "at_pickup");
 
-        if (completedStopError || !completedStop) {
-          console.error("DONE - COMPLETE STOP ERROR:", completedStopError);
+        if (rollbackError) {
+          console.error("AT PICKUP ROLLBACK FAILED:", rollbackError);
+        }
+
+        showMessage(
+          isES
+            ? "No se pudo guardar el estado de la carga."
+            : "Could not save the load status."
+        );
+        return false;
+      }
+
+      refreshLoadInUI(updatedLoad as typeof selectedLoad);
+      await refreshNavigation();
+
+      showMessage(
+        isES
+          ? "Recogida confirmada. Pulsa DONE al terminar esta parada."
+          : "Pickup confirmed. Press DONE when this stop is complete."
+      );
+      return true;
+    }
+
+    // 4. START TRIP: exige que la siguiente parada sea una entrega
+    // y que no queden recogidas pendientes en la secuencia.
+    if (targetStatus === "in_transit") {
+      if (currentStop.stop_type !== "delivery") {
+        showMessage(
+          isES
+            ? "Completa primero la recogida actual con DONE."
+            : "Complete the current pickup with DONE first."
+        );
+        return false;
+      }
+
+      const unfinishedPickups = stops.some(
+        (stop) =>
+          stop.stop_type === "pickup" &&
+          !finishedStatuses.includes(stop.status)
+      );
+
+      if (unfinishedPickups) {
+        showMessage(
+          isES
+            ? "Completa todas las recogidas pendientes antes de iniciar el viaje."
+            : "Complete all pending pickups before starting the trip."
+        );
+        return false;
+      }
+
+      if (
+        ![
+          "assigned",
+          "in_progress",
+          "at_pickup",
+          "in_transit",
+        ].includes(currentLoadStatus)
+      ) {
+        showMessage(
+          isES
+            ? "No se puede iniciar el viaje en el estado actual."
+            : "Cannot start the trip in the current state."
+        );
+        return false;
+      }
+
+      if (currentLoadStatus === "in_transit") {
+        showMessage(
+          isES ? "El viaje ya está en curso." : "The trip is already in progress."
+        );
+        return true;
+      }
+
+      const { data: updatedLoad, error: updateLoadError } = await supabase
+        .from("loads")
+        .update({ status: "in_transit" })
+        .eq("id", loadId)
+        .eq("driver_id", driverId)
+        .select(LOAD_SELECT)
+        .maybeSingle();
+
+      if (updateLoadError || !updatedLoad) {
+        console.error("MANUAL START TRIP LOAD:", updateLoadError);
+        showMessage(
+          isES
+            ? "No se pudo iniciar el viaje."
+            : "Could not start the trip."
+        );
+        return false;
+      }
+
+      const { data: updatedDriver, error: updateDriverError } = await supabase
+        .from("drivers")
+        .update({
+          status: "driving",
+          current_load_id: loadId,
+        })
+        .eq("id", driverId)
+        .select("id, status, current_load_id")
+        .maybeSingle();
+
+      if (updateDriverError || !updatedDriver) {
+        console.error("MANUAL START TRIP DRIVER:", updateDriverError);
+
+        const { error: rollbackError } = await supabase
+          .from("loads")
+          .update({ status: originalLoadStatus })
+          .eq("id", loadId)
+          .eq("status", "in_transit");
+
+        if (rollbackError) {
+          console.error("START TRIP LOAD ROLLBACK FAILED:", rollbackError);
+        }
+
+        showMessage(
+          isES
+            ? "No se pudo actualizar el conductor."
+            : "Could not update the driver."
+        );
+        return false;
+      }
+
+      const hosSaved = await setHosStatus("Driving");
+
+      if (!hosSaved) {
+        console.error("MANUAL START TRIP: HOS SAVE FAILED");
+
+        const { error: driverRollbackError } = await supabase
+          .from("drivers")
+          .update({
+            status: driverRecord.status,
+            current_load_id: driverRecord.current_load_id,
+          })
+          .eq("id", driverId);
+
+        const { error: loadRollbackError } = await supabase
+          .from("loads")
+          .update({ status: originalLoadStatus })
+          .eq("id", loadId)
+          .eq("status", "in_transit");
+
+        if (driverRollbackError) {
+          console.error("START TRIP DRIVER ROLLBACK FAILED:", driverRollbackError);
+        }
+
+        if (loadRollbackError) {
+          console.error("START TRIP LOAD ROLLBACK FAILED:", loadRollbackError);
+        }
+
+        showMessage(
+          isES
+            ? "No se guardó HOS. Se intentó restaurar los estados anteriores."
+            : "HOS was not saved. The previous states were restored where possible."
+        );
+        return false;
+      }
+
+      refreshLoadInUI(updatedLoad as typeof selectedLoad);
+
+      setDrivers((current) =>
+        current.map((driver) =>
+          driver.id === driverId
+            ? {
+                ...driver,
+                status: "driving",
+                current_load_id: loadId,
+              }
+            : driver
+        )
+      );
+
+      setDriverWorkStatus("driving");
+      await refreshNavigation();
+
+      showMessage(
+        isES ? "Viaje iniciado." : "Trip started."
+      );
+      return true;
+    }
+
+    // 5. AT DELIVERY: solo para la siguiente entrega de la secuencia.
+    if (targetStatus === "at_delivery") {
+      if (currentStop.stop_type !== "delivery") {
+        showMessage(
+          isES
+            ? "La siguiente parada no es una entrega."
+            : "The next stop is not a delivery."
+        );
+        return false;
+      }
+
+      if (!["in_transit", "at_delivery"].includes(currentLoadStatus)) {
+        showMessage(
+          isES
+            ? "Inicia el viaje antes de confirmar la entrega."
+            : "Start the trip before confirming delivery."
+        );
+        return false;
+      }
+
+      if (currentStop.status === "at_delivery") {
+        showMessage(
+          isES ? "La entrega ya está confirmada." : "Delivery is already confirmed."
+        );
+        return true;
+      }
+
+      if (finishedStatuses.includes(currentStop.status)) {
+        showMessage(
+          isES
+            ? "Esta parada ya está completada."
+            : "This stop is already completed."
+        );
+        return false;
+      }
+
+      const { data: updatedStop, error: updateStopError } = await supabase
+        .from("load_stops")
+        .update({ status: "at_delivery" })
+        .eq("id", currentStop.id)
+        .eq("load_id", loadId)
+        .eq("status", currentStop.status)
+        .select("id")
+        .maybeSingle();
+
+      if (updateStopError || !updatedStop) {
+        console.error("MANUAL AT DELIVERY STOP:", updateStopError);
+        showMessage(
+          isES
+            ? "No se pudo actualizar la entrega."
+            : "Could not update the delivery."
+        );
+        return false;
+      }
+
+      const { data: updatedLoad, error: updateLoadError } = await supabase
+        .from("loads")
+        .update({ status: "at_delivery" })
+        .eq("id", loadId)
+        .eq("driver_id", driverId)
+        .select(LOAD_SELECT)
+        .maybeSingle();
+
+      if (updateLoadError || !updatedLoad) {
+        console.error("MANUAL AT DELIVERY LOAD:", updateLoadError);
+
+        const { error: rollbackError } = await supabase
+          .from("load_stops")
+          .update({ status: currentStop.status })
+          .eq("id", currentStop.id)
+          .eq("status", "at_delivery");
+
+        if (rollbackError) {
+          console.error("AT DELIVERY ROLLBACK FAILED:", rollbackError);
+        }
+
+        showMessage(
+          isES
+            ? "No se pudo guardar el estado de la carga."
+            : "Could not save the load status."
+        );
+        return false;
+      }
+
+      refreshLoadInUI(updatedLoad as typeof selectedLoad);
+      await refreshNavigation();
+
+      showMessage(
+        isES
+          ? "Entrega confirmada. Pulsa DONE para completar esta parada."
+          : "Delivery confirmed. Press DONE to complete this stop."
+      );
+      return true;
+    }
+
+    // 6. DONE: validar primero la parada y los documentos.
+    if (targetStatus === "delivered") {
+      const expectedStopStatus =
+        currentStop.stop_type === "pickup"
+          ? "at_pickup"
+          : "at_delivery";
+
+      if (currentStop.status !== expectedStopStatus) {
+        showMessage(
+          isES
+            ? "Confirma la llegada con AT PICKUP o AT DELIVERY antes de pulsar DONE."
+            : "Confirm arrival with AT PICKUP or AT DELIVERY before pressing DONE."
+        );
+        return false;
+      }
+
+      const nextStop = stops.find(
+        (stop) =>
+          stop.stop_order > currentStop.stop_order &&
+          !finishedStatuses.includes(stop.status)
+      );
+
+           // Si esta es la última parada, validar documentos ANTES de
+      // marcarla completada. "uploaded" por sí solo no es validación.
+      if (!nextStop) {
+        const { data: documentRows, error: documentError } = await supabase
+          .from("documents")
+          .select("id, document_type, status, storage_path, load_stop_id")
+          .eq("load_id", loadId);
+
+        if (documentError || !documentRows) {
+          console.error("MANUAL DONE DOCUMENT QUERY:", documentError);
+          showMessage(
+            isES
+              ? "No se pudieron verificar POD y BOL."
+              : "Could not verify POD and BOL."
+          );
+          return false;
+        }
+
+        const validatedDocuments = documentRows.filter((doc) => {
+          const type = String(doc.document_type ?? "")
+            .trim()
+            .toUpperCase();
+
+          const docStatus = String(doc.status ?? "")
+            .trim()
+            .toLowerCase();
+
+          return (
+            ["POD", "BOL"].includes(type) &&
+            ["reviewed", "approved"].includes(docStatus) &&
+            Boolean(String(doc.storage_path ?? "").trim())
+          );
+        });
+
+        const hasPOD = validatedDocuments.some(
+          (doc) =>
+            String(doc.document_type ?? "").trim().toUpperCase() === "POD"
+        );
+
+        const hasBOL = validatedDocuments.some(
+          (doc) =>
+            String(doc.document_type ?? "").trim().toUpperCase() === "BOL"
+        );
+
+        if (!hasPOD || !hasBOL) {
+          const missing = [
+            ...(!hasPOD ? ["POD"] : []),
+            ...(!hasBOL ? ["BOL"] : []),
+          ].join(" y ");
 
           showMessage(
             isES
-              ? "No se pudo completar la parada. Verifique su estado antes de volver a intentarlo."
-              : "Could not complete the stop. Verify its status before retrying."
+              ? `No se puede finalizar. Falta cargar y validar: ${missing}.`
+              : `Cannot finalize. The following must be uploaded and validated: ${missing}.`
           );
           return false;
         }
       }
+            // Completar la parada actual con protección contra cambios simultáneos.
+      const { data: completedStop, error: completeStopError } = await supabase
+        .from("load_stops")
+        .update({ status: "completed" })
+        .eq("id", currentStop.id)
+        .eq("load_id", loadId)
+        .eq("status", expectedStopStatus)
+        .select("id")
+        .maybeSingle();
 
-      const remainingStops = stops.filter(
-        (stop) =>
-          stop.stop_order > currentStop.stop_order && !finishedStatuses.includes(stop.status)
-      );
+      if (completeStopError || !completedStop) {
+        console.error("MANUAL DONE STOP:", completeStopError);
+        showMessage(
+          isES
+            ? "No se pudo completar la parada. Verifica su estado actual."
+            : "Could not complete the stop. Verify its current state."
+        );
+        return false;
+      }
 
-      // Todavía hay paradas: mantener la carga activa y avanzar el GPS.
-      if (remainingStops.length > 0) {
-        const { data: updatedLoad, error: loadError } = await supabase
+      // Todavía quedan paradas: conservar la carga activa.
+      if (nextStop) {
+        const nextLoadStatus =
+          nextStop.stop_type === "pickup"
+            ? "in_progress"
+            : "in_transit";
+
+        const { data: updatedLoad, error: nextLoadError } = await supabase
           .from("loads")
-          .update({ status: "in_transit" })
+          .update({ status: nextLoadStatus })
           .eq("id", loadId)
           .eq("driver_id", driverId)
           .select(LOAD_SELECT)
           .maybeSingle();
 
-        if (loadError || !updatedLoad) {
-          console.error("DONE - NEXT STOP LOAD ERROR:", loadError);
+        if (nextLoadError || !updatedLoad) {
+          console.error("MANUAL DONE NEXT LOAD:", nextLoadError);
 
-          await supabase
+          const { error: rollbackError } = await supabase
             .from("load_stops")
-            .update({ status: currentStop.status })
+            .update({ status: expectedStopStatus })
             .eq("id", currentStop.id)
             .eq("status", "completed");
 
+          if (rollbackError) {
+            console.error("DONE STOP ROLLBACK FAILED:", rollbackError);
+          }
+
           showMessage(
             isES
-              ? "No se pudo avanzar la carga. La parada fue restaurada."
-              : "The load could not advance. The stop was restored."
+              ? "No se pudo avanzar. Se intentó restaurar la parada anterior."
+              : "Could not advance. The previous stop was restored where possible."
           );
           return false;
         }
 
-        const { data: driverData, error: driverError } = await supabase
-          .from("drivers")
-          .update({
-            status: "driving",
-            current_load_id: loadId,
-          })
-          .eq("id", driverId)
-          .select("id, status, current_load_id")
-          .maybeSingle();
-
-        if (driverError || !driverData || driverData.status !== "driving") {
-          console.error("DONE - NEXT STOP DRIVER ERROR:", driverError);
-
-          await supabase
-            .from("loads")
-            .update({ status: selectedLoad.status })
-            .eq("id", loadId)
-            .eq("driver_id", driverId)
-            .eq("status", "in_transit");
-
-          await supabase
-            .from("load_stops")
-            .update({ status: currentStop.status })
-            .eq("id", currentStop.id)
-            .eq("status", "completed");
-
-          showMessage(
-            isES
-              ? "No se pudo actualizar el conductor. Se restauró el estado anterior."
-              : "Could not update the driver. The previous state was restored."
-          );
-          return false;
-        }
-
-        const hosSaved = await setHosStatus("Driving");
-
-        if (!hosSaved) {
-          console.error("DONE - HOS DRIVING EVENT FAILED");
-
-          await supabase
-            .from("drivers")
-            .update({ status: "on_duty" })
-            .eq("id", driverId)
-            .eq("status", "driving");
-
-          await supabase
-            .from("loads")
-            .update({ status: selectedLoad.status })
-            .eq("id", loadId)
-            .eq("driver_id", driverId)
-            .eq("status", "in_transit");
-
-          await supabase
-            .from("load_stops")
-            .update({ status: currentStop.status })
-            .eq("id", currentStop.id)
-            .eq("status", "completed");
-
-          setDriverWorkStatus("on_duty");
-
-          showMessage(
-            isES
-              ? "No se pudo registrar HOS. Se restauró el estado anterior."
-              : "Could not save HOS. The previous state was restored."
-          );
-          return false;
-        }
-
-        setLoads((current) =>
-          current.map((load) => (load.id === updatedLoad.id ? (updatedLoad as Load) : load))
-        );
-
-        setDrivers((current) =>
-          current.map((driver) =>
-            driver.id === driverId
-              ? {
-                  ...driver,
-                  status: "driving",
-                  current_load_id: loadId,
-                }
-              : driver
-          )
-        );
-
-        setDriverWorkStatus("driving");
-
-        // Consultar Supabase para obtener la próxima parada pendiente
-        // y actualizar el destino sin esperar a que se mueva el GPS.
-        const nextNavigationStop = await getCurrentSequenceStop(loadId);
-
-        setNavigationStop(nextNavigationStop);
-
-        const nextStop = remainingStops[0];
-        const nextStopType = nextStop.stop_type === "pickup" ? "Pickup" : "Delivery";
+        refreshLoadInUI(updatedLoad as typeof selectedLoad);
+        await refreshNavigation();
 
         showMessage(
           isES
-            ? `${isPickup ? "Pickup" : "Delivery"} #${currentStop.stop_order} completado. Próxima parada: ${nextStopType} #${nextStop.stop_order}.`
-            : `${isPickup ? "Pickup" : "Delivery"} #${currentStop.stop_order} completed. Next stop: ${nextStopType} #${nextStop.stop_order}.`
+            ? `Parada ${currentStop.stop_order} completada. Siguiente parada: ${nextStop.stop_order}.`
+            : `Stop ${currentStop.stop_order} completed. Next stop: ${nextStop.stop_order}.`
         );
-
         return true;
       }
 
-      // No quedan paradas: finalizar la carga.
+      // Última parada: verificar POD y BOL revisados antes de finalizar.
+      const { data: requiredDocuments, error: documentsError } = await supabase
+        .from("documents")
+        .select("document_type, status, storage_path")
+        .eq("load_id", loadId)
+        .in("document_type", ["POD", "BOL"])
+        .in("status", ["reviewed", "approved"]);
+
+      if (documentsError) {
+        console.error("FINAL LOAD DOCUMENTS:", documentsError);
+
+        showMessage(
+          isES
+            ? "No se pudieron verificar los documentos POD/BOL."
+            : "Could not verify POD/BOL documents."
+        );
+        return false;
+      }
+
+      const hasPOD = (requiredDocuments ?? []).some(
+        (document) =>
+          document.document_type?.toUpperCase() === "POD" &&
+          Boolean(document.storage_path)
+      );
+
+      const hasBOL = (requiredDocuments ?? []).some(
+        (document) =>
+          document.document_type?.toUpperCase() === "BOL" &&
+          Boolean(document.storage_path)
+      );
+
+      if (!hasPOD || !hasBOL) {
+        // Restaurar la parada para que DONE pueda intentarse de nuevo
+        // después de que ambos documentos estén revisados.
+        const { error: stopRollbackError } = await supabase
+          .from("load_stops")
+          .update({ status: expectedStopStatus })
+          .eq("id", currentStop.id)
+          .eq("status", "completed");
+
+        if (stopRollbackError) {
+          console.error("DOCUMENT STOP ROLLBACK FAILED:", stopRollbackError);
+        }
+
+        showMessage(
+          isES
+            ? "Faltan documentos POD/BOL revisados. La carga no se finalizó."
+            : "POD/BOL documents are missing or not reviewed. The load was not finalized."
+        );
+        return false;
+      }
+
+      // Cerrar la carga solo después de confirmar POD y BOL.
       const { data: updatedLoad, error: finalLoadError } = await supabase
         .from("loads")
         .update({ status: "delivered" })
@@ -2190,59 +2772,235 @@ export default function DriverPage() {
         .maybeSingle();
 
       if (finalLoadError || !updatedLoad) {
-        console.error("DONE - FINAL LOAD ERROR:", finalLoadError);
+        console.error("MANUAL DONE FINAL LOAD:", finalLoadError);
 
-        await supabase
+        const { error: rollbackError } = await supabase
           .from("load_stops")
-          .update({ status: currentStop.status })
+          .update({ status: expectedStopStatus })
           .eq("id", currentStop.id)
           .eq("status", "completed");
 
+        if (rollbackError) {
+          console.error("FINAL STOP ROLLBACK FAILED:", rollbackError);
+        }
+
         showMessage(
           isES
-            ? "No se pudo finalizar la carga. La parada fue restaurada."
-            : "The load could not be finalized. The stop was restored."
+            ? "No se pudo finalizar la carga."
+            : "Could not finalize the load."
         );
         return false;
       }
 
-      const { data: finalDriver, error: finalDriverError } = await supabase
+      // Buscar la siguiente carga asignada pendiente del mismo conductor.
+      // No se activa otra carga si no se pueden verificar los documentos.
+      const { data: pendingLoads, error: pendingLoadsError } = await supabase
+        .from("loads")
+        .select(LOAD_SELECT)
+        .eq("driver_id", driverId)
+        .neq("id", loadId)
+        .in("status", ["assigned", "pending"])
+        .order("scheduled_pickup_at", { ascending: true, nullsFirst: false })
+        .limit(20);
+
+      if (pendingLoadsError) {
+        console.error("NEXT ASSIGNED LOAD LOOKUP:", pendingLoadsError);
+
+        showMessage(
+          isES
+            ? "La carga terminó, pero no se pudo determinar la siguiente carga. El conductor permanece disponible."
+            : "The load is complete, but the next load could not be determined. The driver remains available."
+        );
+      }
+
+      let nextAssignedLoad: (typeof pendingLoads extends (infer T)[] | null ? T : never) | null =
+        null;
+
+      for (const candidate of pendingLoads ?? []) {
+        const { data: candidateDocuments, error: candidateDocumentsError } =
+          await supabase
+            .from("documents")
+            .select("document_type, status, storage_path")
+            .eq("load_id", candidate.id)
+            .in("document_type", ["POD", "BOL"]);
+
+        if (candidateDocumentsError) {
+          console.error(
+            "NEXT LOAD DOCUMENT CHECK:",
+            candidate.id,
+            candidateDocumentsError
+          );
+          continue;
+        }
+
+        // Una carga futura no debe saltarse si tiene documentos requeridos
+        // y estos todavía no han sido revisados.
+        const candidatePOD = (candidateDocuments ?? []).some(
+          (document) =>
+            document.document_type?.toUpperCase() === "POD" &&
+            Boolean(document.storage_path) &&
+            ["reviewed", "approved"].includes(
+              String(document.status).toLowerCase()
+            )
+        );
+
+        const candidateBOL = (candidateDocuments ?? []).some(
+          (document) =>
+            document.document_type?.toUpperCase() === "BOL" &&
+            Boolean(document.storage_path) &&
+            ["reviewed", "approved"].includes(
+              String(document.status).toLowerCase()
+            )
+        );
+
+        const hasAnyCandidateDocs = (candidateDocuments ?? []).length > 0;
+
+        if (hasAnyCandidateDocs && (!candidatePOD || !candidateBOL)) {
+          continue;
+        }
+
+        nextAssignedLoad = candidate;
+        break;
+      }
+
+      if (pendingLoadsError) {
+        // No cambiar current_load_id si la consulta falló.
+        showMessage(
+          isES
+            ? `Carga ${updatedLoad.load_number || ""} completada. Revisa la siguiente carga asignada.`
+            : `Load ${updatedLoad.load_number || ""} completed. Check the next assigned load.`
+        );
+        refreshLoadInUI(updatedLoad as typeof selectedLoad);
+        return true;
+      }
+
+      if (nextAssignedLoad) {
+        // Activar la siguiente carga y mantener al conductor ocupado.
+        const { data: activatedLoad, error: activateLoadError } = await supabase
+          .from("loads")
+          .update({ status: "in_progress" })
+          .eq("id", nextAssignedLoad.id)
+          .eq("driver_id", driverId)
+          .in("status", ["assigned", "pending"])
+          .select(LOAD_SELECT)
+          .maybeSingle();
+
+        if (activateLoadError || !activatedLoad) {
+          console.error("NEXT LOAD ACTIVATION:", activateLoadError);
+
+          showMessage(
+            isES
+              ? `Carga ${updatedLoad.load_number || ""} completada. No se pudo activar la siguiente carga.`
+              : `Load ${updatedLoad.load_number || ""} completed. Could not activate the next load.`
+          );
+          refreshLoadInUI(updatedLoad as typeof selectedLoad);
+          return true;
+        }
+
+        const { data: updatedDriver, error: nextDriverError } = await supabase
+          .from("drivers")
+          .update({
+            current_load_id: activatedLoad.id,
+            status: "on_duty",
+          })
+          .eq("id", driverId)
+          .eq("current_load_id", loadId)
+          .select("id, status, current_load_id")
+          .maybeSingle();
+
+        if (nextDriverError || !updatedDriver) {
+          console.error("NEXT LOAD DRIVER UPDATE:", nextDriverError);
+
+          // Compensar la activación para no dejar dos cargas activas.
+          const { error: loadRollbackError } = await supabase
+            .from("loads")
+            .update({ status: "assigned" })
+            .eq("id", activatedLoad.id)
+            .eq("status", "in_progress");
+
+          if (loadRollbackError) {
+            console.error("NEXT LOAD ACTIVATION ROLLBACK:", loadRollbackError);
+          }
+
+          showMessage(
+            isES
+              ? "La carga anterior terminó, pero no se pudo asignar la siguiente al conductor."
+              : "The previous load is complete, but the next load could not be assigned to the driver."
+          );
+          refreshLoadInUI(updatedLoad as typeof selectedLoad);
+          return true;
+        }
+
+        refreshLoadInUI(updatedLoad as typeof selectedLoad);
+
+        setDrivers((current) =>
+          current.map((driver) =>
+            driver.id === driverId
+              ? {
+                  ...driver,
+                  status: "on_duty",
+                  current_load_id: activatedLoad.id,
+                }
+              : driver
+          )
+        );
+
+        setSelectedLoadId(String(activatedLoad.id));
+        setDriverWorkStatus("on_duty");
+        await refreshNavigation();
+
+        showMessage(
+          isES
+            ? `Carga ${updatedLoad.load_number || ""} completada. Siguiente carga activada: ${activatedLoad.load_number || ""}.`
+            : `Load ${updatedLoad.load_number || ""} completed. Next load activated: ${activatedLoad.load_number || ""}.`
+        );
+        return true;
+      }
+
+      // No hay otra carga elegible: liberar al conductor.
+      const { data: updatedDriver, error: finalDriverError } = await supabase
         .from("drivers")
         .update({
           current_load_id: null,
           status: "available",
         })
         .eq("id", driverId)
+        .eq("current_load_id", loadId)
         .select("id, status, current_load_id")
         .maybeSingle();
 
-      if (finalDriverError || !finalDriver || finalDriver.status !== "available") {
-        console.error("DONE - FINAL DRIVER ERROR:", finalDriverError);
+      if (finalDriverError || !updatedDriver) {
+        console.error("MANUAL DONE FINAL DRIVER:", finalDriverError);
 
-        await supabase
+        const { error: loadRollbackError } = await supabase
           .from("loads")
-          .update({ status: "in_transit" })
+          .update({ status: originalLoadStatus })
           .eq("id", loadId)
-          .eq("driver_id", driverId)
           .eq("status", "delivered");
 
-        await supabase
+        const { error: stopRollbackError } = await supabase
           .from("load_stops")
-          .update({ status: currentStop.status })
+          .update({ status: expectedStopStatus })
           .eq("id", currentStop.id)
           .eq("status", "completed");
 
+        if (loadRollbackError) {
+          console.error("FINAL LOAD ROLLBACK FAILED:", loadRollbackError);
+        }
+
+        if (stopRollbackError) {
+          console.error("FINAL STOP ROLLBACK FAILED:", stopRollbackError);
+        }
+
         showMessage(
           isES
-            ? "No se pudo liberar al conductor. Se restauró la carga para volver a intentarlo."
-            : "Could not release the driver. The load was restored for retry."
+            ? "No se pudo liberar al conductor. Verifica los estados en Supabase."
+            : "Could not release the driver. Verify the states in Supabase."
         );
         return false;
       }
 
-      setLoads((current) =>
-        current.map((load) => (load.id === updatedLoad.id ? (updatedLoad as Load) : load))
-      );
+      refreshLoadInUI(updatedLoad as typeof selectedLoad);
 
       setDrivers((current) =>
         current.map((driver) =>
@@ -2258,29 +3016,28 @@ export default function DriverPage() {
 
       setSelectedLoadId("");
       setDriverWorkStatus("available");
-
-      // La ruta queda limpia cuando se completa la última parada.
       setNavigationStop(null);
 
       showMessage(
         isES
-          ? `Carga ${updatedLoad.load_number || ""} completada. El conductor queda disponible para la próxima asignación.`
-          : `Load ${updatedLoad.load_number || ""} completed. The driver is available for the next assignment.`
+          ? `Carga ${updatedLoad.load_number || ""} completada. No hay otra carga elegible; el conductor está disponible.`
+          : `Load ${updatedLoad.load_number || ""} completed. No other eligible load was found; the driver is available.`
       );
-
       return true;
-    } catch (error) {
-      console.error("DONE - UNEXPECTED ERROR:", error);
-
-      showMessage(
-        isES
-          ? "Ocurrió un error inesperado al completar la parada."
-          : "An unexpected error occurred while completing the stop."
-      );
-
-      return false;
     }
+
+    return false;
+  } catch (error) {
+    console.error("MANUAL LOAD STATUS - UNEXPECTED ERROR:", error);
+
+    showMessage(
+      isES
+        ? "Ocurrió un error inesperado al actualizar la carga."
+        : "An unexpected error occurred while updating the load."
+    );
+    return false;
   }
+}
 
   async function saveGpsEvent(
     location: GPSLocation,
@@ -3162,79 +3919,55 @@ export default function DriverPage() {
               </div>
 
               <div className="mt-6 grid grid-cols-2 gap-2 sm:grid-cols-3">
-                <PrimaryButton
-                  label="START DRIVE"
-                  active={
-                    driverWorkStatus === "driving" &&
-                    normalizeLoadStatus(selectedLoad.status) === "assigned"
-                  }
-                  disabled={
-                    latestHosEvent?.event_type?.trim().toLowerCase() === "home time" ||
-                    isDriveBlocked(driverWorkStatus)
-                  }
-                  onClick={() => {
-                    if (
-                      latestHosEvent?.event_type?.trim().toLowerCase() === "home time" ||
-                      isDriveBlocked(driverWorkStatus)
-                    ) {
-                      return;
-                    }
+  <PrimaryButton
+    label="START DRIVE"
+    active={driverWorkStatus === "driving"}
+    disabled={
+      latestHosEvent?.event_type?.trim().toLowerCase() === "home time" ||
+      isDriveBlocked(driverWorkStatus)
+    }
+    onClick={() => {
+      if (
+        latestHosEvent?.event_type?.trim().toLowerCase() === "home time" ||
+        isDriveBlocked(driverWorkStatus)
+      ) {
+        return;
+      }
 
-                    void startDrive();
-                  }}
-                />
+      void startDrive();
+    }}
+  />
 
-                <button
-                  type="button"
-                  disabled
-                  className={`min-h-10 cursor-default rounded-xl border px-3 py-2 text-xs font-semibold transition disabled:opacity-100 ${
-                    normalizeLoadStatus(selectedLoad.status) === "at_pickup" ||
-                    (selectedLoad.status && selectedLoad.status.toLowerCase().includes("pickup"))
-                      ? "animate-pulse border-amber-500 bg-amber-100 font-bold text-amber-900 shadow-sm"
-                      : "border-slate-200 bg-white text-slate-500"
-                  }`}
-                >
-                  AT PICKUP
-                </button>
+  <PrimaryButton
+    label="AT PICKUP"
+    active={normalizeLoadStatus(selectedLoad.status) === "at_pickup"}
+    onClick={() => void updateLoadStatus("at_pickup")}
+  />
 
-                <button
-                  type="button"
-                  disabled
-                  className={`min-h-10 cursor-default rounded-xl border px-3 py-2 text-xs font-semibold transition disabled:opacity-100 ${
-                    normalizeLoadStatus(selectedLoad.status) === "in_transit"
-                      ? "border-blue-500 bg-blue-100 font-bold text-blue-900 shadow-sm"
-                      : "border-slate-200 bg-white text-slate-500"
-                  }`}
-                >
-                  START TRIP
-                </button>
+  <PrimaryButton
+    label="START TRIP"
+    active={normalizeLoadStatus(selectedLoad.status) === "in_transit"}
+    onClick={() => void updateLoadStatus("in_transit")}
+  />
 
-                <button
-                  type="button"
-                  disabled
-                  className={`min-h-10 cursor-default rounded-xl border px-3 py-2 text-xs font-semibold transition disabled:opacity-100 ${
-                    normalizeLoadStatus(selectedLoad.status) === "at_delivery"
-                      ? "animate-pulse border-purple-500 bg-purple-100 font-bold text-purple-900 shadow-sm"
-                      : "border-slate-200 bg-white text-slate-500"
-                  }`}
-                >
-                  AT DELIVERY
-                </button>
+  <PrimaryButton
+    label="AT DELIVERY"
+    active={normalizeLoadStatus(selectedLoad.status) === "at_delivery"}
+    onClick={() => void updateLoadStatus("at_delivery")}
+  />
 
-                <SecondaryButton
-                  label="Done"
-                  active={normalizeLoadStatus(selectedLoad.status) === "delivered"}
-                  onClick={() => {
-                    void updateLoadStatus("done");
-                  }}
-                />
-              </div>
+  <SecondaryButton
+    label="Done"
+    active={normalizeLoadStatus(selectedLoad.status) === "delivered"}
+    onClick={() => void updateLoadStatus("done")}
+  />
+</div>
 
-              <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs leading-5 text-slate-600">
-                {isES
-                  ? "AT PICKUP, START TRIP y AT DELIVERY son indicadores automáticos controlados por GPS y la secuencia de load_stops. Solo START DRIVE y DONE son acciones manuales."
-                  : "AT PICKUP, START TRIP and AT DELIVERY are automatic indicators controlled by GPS and the load_stops sequence. Only START DRIVE and DONE are manual actions."}
-              </div>
+<div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs leading-5 text-slate-600">
+  {isES
+    ? "Los cambios de estado se realizan manualmente con los botones. El GPS solo rastrea la ubicación."
+    : "Status changes are made manually with the buttons. GPS only tracks location."}
+</div>
             </div>
           ) : (
             <div className="mt-6 rounded-xl border border-dashed border-slate-200 bg-slate-50 p-8 text-center">
@@ -3341,19 +4074,15 @@ export default function DriverPage() {
               </p>
             </div>
 
-            {/* RESTAURADO: onArrival estaba vacío, por lo que ninguna parada pasaba a
-                at_pickup / at_delivery y el botón DONE nunca podía funcionar.
-                Los guardas de processSequenceArrival evitan procesos duplicados. */}
-            <TruckMap
-              lastLocation={lastLocation}
-              destination={navigationStop}
-              isES={isES}
-              onArrival={(arrivedStop?: { id: string; stop_order: number; stop_type: string }) => {
-                const target = arrivedStop ?? navigationStop;
-                console.log("PAGE ARRIVAL RECEIVED:", target);
-                if (target) void processSequenceArrival(target);
-              }}
-            />
+            {/* GPS solo rastrea la ubicación. Las paradas cambian mediante botones manuales. */}
+<TruckMap
+  lastLocation={lastLocation}
+  destination={navigationStop}
+  isES={isES}
+  onArrival={() => {
+    console.log("GPS ARRIVAL IGNORED: operational status changes are manual.");
+  }}
+/>
           </div>
 
           <div className="mt-4">

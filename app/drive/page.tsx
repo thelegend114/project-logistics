@@ -2262,15 +2262,26 @@ async function updateLoadStatus(status: string): Promise<boolean> {
   .maybeSingle();
 
       if (updateStopError || !updatedStop) {
-        console.error("MANUAL AT PICKUP:", updateStopError);
-        showMessage(
-          isES
-            ? "No se pudo actualizar la recogida."
-            : "Could not update the pickup."
-        );
-        return false;
-      }
+  console.error("MANUAL AT PICKUP ERROR:", {
+    error: updateStopError,
+    loadId,
+    driverId,
+    stopId: currentStop.id,
+    currentStopStatus: currentStop.status,
+  });
 
+  showMessage(
+    isES
+      ? `No se pudo actualizar la recogida: ${
+          updateStopError?.message ?? "La base de datos no actualizó ninguna parada."
+        }`
+      : `Could not update the pickup: ${
+          updateStopError?.message ?? "The database did not update any stop."
+        }`
+  );
+
+  return false;
+}
      const { data: updatedLoad, error: updateLoadError } = await supabase
   .from("loads")
   .update({ status: "in_progress" })

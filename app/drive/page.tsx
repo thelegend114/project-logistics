@@ -2252,14 +2252,14 @@ async function updateLoadStatus(status: string): Promise<boolean> {
         return false;
       }
 
-      const { data: updatedStop, error: updateStopError } = await supabase
-        .from("load_stops")
-        .update({ status: "at_pickup" })
-        .eq("id", currentStop.id)
-        .eq("load_id", loadId)
-        .eq("status", currentStop.status)
-        .select("id")
-        .maybeSingle();
+     const { data: updatedStop, error: updateStopError } = await supabase
+  .from("load_stops")
+  .update({ status: "in_progress" })
+  .eq("id", currentStop.id)
+  .eq("load_id", loadId)
+  .eq("status", currentStop.status)
+  .select("id")
+  .maybeSingle();
 
       if (updateStopError || !updatedStop) {
         console.error("MANUAL AT PICKUP:", updateStopError);
@@ -2271,13 +2271,13 @@ async function updateLoadStatus(status: string): Promise<boolean> {
         return false;
       }
 
-      const { data: updatedLoad, error: updateLoadError } = await supabase
-        .from("loads")
-        .update({ status: "at_pickup" })
-        .eq("id", loadId)
-        .eq("driver_id", driverId)
-        .select(LOAD_SELECT)
-        .maybeSingle();
+     const { data: updatedLoad, error: updateLoadError } = await supabase
+  .from("loads")
+  .update({ status: "in_progress" })
+  .eq("id", loadId)
+  .eq("driver_id", driverId)
+  .select(LOAD_SELECT)
+  .maybeSingle();
 
       if (updateLoadError || !updatedLoad) {
         console.error("MANUAL AT PICKUP LOAD:", updateLoadError);
@@ -2286,7 +2286,7 @@ async function updateLoadStatus(status: string): Promise<boolean> {
           .from("load_stops")
           .update({ status: currentStop.status })
           .eq("id", currentStop.id)
-          .eq("status", "at_pickup");
+          .eq("status", "in_progress");
 
         if (rollbackError) {
           console.error("AT PICKUP ROLLBACK FAILED:", rollbackError);
@@ -2504,14 +2504,14 @@ async function updateLoadStatus(status: string): Promise<boolean> {
         return false;
       }
 
-      const { data: updatedStop, error: updateStopError } = await supabase
-        .from("load_stops")
-        .update({ status: "at_delivery" })
-        .eq("id", currentStop.id)
-        .eq("load_id", loadId)
-        .eq("status", currentStop.status)
-        .select("id")
-        .maybeSingle();
+     const { data: updatedStop, error: updateStopError } = await supabase
+  .from("load_stops")
+  .update({ status: "in_progress" })
+  .eq("id", currentStop.id)
+  .eq("load_id", loadId)
+  .eq("status", currentStop.status)
+  .select("id")
+  .maybeSingle();
 
       if (updateStopError || !updatedStop) {
         console.error("MANUAL AT DELIVERY STOP:", updateStopError);

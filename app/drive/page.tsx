@@ -721,160 +721,197 @@ export default function DriverPage() {
     return true;
   }
 
-  async function setHosStatus(status: string): Promise<boolean> {
-    if (!selectedDriver) {
-      showMessage(text.selectDriverFirst);
-      return false;
-    }
-
-    const location = lastLocation
-      ? JSON.stringify({
-          latitude: lastLocation.lat,
-          longitude: lastLocation.lng,
-          accuracy: lastLocation.accuracy,
-        })
-      : null;
-
-    const { error } = await supabase.from("hos_events").insert({
-      driver_id: selectedDriver.id,
-      event_type: status,
-      event_time: new Date().toISOString(),
-      location,
-      source: "Project Driver",
-    });
-
-    if (error) {
-      showMessage(
-        isES
-          ? `No se pudo guardar el evento HOS: ${error.message}`
-          : `Could not save HOS event: ${error.message}`
-      );
-      return false;
-    }
-
-    await loadDriverHos(selectedDriver.id);
-    return true;
+async function setHosStatus(status: string): Promise<boolean> {
+  if (!selectedDriver) {
+    showMessage(text.selectDriverFirst);
+    return false;
   }
 
-  async function updateDriverWorkStatus(nextStatus: "off_duty" | "hold" | "available") {
-    if (!selectedDriverId) {
-      showMessage(isES ? "No hay un conductor seleccionado." : "No driver is selected.");
-      return;
-    }
+  const location = lastLocation
+    ? JSON.stringify({
+        latitude: lastLocation.lat,
+        longitude: lastLocation.lng,
+        accuracy: lastLocation.accuracy,
+      })
+    : null;
 
-    const { data: driverProfile, error: driverError } = await supabase
-      .from("drivers")
-      .select("id, full_name, status")
-      .eq("id", selectedDriverId)
-      .single();
+  const { error } = await supabase.from("hos_events").insert({
+    driver_id: selectedDriver.id,
+    event_type: status,
+    event_time: new Date().toISOString(),
+    location,
+    source: "Project Driver",
+  });
 
-    if (driverError || !driverProfile) {
-      showMessage(
-        isES
-          ? "No se encontró el perfil del conductor."
-          : "The driver's profile could not be found."
-      );
-      return;
-    }
+  if (error) {
+    showMessage(
+      isES
+        ? `No se pudo guardar el evento HOS: ${error.message}`
+        : `Could not save HOS event: ${error.message}`
+    );
+    return false;
+  }
 
-    console.log("WORK STATUS: starting update", {
+  await loadDriverHos(selectedDriver.id);
+  return true;
+}
+ 
+async function updateDriverWorkStatus(nextStatus: "off_duty" | "hold" | "available"): Promise<boolean> {
+  if (!selectedDriverId) {
+    showMessage(
+      isES ? "No hay un conductor seleccionado." : "No driver is selected."
+    );
+    return false;
+  }
+
+  const { data: driverProfile, error: driverError } = await supabase
+    .from("drivers")
+    .select("id, full_name, status")
+    .eq("id", selectedDriverId)
+    .single();
+
+  if (driverError || !driverProfile) {
+    showMessage(
+      isES
+        ? "No se encontró el perfil del conductor."
+        : "The driver's profile could not be found."
+    );
+    return false;
+  }
+
+  console.log("WORK STATUS: starting update", {
+    driverId: driverProfile.id,
+    previousStatus: driverProfile.status,
+    requestedStatus: nextStatus,
+  });
+
+  const { data, error } = await supabase
+    .from("drivers")
+    .update({ status: nextStatus })
+    .eq("id", driverProfile.id)
+    .select("id, full_name, status")
+    .single();
+
+  if (error || !data) {
+    console.error("WORK STATUS: UPDATE FAILED", {
       driverId: driverProfile.id,
-      previousStatus: driverProfile.status,
       requestedStatus: nextStatus,
+      error,
+      data,
     });
 
-    const { data, error } = await supabase
-      .from("drivers")
-      .update({ status: nextStatus })
-      .eq("id", driverProfile.id)
-      .select("id, full_name, status")
-      .single();
+    showMessage(
+      isES
+        ? `No se pudo actualizar el estado: ${
+            error?.message || "Supabase no devolvió el registro."
+          }`
+        : `Status update failed: ${
+            error?.message || "Supabase returned no record."
+          }`
+    );
+    return false;
+  }
 
-    if (error || !data) {
-      console.error("WORK STATUS: UPDATE FAILED", {
-        driverId: driverProfile.id,
-        requestedStatus: nextStatus,
-        error,
-        data,
-      });
+  const normalizedWorkStatus = String(data.status)
+    .trim()
+    .toLowerCase();
+
+  setDrivers((currentDrivers) =>
+    currentDrivers.map((driver) =>
+      String(driver.id) === String(data.id)
+        ? { ...driver, status: data.status }
+        : driver
+    )
+  );
+
+  if (String(selectedDriverId) === String(data.id)) {
+    setDriverWorkStatus(normalizedWorkStatus as DriverWorkStatus);
+  }
+
+  // Estos estados operativos no deben mantener activo el seguimiento GPS.
+  if (
+    nextStatus === "hold" ||
+    nextStatus === "off_duty" ||
+    nextStatus === "available"
+  ) {
+    stopGpsTracking();
+  }
+
+  if (nextStatus === "available") {
+    const { data: assignedLoads, error: assignedLoadsError } =
+      await supabase
+        .from("loads")
+        .select(
+          "id, load_number, status, pickup_date, pickup_unlocked, driver_id"
+        )
+        .eq("driver_id", driverProfile.id)
+        .eq("status", "assigned")
+        .order("pickup_date", {
+          ascending: true,
+          nullsFirst: true,
+        });
+
+    if (assignedLoadsError) {
+      console.error(
+        "AVAILABLE: error loading assigned loads:",
+        assignedLoadsError
+      );
 
       showMessage(
         isES
-          ? `No se pudo actualizar el estado: ${error?.message || "Supabase no devolvió el registro."}`
-          : `Status update failed: ${error?.message || "Supabase returned no record."}`
+          ? "No se pudieron verificar las cargas asignadas."
+          : "Could not verify assigned loads."
       );
-      return;
-    }
+    } else {
+      const firstEligibleLoad = (assignedLoads ?? [])[0];
 
-    const normalizedWorkStatus = String(data.status).trim().toLowerCase();
-
-    setDrivers((currentDrivers) =>
-      currentDrivers.map((driver) =>
-        String(driver.id) === String(data.id) ? { ...driver, status: data.status } : driver
-      )
-    );
-
-    if (String(selectedDriverId) === String(data.id)) {
-      setDriverWorkStatus(normalizedWorkStatus as DriverWorkStatus);
-    }
-
-    if (nextStatus === "hold" || nextStatus === "off_duty") {
-      stopGpsTracking();
-    }
-
-    if (nextStatus === "available") {
-      const { data: assignedLoads, error: assignedLoadsError } = await supabase
-        .from("loads")
-        .select("id, load_number, status, pickup_date, pickup_unlocked, driver_id")
-        .eq("driver_id", driverProfile.id)
-        .eq("status", "assigned")
-        .order("pickup_date", { ascending: true, nullsFirst: true });
-
-      if (assignedLoadsError) {
-        console.error("AVAILABLE: error loading assigned loads:", assignedLoadsError);
-        showMessage(
-          isES
-            ? "No se pudieron verificar las cargas asignadas."
-            : "Could not verify assigned loads."
-        );
-      } else {
-        const firstEligibleLoad = (assignedLoads ?? [])[0];
-
-        if (firstEligibleLoad && !firstEligibleLoad.pickup_unlocked) {
-          const { data: unlockedLoad, error: unlockError } = await supabase
+      if (firstEligibleLoad && !firstEligibleLoad.pickup_unlocked) {
+        const { data: unlockedLoad, error: unlockError } =
+          await supabase
             .from("loads")
             .update({ pickup_unlocked: true })
             .eq("id", firstEligibleLoad.id)
             .eq("driver_id", driverProfile.id)
             .eq("status", "assigned")
             .eq("pickup_unlocked", false)
-            .select("id, load_number, status, pickup_date, pickup_unlocked, driver_id")
+            .select(
+              "id, load_number, status, pickup_date, pickup_unlocked, driver_id"
+            )
             .maybeSingle();
 
-          if (unlockError) {
-            console.error("AVAILABLE: failed to unlock load:", unlockError);
-            showMessage(
-              isES
-                ? "No se pudo desbloquear la primera carga."
-                : "Could not unlock the first load."
-            );
-          } else if (unlockedLoad) {
-            setLoads((currentLoads) =>
-              currentLoads.map((load) =>
-                load.id === unlockedLoad.id
-                  ? { ...load, pickup_unlocked: unlockedLoad.pickup_unlocked }
-                  : load
-              )
-            );
-          } else {
-            await loadInitialData();
-          }
+        if (unlockError) {
+          console.error(
+            "AVAILABLE: failed to unlock load:",
+            unlockError
+          );
+
+          showMessage(
+            isES
+              ? "No se pudo desbloquear la primera carga."
+              : "Could not unlock the first load."
+          );
+        } else if (unlockedLoad) {
+          setLoads((currentLoads) =>
+            currentLoads.map((load) =>
+              load.id === unlockedLoad.id
+                ? {
+                    ...load,
+                    pickup_unlocked: unlockedLoad.pickup_unlocked,
+                  }
+                : load
+            )
+          );
+        } else {
+          await loadInitialData();
         }
       }
     }
-
-    setSelectedDriverId(data.id);
   }
+
+  setSelectedDriverId(data.id);
+  return true;
+}
+
 
   const selectedDriver = useMemo(
     () => drivers.find((driver) => driver.id === selectedDriverId) || null,
@@ -2365,12 +2402,14 @@ async function updateLoadStatus(status: string): Promise<boolean> {
         return false;
       }
 
-      if (currentLoadStatus === "in_transit") {
-        showMessage(
-          isES ? "El viaje ya está en curso." : "The trip is already in progress."
-        );
-        return true;
-      }
+     if (currentLoadStatus === "in_transit") {
+  showMessage(
+    isES
+      ? "El viaje ya está en curso. No se puede reiniciar desde este botón."
+      : "The trip is already in progress. It cannot be restarted from this button."
+  );
+  return false;
+}
 
       const { data: updatedLoad, error: updateLoadError } = await supabase
         .from("loads")
@@ -3715,26 +3754,26 @@ const expectedStopStatus = currentStop.status;
                   <button
                     type="button"
                     onClick={async () => {
-                      await updateDriverWorkStatus("off_duty");
-                      await setHosStatus("Off Duty");
-                      stopGpsTracking();
-                    }}
+                     const updated = await updateDriverWorkStatus("off_duty");
+                     if (!updated) return;
+                     await setHosStatus("Off Duty");
+                   }}
                     className={`rounded-xl border px-3 py-2 text-xs font-semibold transition ${
                       driverWorkStatus === "off_duty"
                         ? "border-slate-900 bg-slate-900 text-white"
                         : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
                     }`}
                   >
-                    {isES ? "Tiempo en casa" : "Home Time"}
+                    {isES ? "Tiempo personal" : "Personal Time"}
                   </button>
 
                   <button
                     type="button"
                     onClick={async () => {
-                      await updateDriverWorkStatus("hold");
-                      await setHosStatus("Sleeper");
-                      stopGpsTracking();
-                    }}
+                    const updated = await updateDriverWorkStatus("hold");
+                    if (!updated) return;
+                    await setHosStatus("Sleeper");
+           }}
                     className={`rounded-xl border px-3 py-2 text-xs font-semibold transition ${
                       driverWorkStatus === "hold"
                         ? "border-slate-900 bg-slate-900 text-white"
@@ -3747,10 +3786,8 @@ const expectedStopStatus = currentStop.status;
                   <button
                     type="button"
                     onClick={async () => {
-                      await updateDriverWorkStatus("available");
-                      await setHosStatus("Off Duty");
-                      stopGpsTracking();
-                    }}
+                     await updateDriverWorkStatus("available");
+             }}
                     className={`rounded-xl border px-3 py-2 text-xs font-semibold transition ${
                       driverWorkStatus === "available"
                         ? "border-slate-900 bg-slate-900 text-white"
@@ -3970,11 +4007,36 @@ value={
     onClick={() => void updateLoadStatus("at_pickup")}
   />
 
-  <PrimaryButton
-    label="START TRIP"
-    active={normalizeLoadStatus(selectedLoad.status) === "in_transit"}
-    onClick={() => void updateLoadStatus("in_transit")}
-  />
+  
+
+
+<PrimaryButton
+  label="START TRIP"
+  active={normalizeLoadStatus(selectedLoad.status) === "in_transit"}
+  disabled={
+    normalizeLoadStatus(selectedLoad.status) === "in_transit" ||
+    !navigationStop ||
+    navigationStop.stop_type !== "delivery"
+  }
+  onClick={() => {
+    if (
+      !navigationStop ||
+      navigationStop.stop_type !== "delivery"
+    ) {
+      showMessage(
+        isES
+          ? "Completa todas las recogidas antes de iniciar el viaje."
+          : "Complete all pickups before starting the trip."
+      );
+      return;
+    }
+
+    void updateLoadStatus("in_transit");
+  }}
+/>
+
+
+
 
   <PrimaryButton
     label="AT DELIVERY"

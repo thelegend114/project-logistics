@@ -377,195 +377,275 @@ export default function DispatchPage() {
       : "is now",
   };
 
+ 
   async function loadData() {
     setLoading(true);
     setErrorMessage("");
 
-    const [
-      loadsResult,
-      driversResult,
-      trucksResult,
-      trailersResult,
-    ] = await Promise.all([
-      supabase
-        .from("loads")
-        .select(
-          "id, load_number, broker_name, origin_city, origin_state, destination_city, destination_state, miles, rate, status, driver_id, truck_id, trailer_id"
-        )
-        .order("load_number", {
-          ascending: false,
-        }),
+    const errors: string[] = [];
 
-      supabase
-        .from("drivers")
-        .select(
-          "id, full_name, driver_number, status"
-        )
-        .order("full_name", {
-          ascending: true,
-        }),
-
-      supabase
-        .from("trucks")
-        .select(
-          "id, unit_number, make, model, status"
-        )
-        .order("unit_number", {
-          ascending: true,
-        }),
-
-      (supabase as any)
-        .from("trailers")
-        .select(
-          "id, unit_number, year, make, model, trailer_type, status"
-        )
-        .order("unit_number", {
-          ascending: true,
-        }),
-    ]);
-
-    let nextError = "";
-
-    if (loadsResult.error) {
-      nextError = loadsResult.error.message;
-      setLoads([]);
-      setLoadStops([]);
-    } else {
-      const loadedLoads =
-        (loadsResult.data || []) as Load[];
-
-      setLoads(loadedLoads);
-
-      const loadIds = loadedLoads.map(
-        (load) => load.id
-      );
-
-      if (loadIds.length > 0) {
-        const {
-          data: stopsData,
-          error: stopsError,
-        } = await supabase
-          .from("load_stops")
+    try {
+      const [
+        loadsResult,
+        driversResult,
+        trucksResult,
+        trailersResult,
+      ] = await Promise.all([
+        supabase
+          .from("loads")
           .select(
-            "id, load_id, stop_order, stop_type, address, city, state, zip_code, pickup_number, scheduled_date, scheduled_time, status"
+            "id, load_number, broker_name, origin_city, origin_state, destination_city, destination_state, miles, rate, status, driver_id, truck_id, trailer_id"
           )
-          .in("load_id", loadIds)
-          .order("stop_order", {
+          .order("load_number", {
+            ascending: false,
+          }),
+
+        supabase
+          .from("drivers")
+          .select(
+            "id, full_name, driver_number, status"
+          )
+          .order("full_name", {
             ascending: true,
-          });
+          }),
 
-        if (stopsError) {
-          nextError = stopsError.message;
-          setLoadStops([]);
-        } else {
-          setLoadStops(
-            (stopsData || []) as LoadStop[]
-          );
-        }
-      } else {
-        setLoadStops([]);
-      }
-    }
-
-    if (driversResult.error) {
-  nextError = driversResult.error.message;
-
-  console.error(
-    "DISPATCH DRIVERS QUERY ERROR:",
-    driversResult.error
-  );
-} else {
-  const fetchedDrivers =
-    (driversResult.data || []) as Driver[];
-
-  console.log(
-    "DISPATCH DRIVERS QUERY RESULT:",
-    fetchedDrivers.map((driver) => ({
-      id: driver.id,
-      name: driver.full_name,
-      status: driver.status,
-    }))
-  );
-
-  setDrivers(fetchedDrivers);
-}
-
-    if (trucksResult.error) {
-      nextError = trucksResult.error.message;
-    } else {
-      setTrucks(
-        (trucksResult.data || []) as Truck[]
-      );
-    }
-
-    if (trailersResult.error) {
-      nextError = trailersResult.error.message;
-    } else {
-      setTrailers(
-        (trailersResult.data || []) as Trailer[]
-      );
-    }
-
-    if (nextError) {
-      setErrorMessage(nextError);
-    }
-
-    setLoading(false);
-  }
-
-  
-
-
-
-useEffect(() => {
-  let active = true;
-
-  void loadData();
-
-  const channel = supabase
-    .channel("dispatch-drivers-test")
-    .on(
-      "postgres_changes",
-      {
-        event: "*",
-        schema: "public",
-        table: "drivers",
-      },
-      (payload) => {
-        if (!active) return;
-
-        console.log("DISPATCH DRIVERS TEST: EVENT RECEIVED", payload);
-
-        if (payload.eventType === "DELETE") {
-          return;
-        }
-
-        const updated = payload.new as Partial<Driver>;
-
-        if (!updated.id) return;
-
-        setDrivers((currentDrivers) =>
-          currentDrivers.map((driver) =>
-            driver.id === updated.id
-              ? { ...driver, ...updated }
-              : driver
+        supabase
+          .from("trucks")
+          .select(
+            "id, unit_number, make, model, status"
           )
+          .order("unit_number", {
+            ascending: true,
+          }),
+
+        (supabase as any)
+          .from("trailers")
+          .select(
+            "id, unit_number, year, make, model, trailer_type, status"
+          )
+          .order("unit_number", {
+            ascending: true,
+          }),
+      ]);
+
+      if (loadsResult.error) {
+        errors.push(
+          `Loads: ${loadsResult.error.message}`
+        );
+
+        setLoads([]);
+        setLoadStops([]);
+      } else {
+        const loadedLoads =
+          (loadsResult.data || []) as Load[];
+
+        setLoads(loadedLoads);
+
+        const loadIds = loadedLoads.map(
+          (load) => load.id
+        );
+
+        if (loadIds.length > 0) {
+          const {
+            data: stopsData,
+            error: stopsError,
+          } = await supabase
+            .from("load_stops")
+            .select(
+              "id, load_id, stop_order, stop_type, address, city, state, zip_code, pickup_number, scheduled_date, scheduled_time, status"
+            )
+            .in("load_id", loadIds)
+            .order("stop_order", {
+              ascending: true,
+            });
+
+          if (stopsError) {
+            errors.push(
+              `Load stops: ${stopsError.message}`
+            );
+
+            setLoadStops([]);
+          } else {
+            setLoadStops(
+              (stopsData || []) as LoadStop[]
+            );
+          }
+        } else {
+          setLoadStops([]);
+        }
+      }
+
+      if (driversResult.error) {
+        errors.push(
+          `Drivers: ${driversResult.error.message}`
+        );
+
+        console.error(
+          "DISPATCH DRIVERS QUERY ERROR:",
+          driversResult.error
+        );
+      } else {
+        const fetchedDrivers =
+          (driversResult.data || []) as Driver[];
+
+        console.log(
+          "DISPATCH DRIVERS QUERY RESULT:",
+          fetchedDrivers.map((driver) => ({
+            id: driver.id,
+            name: driver.full_name,
+            status: driver.status,
+          }))
+        );
+
+        setDrivers(fetchedDrivers);
+      }
+
+      if (trucksResult.error) {
+        errors.push(
+          `Trucks: ${trucksResult.error.message}`
+        );
+      } else {
+        setTrucks(
+          (trucksResult.data || []) as Truck[]
         );
       }
-    )
-    .subscribe((status, error) => {
-      console.log("DISPATCH DRIVERS TEST STATUS:", status);
 
-      if (error) {
-        console.error("DISPATCH DRIVERS TEST ERROR:", error);
+      if (trailersResult.error) {
+        errors.push(
+          `Trailers: ${trailersResult.error.message}`
+        );
+      } else {
+        setTrailers(
+          (trailersResult.data || []) as Trailer[]
+        );
       }
-    });
 
-  return () => {
-    active = false;
-    void supabase.removeChannel(channel);
-  };
-}, []);
+      setErrorMessage(
+        errors.length > 0
+          ? errors.join(" | ")
+          : ""
+      );
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Unexpected error loading Dispatch data.";
+
+      console.error(
+        "DISPATCH LOAD DATA ERROR:",
+        error
+      );
+
+      setErrorMessage(message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    let active = true;
+
+    const channel = supabase
+      .channel("dispatch-drivers-test")
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "drivers",
+        },
+        (payload) => {
+          if (!active) return;
+
+          console.log(
+            "DISPATCH DRIVERS TEST: EVENT RECEIVED",
+            payload
+          );
+
+          if (payload.eventType === "DELETE") {
+            const deleted = payload.old as Partial<Driver>;
+
+            if (!deleted.id) {
+              void loadData();
+              return;
+            }
+
+            setDrivers((currentDrivers) =>
+              currentDrivers.filter(
+                (driver) => driver.id !== deleted.id
+              )
+            );
+
+            return;
+          }
+
+          const changed =
+            payload.new as Partial<Driver>;
+
+          if (!changed.id) {
+            void loadData();
+            return;
+          }
+
+          if (payload.eventType === "INSERT") {
+            const inserted = changed as Driver;
+
+            setDrivers((currentDrivers) => {
+              const exists = currentDrivers.some(
+                (driver) => driver.id === inserted.id
+              );
+
+              const nextDrivers = exists
+                ? currentDrivers.map((driver) =>
+                    driver.id === inserted.id
+                      ? { ...driver, ...inserted }
+                      : driver
+                  )
+                : [...currentDrivers, inserted];
+
+              return nextDrivers.sort((a, b) =>
+                (a.full_name || "").localeCompare(
+                  b.full_name || ""
+                )
+              );
+            });
+
+            return;
+          }
+
+          if (payload.eventType === "UPDATE") {
+            setDrivers((currentDrivers) =>
+              currentDrivers.map((driver) =>
+                driver.id === changed.id
+                  ? { ...driver, ...changed }
+                  : driver
+              )
+            );
+          }
+        }
+      )
+      .subscribe((status, error) => {
+        console.log(
+          "DISPATCH DRIVERS TEST STATUS:",
+          status
+        );
+
+        if (error) {
+          console.error(
+            "DISPATCH DRIVERS TEST ERROR:",
+            error
+          );
+        }
+      });
+
+    void loadData();
+
+    return () => {
+      active = false;
+      void supabase.removeChannel(channel);
+    };
+  }, []);
+
 
   const dispatchLoads = useMemo(() => {
     const value = search

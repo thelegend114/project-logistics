@@ -136,7 +136,7 @@ function createEmptyStop(
   stopType: StopType = "pickup"
 ): LoadStop {
   return {
-    stop_number: `stop-${Date.now()}-${stopOrder}`,
+    stop_number: `stop-${Date.now()}`,
     stop_order: stopOrder,
     stop_type: stopType,
     address: "",
@@ -226,6 +226,12 @@ export default function LoadsPage() {
       ? "Administra cargas, asignaciones, rutas y estados de las cargas."
       : "Manage freight, assignments, routes and load status.",
     createLoad: isES ? "Crear carga" : "Create Load",
+    edit: isES ? "Editar" : "Edit",
+    editLoadTitle: isES ? "Editar carga" : "Edit Load",
+    saveChanges: isES ? "Guardar cambios" : "Save Changes",
+    savingChanges: isES ? "Guardando cambios..." : "Saving changes...",
+    loadUpdated: isES ? "Carga actualizada correctamente." : "Load updated successfully.",
+    editBlocked: isES ? "Solo se pueden editar cargas que aún no están en tránsito ni entregadas. No se modificó el historial de paradas." : "Only loads not yet in transit or delivered can be edited. Stop history was not changed.",
 
     totalLoads: isES ? "Total de cargas" : "Total Loads",
     available: isES ? "Disponible" : "Available",
@@ -416,6 +422,7 @@ export default function LoadsPage() {
   const [statusFilter, setStatusFilter] = useState("all");
 
   const [showForm, setShowForm] = useState(false);
+  const [editingLoadId, setEditingLoadId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
@@ -676,9 +683,68 @@ export default function LoadsPage() {
   }
 
   function openCreateForm() {
+    setEditingLoadId(null);
     resetForm();
     setMessage("");
     setErrorMessage("");
+    setShowForm(true);
+  }
+
+  async function openEditForm(load: Load) {
+    setMessage("");
+    setErrorMessage("");
+    setOpenStatusMenu(null);
+
+    if (load.status === "in_transit" || load.status === "delivered") {
+      setErrorMessage(text.editBlocked);
+      return;
+    }
+
+    const { data: stopRows, error: stopError } = await supabase
+      .from("load_stops")
+      .select("id, stop_order, stop_type, address, city, state, zip_code, pickup_number, latitude, longitude, scheduled_date, scheduled_time, status")
+      .eq("load_id", load.id)
+      .order("stop_order", { ascending: true });
+
+    if (stopError) {
+      setErrorMessage(stopError.message);
+      return;
+    }
+
+    const rows = stopRows ?? [];
+    if (rows.some((stop: any) => stop.status && stop.status !== "pending")) {
+      setErrorMessage(text.editBlocked);
+      return;
+    }
+
+    setEditingLoadId(load.id);
+    setForm({
+      company_id: load.company_id ?? "",
+      load_number: load.load_number ?? "",
+      broker_name: load.broker_name ?? "",
+      customer_name: load.customer_name ?? "",
+      miles: load.miles == null ? "" : String(load.miles),
+      rate: load.rate == null ? "" : String(load.rate),
+      status: load.status ?? "available",
+      driver_id: load.driver_id ?? "",
+      truck_id: load.truck_id ?? "",
+      trailer_id: load.trailer_id ?? "",
+    });
+
+    setStops(rows.length ? rows.map((stop: any) => ({
+      stop_number: String(stop.id),
+      stop_order: Number(stop.stop_order),
+      stop_type: stop.stop_type as StopType,
+      address: stop.address ?? "",
+      city: stop.city ?? "",
+      state: stop.state ?? "",
+      zip_code: stop.zip_code ?? "",
+      pickup_number: stop.pickup_number ?? "",
+      latitude: stop.latitude == null ? null : Number(stop.latitude),
+      longitude: stop.longitude == null ? null : Number(stop.longitude),
+      scheduled_date: stop.scheduled_date ?? "",
+      scheduled_time: stop.scheduled_time ?? "",
+    })) : [createEmptyStop(1, "pickup"), createEmptyStop(2, "delivery")]);
     setShowForm(true);
   }
 
@@ -694,50 +760,31 @@ export default function LoadsPage() {
     value: string
   ) {
     setStops((current) =>
-      current.map((stop, stopIndex) => {
-        if (stopIndex !== index) {
-          return stop;
-        }
-
-        if (field === "stop_type") {
-          const nextType = value as StopType;
-
-          return {
-            ...stop,
-            stop_type: nextType,
-            pickup_number:
-              nextType === "pickup"
-                ? stop.pickup_number
-                : "",
-          };
-        }
-
-        return {
-          ...stop,
-          [field]: value,
-        };
-      })
+      current.map((stop, stopIndex) =>
+        stopIndex === index
+          ? {
+              ...stop,
+              [field]:
+                field === "stop_type"
+                  ? (value as StopType)
+                  : value,
+            }
+          : stop
+      )
     );
   }
 
-  function addStop() {
-    setStops((current) => {
-      const nextOrder = current.length + 1;
+  
+function addStop(stopType: StopType) {
+  setStops((current) => [
+    ...current,
+    createEmptyStop(current.length + 1, stopType),
+  ]);
+}
 
-      const previousStop =
-        current[current.length - 1];
 
-      const nextType: StopType =
-        previousStop?.stop_type === "pickup"
-          ? "delivery"
-          : "pickup";
+  
 
-      return [
-        ...current,
-        createEmptyStop(nextOrder, nextType),
-      ];
-    });
-  }
 
   function removeStop(index: number) {
     setStops((current) => {
@@ -803,81 +850,41 @@ export default function LoadsPage() {
       );
 
       const geocodedStops: LoadStop[] = [];
-
       for (const stop of stops) {
         const address = stop.address.trim();
         const city = stop.city.trim();
         const state = stop.state.trim();
-
         if (!address || !city || !state) {
-          setErrorMessage(
-            isES
-              ? `Falta la dirección de la parada ${stop.stop_order}.`
-              : `Address information is missing for stop ${stop.stop_order}.`
-          );
+          setErrorMessage(isES ? `Falta la dirección de la parada ${stop.stop_order}.` : `Address information is missing for stop ${stop.stop_order}.`);
           return;
         }
-
         try {
-          const response = await fetch(
-            "/api/geocode",
-            {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                address,
-                city,
-                state,
-              }),
-            }
-          );
+         
+const response = await fetch("/api/geocode", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    address,
+    city,
+    state,
+    zip_code: stop.zip_code?.trim() || "",
+  }),
+});
 
           const result = await response.json();
-
-          if (
-            !response.ok ||
-            !Number.isFinite(
-              Number(result.latitude)
-            ) ||
-            !Number.isFinite(
-              Number(result.longitude)
-            )
-          ) {
-            setErrorMessage(
-              isES
-                ? `No se pudo localizar la parada ${stop.stop_order}: ${address}, ${city}, ${state}.`
-                : `Could not locate stop ${stop.stop_order}: ${address}, ${city}, ${state}.`
-            );
+          if (!response.ok || !Number.isFinite(Number(result.latitude)) || !Number.isFinite(Number(result.longitude))) {
+            setErrorMessage(isES ? `No se pudo localizar la parada ${stop.stop_order}: ${address}, ${city}, ${state}.` : `Could not locate stop ${stop.stop_order}: ${address}, ${city}, ${state}.`);
             return;
           }
-
-          geocodedStops.push({
-            ...stop,
-            latitude: Number(result.latitude),
-            longitude: Number(result.longitude),
-          });
+          geocodedStops.push({ ...stop, latitude: Number(result.latitude), longitude: Number(result.longitude) });
         } catch (error) {
-          console.error(
-            "GEOCODING STOP ERROR:",
-            stop.stop_order,
-            error
-          );
-
-          setErrorMessage(
-            isES
-              ? `No se pudo localizar la parada ${stop.stop_order}.`
-              : `Could not locate stop ${stop.stop_order}.`
-          );
+          console.error("GEOCODING STOP ERROR:", stop.stop_order, error);
+          setErrorMessage(isES ? `No se pudo localizar la parada ${stop.stop_order}.` : `Could not locate stop ${stop.stop_order}.`);
           return;
         }
       }
 
-      const { data: createdLoad, error: loadError } =
-        await supabase
-          .from("loads")
-          .insert({
+      const loadPayload = {
             company_id: form.company_id || null,
             load_number: form.load_number.trim(),
             broker_name:
@@ -918,78 +925,86 @@ export default function LoadsPage() {
             driver_id: form.driver_id || null,
             truck_id: form.truck_id || null,
             trailer_id: form.trailer_id || null,
-          })
-          .select("id")
-          .single();
+      };
 
-      if (loadError || !createdLoad) {
-        throw new Error(
-          loadError?.message ??
-            "The load could not be created."
-        );
-      }
+      if (editingLoadId) {
+        const { error: updateError } = await supabase
+          .from("loads")
+          .update(loadPayload)
+          .eq("id", editingLoadId);
+        if (updateError) throw new Error(updateError.message);
 
-      const loadStops = geocodedStops.map(
-        (stop, index) => ({
+        const { data: currentRows, error: currentRowsError } = await supabase
+          .from("load_stops")
+          .select("id, status")
+          .eq("load_id", editingLoadId);
+        if (currentRowsError) throw new Error(currentRowsError.message);
+        if ((currentRows ?? []).some((row: any) => row.status && row.status !== "pending")) {
+          throw new Error(text.editBlocked);
+        }
+
+        const retainedIds = new Set(stops.filter(stop => stop.stop_number && !stop.stop_number.startsWith("stop-")).map(stop => stop.stop_number));
+        const removedIds = (currentRows ?? []).filter((row: any) => !retainedIds.has(String(row.id))).map((row: any) => row.id);
+        if (removedIds.length) {
+          const { error: deleteError } = await supabase.from("load_stops").delete().eq("load_id", editingLoadId).in("id", removedIds);
+          if (deleteError) throw new Error(deleteError.message);
+        }
+
+        for (let index = 0; index < geocodedStops.length; index++) {
+          const stop = geocodedStops[index];
+          const payload = {
+            load_id: editingLoadId,
+            stop_order: index + 1,
+            stop_type: stop.stop_type,
+            address: stop.address.trim() || null,
+            city: stop.city.trim(),
+            state: stop.state.trim(),
+            zip_code: stop.zip_code.trim() || null,
+            pickup_number: stop.stop_type === "pickup" ? (stop.pickup_number.trim() || null) : null,
+            latitude: stop.latitude,
+            longitude: stop.longitude,
+            scheduled_date: stop.scheduled_date || null,
+            scheduled_time: stop.scheduled_time || null,
+          };
+          if (stop.stop_number && !stop.stop_number.startsWith("stop-")) {
+            const { error: stopUpdateError } = await supabase.from("load_stops").update(payload).eq("id", stop.stop_number).eq("load_id", editingLoadId);
+            if (stopUpdateError) throw new Error(stopUpdateError.message);
+          } else {
+            const { error: stopInsertError } = await supabase.from("load_stops").insert({ ...payload, status: "pending" });
+            if (stopInsertError) throw new Error(stopInsertError.message);
+          }
+        }
+      } else {
+        const { data: createdLoad, error: loadError } = await supabase
+          .from("loads").insert(loadPayload).select("id").single();
+        if (loadError || !createdLoad) throw new Error(loadError?.message ?? "The load could not be created.");
+
+        const loadStops = geocodedStops.map((stop, index) => ({
           load_id: createdLoad.id,
           stop_order: index + 1,
           stop_type: stop.stop_type,
-          address:
-            stop.address.trim() || null,
+          address: stop.address.trim() || null,
           city: stop.city.trim(),
           state: stop.state.trim(),
-
-          zip_code:
-            stop.zip_code.trim() || null,
-
-          pickup_number:
-            stop.stop_type === "pickup"
-              ? stop.pickup_number.trim() || null
-              : null,
-
+          zip_code: stop.zip_code.trim() || null,
+          pickup_number: stop.stop_type === "pickup" ? (stop.pickup_number.trim() || null) : null,
           latitude: stop.latitude,
           longitude: stop.longitude,
-
-          scheduled_date:
-            stop.scheduled_date || null,
-
-          scheduled_time:
-            stop.scheduled_time || null,
-
+          scheduled_date: stop.scheduled_date || null,
+          scheduled_time: stop.scheduled_time || null,
           status: "pending",
-        })
-      );
-
-      const {
-        data: insertedStops,
-        error: stopsError,
-      } = await supabase
-        .from("load_stops")
-        .insert(loadStops)
-        .select(
-          "id, load_id, stop_order, stop_type"
-        );
-
-      if (
-        stopsError ||
-        !insertedStops ||
-        insertedStops.length !== loadStops.length
-      ) {
-        await supabase
-          .from("loads")
-          .delete()
-          .eq("id", createdLoad.id);
-
-        throw new Error(
-          stopsError?.message ??
-            `Expected ${loadStops.length} stops, but only ${
-              insertedStops?.length ?? 0
-            } were created.`
-        );
+        }));
+        const { data: insertedStops, error: stopsError } = await supabase
+          .from("load_stops").insert(loadStops).select("id, load_id, stop_order, stop_type");
+        if (stopsError || !insertedStops || insertedStops.length !== loadStops.length) {
+          await supabase.from("loads").delete().eq("id", createdLoad.id);
+          throw new Error(stopsError?.message ?? "The load stops could not be saved.");
+        }
       }
 
-      setMessage(text.loadCreated);
+      setMessage(editingLoadId ? text.loadUpdated : text.loadCreated);
       setShowForm(false);
+      setEditingLoadId(null);
       resetForm();
       await loadData();
     } catch (error) {
@@ -1611,7 +1626,7 @@ export default function LoadsPage() {
               <table
                 style={{
                   width: "100%",
-                  minWidth: 1550,
+                  minWidth: 1630,
                   borderCollapse:
                     "collapse",
                 }}
@@ -1661,6 +1676,10 @@ export default function LoadsPage() {
 
                     <th style={thStyle}>
                       {text.status}
+                    </th>
+
+                    <th style={thStyle}>
+                      {isES ? "Acciones" : "Actions"}
                     </th>
                   </tr>
                 </thead>
@@ -1965,6 +1984,25 @@ export default function LoadsPage() {
                               >
                                 ▾
                               </span>
+                            </button>
+                          </td>
+                          <td style={tdStyle}>
+                            <button
+                              type="button"
+                              onClick={() => openEditForm(load)}
+                              style={{
+                                height: 34,
+                                padding: "0 12px",
+                                border: "1px solid #cbd5e1",
+                                borderRadius: 8,
+                                background: "#ffffff",
+                                color: "#0f172a",
+                                fontSize: 12,
+                                fontWeight: 800,
+                                cursor: "pointer",
+                              }}
+                            >
+                              {text.edit}
                             </button>
                           </td>
                         </tr>
@@ -2509,7 +2547,7 @@ export default function LoadsPage() {
                           return (
                             <div
                               key={
-                                `${stop.stop_number}-${index}`
+                                `${stop.stop_order}-${index}`
                               }
                               style={{
                                 border:
@@ -2656,7 +2694,7 @@ export default function LoadsPage() {
                                   display:
                                     "grid",
                                   gridTemplateColumns:
-                                    "1fr 1.8fr 1.15fr 0.75fr 0.85fr 0.8fr 0.9fr 0.9fr",
+                                    "1.1fr 2fr 1.25fr 0.75fr 0.9fr 0.9fr",
                                   gap: 10,
                                   alignItems:
                                     "end",
@@ -2806,58 +2844,28 @@ export default function LoadsPage() {
                                 </Field>
 
                                 {/* ZIP CODE */}
-                                <Field
-                                  label={
-                                    text.zipCode
-                                  }
-                                >
+                                <Field label={text.zipCode}>
                                   <input
-                                    value={
-                                      stop.zip_code
-                                    }
-                                    onChange={(
-                                      event
-                                    ) =>
-                                      updateStop(
-                                        index,
-                                        "zip_code",
-                                        event
-                                          .target
-                                          .value
-                                      )
-                                    }
-                                    placeholder="33101"
-                                    inputMode="numeric"
-                                    autoComplete="postal-code"
-                                    disabled={
-                                      saving
-                                    }
-                                    style={
-                                      inputStyle
-                                    }
+                                    value={stop.zip_code}
+                                    onChange={(event) => updateStop(index, "zip_code", event.target.value)}
+                                    placeholder="33126"
+                                    disabled={saving}
+                                    style={inputStyle}
                                   />
                                 </Field>
 
-                                {/* PU — PICKUP ONLY */}
-{isPickup && (
-  <Field
-    label={text.pickupNumber}
-  >
-    <input
-      value={stop.pickup_number}
-      onChange={(event) =>
-        updateStop(
-          index,
-          "pickup_number",
-          event.target.value
-        )
-      }
-      placeholder="PU-001"
-      disabled={saving}
-      style={inputStyle}
-    />
-  </Field>
-)}
+                                {/* PICKUP NUMBER */}
+                                {stop.stop_type === "pickup" && (
+                                  <Field label={text.pickupNumber}>
+                                    <input
+                                      value={stop.pickup_number}
+                                      onChange={(event) => updateStop(index, "pickup_number", event.target.value)}
+                                      placeholder="PU number"
+                                      disabled={saving}
+                                      style={inputStyle}
+                                    />
+                                  </Field>
+                                )}
 
                                 {/* DATE */}
                                 <Field
@@ -2928,51 +2936,53 @@ export default function LoadsPage() {
                     </div>
 
                     {/* ADD STOP */}
-                    <div
-                      style={{
-                        display:
-                          "flex",
-                        justifyContent:
-                          "center",
-                        marginTop: 14,
-                      }}
-                    >
-                      <button
-                        type="button"
-                        onClick={
-                          addStop
-                        }
-                        disabled={
-                          saving
-                        }
-                        style={{
-                          height: 38,
-                          padding:
-                            "0 16px",
-                          border:
-                            "1px solid #cbd5e1",
-                          borderRadius:
-                            9,
-                          background:
-                            "#ffffff",
-                          color:
-                            "#334155",
-                          fontSize:
-                            12,
-                          fontWeight:
-                            700,
-                          cursor:
-                            saving
-                              ? "not-allowed"
-                              : "pointer",
-                        }}
-                      >
-                        +{" "}
-                        {
-                          text.addStop
-                        }
-                      </button>
-                    </div>
+<div
+  style={{
+    display: "flex",
+    justifyContent: "center",
+    gap: 10,
+    flexWrap: "wrap",
+    marginTop: 14,
+  }}
+>
+  <button
+    type="button"
+    onClick={() => addStop("pickup")}
+    disabled={saving}
+    style={{
+      height: 38,
+      padding: "0 16px",
+      border: "1px solid #cbd5e1",
+      borderRadius: 9,
+      background: "#ffffff",
+      color: "#1d4ed8",
+      fontSize: 12,
+      fontWeight: 700,
+      cursor: saving ? "not-allowed" : "pointer",
+    }}
+  >
+    + Add Pickup
+  </button>
+
+  <button
+    type="button"
+    onClick={() => addStop("delivery")}
+    disabled={saving}
+    style={{
+      height: 38,
+      padding: "0 16px",
+      border: "1px solid #cbd5e1",
+      borderRadius: 9,
+      background: "#ffffff",
+      color: "#047857",
+      fontSize: 12,
+      fontWeight: 700,
+      cursor: saving ? "not-allowed" : "pointer",
+    }}
+  >
+    + Add Delivery
+  </button>
+</div>
                   </div>
 
                   {/* MILES + RATE */}
@@ -3401,8 +3411,8 @@ export default function LoadsPage() {
                     }}
                   >
                     {saving
-                      ? text.creating
-                      : text.createLoad}
+                      ? (editingLoadId ? text.savingChanges : text.creating)
+                      : (editingLoadId ? text.saveChanges : text.createLoad)}
                   </button>
                 </div>
               </form>

@@ -389,28 +389,38 @@ export default function LoadsPage() {
       : "Loads created from Operations and Loads use the same load record.",
   };
 
-  const STATUS_OPTIONS = [
-    {
-      value: "available",
-      label: text.availableLabel,
-      description: text.availableDescription,
-    },
-    {
-      value: "assigned",
-      label: text.assignedLabel,
-      description: text.assignedDescription,
-    },
-    {
-      value: "in_transit",
-      label: text.inTransitLabel,
-      description: text.inTransitDescription,
-    },
-    {
-      value: "delivered",
-      label: text.deliveredLabel,
-      description: text.deliveredDescription,
-    },
-  ];
+ 
+
+const STATUS_OPTIONS = [
+  {
+    value: "pending_review",
+    label: isES ? "Pendiente de revisión" : "Pending Review",
+    description: isES
+      ? "Pendiente de validar y liberar a Dispatch."
+      : "Awaiting validation and release to Dispatch.",
+  },
+  {
+    value: "available",
+    label: text.availableLabel,
+    description: text.availableDescription,
+  },
+  {
+    value: "assigned",
+    label: text.assignedLabel,
+    description: text.assignedDescription,
+  },
+  {
+    value: "in_transit",
+    label: text.inTransitLabel,
+    description: text.inTransitDescription,
+  },
+  {
+    value: "delivered",
+    label: text.deliveredLabel,
+    description: text.deliveredDescription,
+  },
+];
+
 
   const [loads, setLoads] = useState<Load[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
@@ -446,7 +456,7 @@ export default function LoadsPage() {
     customer_name: "",
     miles: "",
     rate: "",
-    status: "available",
+    status: "pending_review",
     driver_id: "",
     truck_id: "",
     trailer_id: "",
@@ -670,7 +680,7 @@ export default function LoadsPage() {
       customer_name: "",
       miles: "",
       rate: "",
-      status: "available",
+      status: "pending_review",
       driver_id: "",
       truck_id: "",
       trailer_id: "",
@@ -725,7 +735,7 @@ export default function LoadsPage() {
       customer_name: load.customer_name ?? "",
       miles: load.miles == null ? "" : String(load.miles),
       rate: load.rate == null ? "" : String(load.rate),
-      status: load.status ?? "available",
+      status: load.status ?? "pending_review",
       driver_id: load.driver_id ?? "",
       truck_id: load.truck_id ?? "",
       trailer_id: load.trailer_id ?? "",
@@ -775,16 +785,12 @@ export default function LoadsPage() {
   }
 
   
-function addStop(stopType: StopType) {
+   function addStop(stopType: StopType) {
   setStops((current) => [
     ...current,
     createEmptyStop(current.length + 1, stopType),
   ]);
 }
-
-
-  
-
 
   function removeStop(index: number) {
     setStops((current) => {
@@ -884,6 +890,18 @@ const response = await fetch("/api/geocode", {
         }
       }
 
+            const orderedStops = [...geocodedStops].sort((a, b) => {
+        const dateA =
+          `${a.scheduled_date || "9999-12-31"}T${a.scheduled_time || "23:59"}`;
+
+        const dateB =
+          `${b.scheduled_date || "9999-12-31"}T${b.scheduled_time || "23:59"}`;
+
+        return dateA.localeCompare(dateB);
+      });
+
+      
+
       const loadPayload = {
             company_id: form.company_id || null,
             load_number: form.load_number.trim(),
@@ -921,7 +939,7 @@ const response = await fetch("/api/geocode", {
               ? Number(form.rate)
               : null,
 
-            status: form.status,
+            status: editingLoadId ? form.status : "pending_review",
             driver_id: form.driver_id || null,
             truck_id: form.truck_id || null,
             trailer_id: form.trailer_id || null,
@@ -934,24 +952,76 @@ const response = await fetch("/api/geocode", {
           .eq("id", editingLoadId);
         if (updateError) throw new Error(updateError.message);
 
-        const { data: currentRows, error: currentRowsError } = await supabase
-          .from("load_stops")
-          .select("id, status")
-          .eq("load_id", editingLoadId);
-        if (currentRowsError) throw new Error(currentRowsError.message);
-        if ((currentRows ?? []).some((row: any) => row.status && row.status !== "pending")) {
-          throw new Error(text.editBlocked);
-        }
+     const { data: currentRows, error: currentRowsError } =
+  await supabase
+    .from("load_stops")
+    .select("id, status, stop_order")
+    .eq("load_id", editingLoadId);
 
+if (currentRowsError) {
+  throw new Error(currentRowsError.message);
+}
+
+if (
+  (currentRows ?? []).some(
+    (row: any) =>
+      row.status && row.status !== "pending"
+  )
+) {
+  throw new Error(text.editBlocked);
+}
         const retainedIds = new Set(stops.filter(stop => stop.stop_number && !stop.stop_number.startsWith("stop-")).map(stop => stop.stop_number));
         const removedIds = (currentRows ?? []).filter((row: any) => !retainedIds.has(String(row.id))).map((row: any) => row.id);
-        if (removedIds.length) {
-          const { error: deleteError } = await supabase.from("load_stops").delete().eq("load_id", editingLoadId).in("id", removedIds);
-          if (deleteError) throw new Error(deleteError.message);
-        }
+       if (removedIds.length) {
+  const { error: deleteError } = await supabase
+    .from("load_stops")
+    .delete()
+    .eq("load_id", editingLoadId)
+    .in("id", removedIds);
 
-        for (let index = 0; index < geocodedStops.length; index++) {
-          const stop = geocodedStops[index];
+  if (deleteError) {
+    throw new Error(deleteError.message);
+  }
+}
+
+const retainedStops = geocodedStops.filter(
+  (stop) =>
+    stop.stop_number &&
+    !stop.stop_number.startsWith("stop-")
+);
+
+const maxStopOrder = Math.max(
+  0,
+  ...(currentRows ?? []).map(
+    (row: any) => Number(row.stop_order) || 0
+  )
+);
+
+for (let index = 0; index < retainedStops.length; index++) {
+  const stop = retainedStops[index];
+
+  const { error: tempOrderError } = await supabase
+    .from("load_stops")
+    .update({
+      stop_order: maxStopOrder + 1000 + index,
+    })
+    .eq("id", stop.stop_number)
+    .eq("load_id", editingLoadId);
+
+  if (tempOrderError) {
+    throw new Error(tempOrderError.message);
+  }
+}
+
+        const orderedStops = [...geocodedStops].sort((a, b) => {
+  const dateTimeA = `${a.scheduled_date || "9999-12-31"}T${a.scheduled_time || "23:59"}`;
+  const dateTimeB = `${b.scheduled_date || "9999-12-31"}T${b.scheduled_time || "23:59"}`;
+
+  return dateTimeA.localeCompare(dateTimeB);
+});
+
+for (let index = 0; index < orderedStops.length; index++) {
+  const stop = orderedStops[index];
           const payload = {
             load_id: editingLoadId,
             stop_order: index + 1,
@@ -975,25 +1045,57 @@ const response = await fetch("/api/geocode", {
           }
         }
       } else {
-        const { data: createdLoad, error: loadError } = await supabase
-          .from("loads").insert(loadPayload).select("id").single();
-        if (loadError || !createdLoad) throw new Error(loadError?.message ?? "The load could not be created.");
+      
+const { data: createdLoad, error: createError } = await supabase
+  .from("loads")
+  .insert(loadPayload)
+  .select("id, load_number, status")
+  .single();
 
-        const loadStops = geocodedStops.map((stop, index) => ({
-          load_id: createdLoad.id,
-          stop_order: index + 1,
-          stop_type: stop.stop_type,
-          address: stop.address.trim() || null,
-          city: stop.city.trim(),
-          state: stop.state.trim(),
-          zip_code: stop.zip_code.trim() || null,
-          pickup_number: stop.stop_type === "pickup" ? (stop.pickup_number.trim() || null) : null,
-          latitude: stop.latitude,
-          longitude: stop.longitude,
-          scheduled_date: stop.scheduled_date || null,
-          scheduled_time: stop.scheduled_time || null,
-          status: "pending",
-        }));
+console.log("[LOAD CREATE RESULT]", {
+  requestedStatus: loadPayload.status,
+  savedId: createdLoad?.id,
+  savedLoadNumber: createdLoad?.load_number,
+  savedStatus: createdLoad?.status,
+  createError: createError?.message ?? null,
+});
+if (createError || !createdLoad) {
+ setErrorMessage(
+  createError?.message ??
+    (isES ? "No se pudo crear la carga." : "Failed to create load.")
+);
+  setSaving(false);
+  return;
+}
+
+
+      
+const orderedStops = [...geocodedStops].sort((a, b) => {
+  const dateTimeA = `${a.scheduled_date || "9999-12-31"}T${a.scheduled_time || "23:59"}`;
+  const dateTimeB = `${b.scheduled_date || "9999-12-31"}T${b.scheduled_time || "23:59"}`;
+
+  return dateTimeA.localeCompare(dateTimeB);
+});
+
+const loadStops = orderedStops.map((stop, index) => ({
+  load_id: createdLoad.id,
+  stop_order: index + 1,
+  stop_type: stop.stop_type,
+  address: stop.address.trim() || null,
+  city: stop.city.trim(),
+  state: stop.state.trim(),
+  zip_code: stop.zip_code.trim() || null,
+  pickup_number:
+    stop.stop_type === "pickup"
+      ? stop.pickup_number.trim() || null
+      : null,
+  latitude: stop.latitude,
+  longitude: stop.longitude,
+  scheduled_date: stop.scheduled_date || null,
+  scheduled_time: stop.scheduled_time || null,
+  status: "pending",
+}));
+
         const { data: insertedStops, error: stopsError } = await supabase
           .from("load_stops").insert(loadStops).select("id, load_id, stop_order, stop_type");
         if (stopsError || !insertedStops || insertedStops.length !== loadStops.length) {
@@ -1018,41 +1120,157 @@ const response = await fetch("/api/geocode", {
     }
   }
 
-  async function updateLoadStatus(
-    load: Load,
-    newStatus: string
-  ) {
-    setMessage("");
-    setErrorMessage("");
-    setOpenStatusMenu(null);
 
-    const { error } = await supabase
-      .from("loads")
-      .update({ status: newStatus })
-      .eq("id", load.id);
 
-    if (error) {
-      setErrorMessage(error.message);
-      return;
-    }
+async function updateLoadStatus(
+  load: Load,
+  newStatus: string
+) {
+  setMessage("");
+  setErrorMessage("");
+  setOpenStatusMenu(null);
 
-    setLoads((current) =>
-      current.map((item) =>
-        item.id === load.id
-          ? {
-              ...item,
-              status: newStatus,
-            }
-          : item
-      )
+  if (load.status === "pending_review") {
+    setErrorMessage(
+      isES
+        ? "Esta carga debe liberarse a Dispatch mediante la acción de liberación."
+        : "This load must be released to Dispatch using the release action."
     );
-
-    setMessage(
-      `${isES ? "Carga" : "Load"} ${load.load_number} ${
-        text.loadUpdatedTo
-      } ${statusLabel(newStatus)}.`
-    );
+    return;
   }
+
+  const { error } = await supabase
+    .from("loads")
+    .update({ status: newStatus })
+    .eq("id", load.id);
+
+  if (error) {
+    setErrorMessage(
+      isES
+        ? `No se pudo actualizar la carga: ${error.message}`
+        : `Could not update the load: ${error.message}`
+    );
+    return;
+  }
+
+  setLoads((current) =>
+    current.map((item) =>
+      item.id === load.id
+        ? {
+            ...item,
+            status: newStatus,
+          }
+        : item
+    )
+  );
+
+  setMessage(
+    `${isES ? "Carga" : "Load"} ${load.load_number} ${
+      text.loadUpdatedTo
+    } ${statusLabel(newStatus)}.`
+  );
+}
+
+
+
+
+async function releaseLoadToDispatch(load: Load) {
+  setMessage("");
+  setErrorMessage("");
+  setOpenStatusMenu(null);
+
+  if (load.status !== "pending_review") {
+    setErrorMessage(
+      isES
+        ? "Solo se pueden liberar cargas pendientes de revisión."
+        : "Only loads pending review can be released."
+    );
+    return;
+  }
+
+  const { data: stops, error: stopsError } = await supabase
+    .from("load_stops")
+    .select(
+      "stop_order, stop_type, address, city, state, latitude, longitude, scheduled_date, scheduled_time"
+    )
+    .eq("load_id", load.id)
+    .order("stop_order", { ascending: true });
+
+  if (stopsError) {
+    setErrorMessage(
+      isES
+        ? `No se pudieron verificar las paradas: ${stopsError.message}`
+        : `Could not verify stops: ${stopsError.message}`
+    );
+    return;
+  }
+
+  if (
+    !stops ||
+    stops.length < 2 ||
+    stops.some(
+      (stop) =>
+        !stop.address?.trim() ||
+        !stop.city?.trim() ||
+        !stop.state?.trim() ||
+        stop.latitude == null ||
+        stop.longitude == null
+    ) ||
+    !stops.some((stop) => stop.stop_type === "pickup") ||
+    !stops.some((stop) => stop.stop_type === "delivery")
+  ) {
+    setErrorMessage(
+      isES
+        ? "No se puede liberar: verifica las paradas, direcciones y coordenadas."
+        : "Cannot release: verify stops, addresses, and coordinates."
+    );
+    return;
+  }
+
+  const { data, error } = await supabase
+    .from("loads")
+    .update({ status: "available" })
+    .eq("id", load.id)
+    .eq("status", "pending_review")
+    .select("id")
+    .maybeSingle();
+
+  if (error) {
+    setErrorMessage(
+      isES
+        ? `No se pudo liberar la carga: ${error.message}`
+        : `Could not release the load: ${error.message}`
+    );
+    return;
+  }
+
+  if (!data) {
+    setErrorMessage(
+      isES
+        ? "La carga ya cambió de estado. Actualiza la lista e inténtalo de nuevo."
+        : "The load status has changed. Refresh the list and try again."
+    );
+    await loadData();
+    return;
+  }
+
+  setLoads((current) =>
+    current.map((item) =>
+      item.id === load.id
+        ? { ...item, status: "available" }
+        : item
+    )
+  );
+
+  setMessage(
+    isES
+      ? `Carga ${load.load_number} liberada a Dispatch.`
+      : `Load ${load.load_number} released to Dispatch.`
+  );
+}
+
+
+
 
   function toggleStatusMenu(
     loadId: string,
@@ -2015,172 +2233,34 @@ const response = await fetch("/api/geocode", {
           )}
         </section>
 
-        {/* FLOATING STATUS MENU */}
-        {activeStatusLoad && (
-          <div
-            ref={statusMenuRef}
-            style={{
-              position: "fixed",
-              top: statusMenuPosition.top,
-              left: statusMenuPosition.left,
-              width: 170,
-              padding: 6,
-              boxSizing:
-                "border-box",
-              background: "#ffffff",
-              border:
-                "1px solid #dbe3ec",
-              borderRadius: 11,
-              boxShadow:
-                "0 18px 45px rgba(15, 23, 42, 0.20)",
-              zIndex: 99999,
-            }}
-          >
-            <div
-              style={{
-                padding:
-                  "7px 9px 8px",
-                borderBottom:
-                  "1px solid #eef2f7",
-                marginBottom: 4,
-              }}
-            >
-              <div
-                style={{
-                  fontSize: 11,
-                  fontWeight: 800,
-                  color: "#94a3b8",
-                  textTransform:
-                    "uppercase",
-                  letterSpacing: 0.6,
-                }}
-              >
-                {text.changeStatus}
-              </div>
+        
+{activeStatusLoad?.status === "pending_review" && (
+  <button
+    type="button"
+    onClick={() => {
+      if (!activeStatusLoad) return;
+      void releaseLoadToDispatch(activeStatusLoad);
+    }}
+    style={{
+      width: "100%",
+      marginTop: 6,
+      padding: "10px 8px",
+      border: "none",
+      borderRadius: 8,
+      background: "#0f766e",
+      color: "#ffffff",
+      fontSize: 12,
+      fontWeight: 800,
+      cursor: "pointer",
+      textAlign: "center",
+    }}
+  >
+    {isES ? "Liberar a Dispatch" : "Release to Dispatch"}
+  </button>
+)}
 
-              <div
-                style={{
-                  marginTop: 3,
-                  fontSize: 12,
-                  fontWeight: 800,
-                  color: "#0f172a",
-                }}
-              >
-                {
-                  activeStatusLoad.load_number
-                }
-              </div>
-            </div>
 
-            {STATUS_OPTIONS.map(
-              (option) => {
-                const optionStyle =
-                  statusStyles[
-                    option.value
-                  ] ??
-                  statusStyles.available;
-
-                const isActive =
-                  activeStatusLoad.status ===
-                  option.value;
-
-                return (
-                  <button
-                    key={option.value}
-                    type="button"
-                    onClick={() =>
-                      updateLoadStatus(
-                        activeStatusLoad,
-                        option.value
-                      )
-                    }
-                    style={{
-                      width: "100%",
-                      display:
-                        "flex",
-                      alignItems:
-                        "center",
-                      justifyContent:
-                        "space-between",
-                      gap: 10,
-                      padding:
-                        "9px 8px",
-                      border: "none",
-                      borderRadius: 8,
-                      background:
-                        isActive
-                          ? "#f8fafc"
-                          : "#ffffff",
-                      cursor:
-                        "pointer",
-                      textAlign:
-                        "left",
-                    }}
-                    onMouseEnter={(
-                      event
-                    ) => {
-                      event.currentTarget.style.background =
-                        "#f8fafc";
-                    }}
-                    onMouseLeave={(
-                      event
-                    ) => {
-                      event.currentTarget.style.background =
-                        isActive
-                          ? "#f8fafc"
-                          : "#ffffff";
-                    }}
-                  >
-                    <span>
-                      <span
-                        style={{
-                          display:
-                            "block",
-                          fontSize: 12,
-                          fontWeight: 800,
-                          color:
-                            optionStyle.color,
-                        }}
-                      >
-                        {
-                          option.label
-                        }
-                      </span>
-
-                      <span
-                        style={{
-                          display:
-                            "block",
-                          marginTop: 2,
-                          fontSize: 10,
-                          color:
-                            "#94a3b8",
-                        }}
-                      >
-                        {
-                          option.description
-                        }
-                      </span>
-                    </span>
-
-                    {isActive && (
-                      <span
-                        style={{
-                          fontSize: 13,
-                          fontWeight: 900,
-                          color:
-                            optionStyle.color,
-                        }}
-                      >
-                        ✓
-                      </span>
-                    )}
-                  </button>
-                );
-              }
-            )}
-          </div>
-        )}
+        
 
         {/* CREATE LOAD MODAL */}
         {showForm && (
@@ -2289,6 +2369,7 @@ const response = await fetch("/api/geocode", {
                     fontSize: 18,
                   }}
                 >
+                  
                   ×
                 </button>
               </div>

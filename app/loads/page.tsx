@@ -61,6 +61,8 @@ type Load = {
   truck_id: string | null;
   trailer_id: string | null;
   created_at: string | null;
+  pickup_count?: number;
+  delivery_count?: number;
 };
 
 type StopType = "pickup" | "delivery";
@@ -467,92 +469,139 @@ const STATUS_OPTIONS = [
     createEmptyStop(2, "delivery"),
   ]);
 
-  async function loadData() {
-    setLoading(true);
-    setErrorMessage("");
+  
+async function loadData() {
+  setLoading(true);
+  setErrorMessage("");
 
-    const [
-      loadsResult,
-      companiesResult,
-      driversResult,
-      trucksResult,
-      trailersResult,
-    ] = await Promise.all([
-      supabase
-        .from("loads")
-        .select(
-          `
-            id,
-            company_id,
-            load_number,
-            broker_name,
-            customer_name,
-            origin_city,
-            origin_state,
-            pickup_address,
-            destination_city,
-            destination_state,
-            delivery_address,
-            pickup_date,
-            delivery_date,
-            miles,
-            rate,
-            status,
-            driver_id,
-            truck_id,
-            trailer_id,
-            created_at
-          `
-        )
-        .order("created_at", { ascending: false }),
+  const [
+    loadsResult,
+    stopsResult,
+    companiesResult,
+    driversResult,
+    trucksResult,
+    trailersResult,
+  ] = await Promise.all([
+    supabase
+      .from("loads")
+      .select(`
+        id,
+        company_id,
+        load_number,
+        broker_name,
+        customer_name,
+        origin_city,
+        origin_state,
+        pickup_address,
+        destination_city,
+        destination_state,
+        delivery_address,
+        pickup_date,
+        delivery_date,
+        miles,
+        rate,
+        status,
+        driver_id,
+        truck_id,
+        trailer_id,
+        created_at
+      `)
+      .order("created_at", { ascending: false }),
 
-      supabase
-        .from("companies")
-        .select("id, name")
-        .order("name"),
+    supabase
+      .from("load_stops")
+      .select("load_id, stop_type"),
 
-      supabase
-        .from("drivers")
-        .select("id, full_name, driver_number")
-        .order("full_name"),
+    supabase
+      .from("companies")
+      .select("id, name")
+      .order("name"),
 
-      supabase
-        .from("trucks")
-        .select("id, unit_number, make, model")
-        .order("unit_number"),
+    supabase
+      .from("drivers")
+      .select("id, full_name, driver_number")
+      .order("full_name"),
 
-      supabase
-        .from("trailers")
-        .select(
-          "id, company_id, unit_number, year, make, model, trailer_type, status"
-        )
-        .order("unit_number"),
-    ]);
+    supabase
+      .from("trucks")
+      .select("id, unit_number, make, model")
+      .order("unit_number"),
 
-    if (loadsResult.error) {
-      setErrorMessage(loadsResult.error.message);
-    } else {
-      setLoads((loadsResult.data ?? []) as Load[]);
+    supabase
+      .from("trailers")
+      .select(
+        "id, company_id, unit_number, year, make, model, trailer_type, status"
+      )
+      .order("unit_number"),
+  ]);
+
+  if (loadsResult.error) {
+    setErrorMessage(loadsResult.error.message);
+    setLoads([]);
+  } else if (stopsResult.error) {
+    setErrorMessage(stopsResult.error.message);
+    setLoads((loadsResult.data ?? []) as Load[]);
+  } else {
+    const stopCounts = new Map<
+      string,
+      { pickups: number; deliveries: number }
+    >();
+
+    for (const load of loadsResult.data ?? []) {
+      stopCounts.set(load.id, {
+        pickups: 0,
+        deliveries: 0,
+      });
     }
 
-    if (!companiesResult.error) {
-      setCompanies((companiesResult.data ?? []) as Company[]);
+    for (const stop of stopsResult.data ?? []) {
+      const counts = stopCounts.get(stop.load_id);
+
+      if (!counts) continue;
+
+      const stopType = String(stop.stop_type ?? "")
+        .trim()
+        .toLowerCase();
+
+      if (stopType === "pickup") {
+        counts.pickups += 1;
+      } else if (stopType === "delivery") {
+        counts.deliveries += 1;
+      }
     }
 
-    if (!driversResult.error) {
-      setDrivers((driversResult.data ?? []) as Driver[]);
-    }
+    setLoads(
+      (loadsResult.data ?? []).map((load) => {
+        const counts = stopCounts.get(load.id);
 
-    if (!trucksResult.error) {
-      setTrucks((trucksResult.data ?? []) as Truck[]);
-    }
-
-    if (!trailersResult.error) {
-      setTrailers((trailersResult.data ?? []) as Trailer[]);
-    }
-
-    setLoading(false);
+        return {
+          ...load,
+          pickup_count: counts?.pickups ?? 0,
+          delivery_count: counts?.deliveries ?? 0,
+        };
+      }) as Load[]
+    );
   }
+
+  if (!companiesResult.error) {
+    setCompanies((companiesResult.data ?? []) as Company[]);
+  }
+
+  if (!driversResult.error) {
+    setDrivers((driversResult.data ?? []) as Driver[]);
+  }
+
+  if (!trucksResult.error) {
+    setTrucks((trucksResult.data ?? []) as Truck[]);
+  }
+
+  if (!trailersResult.error) {
+    setTrailers((trailersResult.data ?? []) as Trailer[]);
+  }
+
+  setLoading(false);
+}
+
 
   useEffect(() => {
     loadData();
@@ -855,52 +904,84 @@ const STATUS_OPTIONS = [
         lastStop.scheduled_time
       );
 
-      const geocodedStops: LoadStop[] = [];
-      for (const stop of stops) {
-        const address = stop.address.trim();
-        const city = stop.city.trim();
-        const state = stop.state.trim();
-        if (!address || !city || !state) {
-          setErrorMessage(isES ? `Falta la dirección de la parada ${stop.stop_order}.` : `Address information is missing for stop ${stop.stop_order}.`);
-          return;
-        }
-        try {
-         
-const response = await fetch("/api/geocode", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({
-    address,
-    city,
-    state,
-    zip_code: stop.zip_code?.trim() || "",
-  }),
+   const geocodedStops: LoadStop[] = [];
+
+for (const stop of stops) {
+  const address = stop.address.trim();
+  const city = stop.city.trim();
+  const state = stop.state.trim();
+
+  if (!address || !city || !state) {
+    setErrorMessage(
+      isES
+        ? `Falta la dirección de la parada ${stop.stop_order}.`
+        : `Address information is missing for stop ${stop.stop_order}.`
+    );
+    return;
+  }
+
+  try {
+    const response = await fetch("/api/geocode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        address,
+        city,
+        state,
+        zip_code: stop.zip_code?.trim() || "",
+      }),
+    });
+
+    const result = await response.json();
+
+    if (
+      !response.ok ||
+      !Number.isFinite(Number(result.latitude)) ||
+      !Number.isFinite(Number(result.longitude))
+    ) {
+      setErrorMessage(
+        isES
+          ? `No se pudo localizar la parada ${stop.stop_order}: ${address}, ${city}, ${state}.`
+          : `Could not locate stop ${stop.stop_order}: ${address}, ${city}, ${state}.`
+      );
+      return;
+    }
+
+    geocodedStops.push({
+      ...stop,
+      latitude: Number(result.latitude),
+      longitude: Number(result.longitude),
+    });
+  } catch (error) {
+    console.error("GEOCODING STOP ERROR:", stop.stop_order, error);
+    setErrorMessage(
+      isES
+        ? `No se pudo localizar la parada ${stop.stop_order}.`
+        : `Could not locate stop ${stop.stop_order}.`
+    );
+    return;
+  }
+}
+
+const orderedStops = [...geocodedStops].sort((a, b) => {
+  const typeA = a.stop_type.trim().toLowerCase();
+  const typeB = b.stop_type.trim().toLowerCase();
+
+  const groupA = typeA === "pickup" ? 0 : 1;
+  const groupB = typeB === "pickup" ? 0 : 1;
+
+  if (groupA !== groupB) {
+    return groupA - groupB;
+  }
+
+  const dateA =
+    `${a.scheduled_date || "9999-12-31"}T${a.scheduled_time || "23:59"}`;
+
+  const dateB =
+    `${b.scheduled_date || "9999-12-31"}T${b.scheduled_time || "23:59"}`;
+
+  return dateA.localeCompare(dateB);
 });
-
-          const result = await response.json();
-          if (!response.ok || !Number.isFinite(Number(result.latitude)) || !Number.isFinite(Number(result.longitude))) {
-            setErrorMessage(isES ? `No se pudo localizar la parada ${stop.stop_order}: ${address}, ${city}, ${state}.` : `Could not locate stop ${stop.stop_order}: ${address}, ${city}, ${state}.`);
-            return;
-          }
-          geocodedStops.push({ ...stop, latitude: Number(result.latitude), longitude: Number(result.longitude) });
-        } catch (error) {
-          console.error("GEOCODING STOP ERROR:", stop.stop_order, error);
-          setErrorMessage(isES ? `No se pudo localizar la parada ${stop.stop_order}.` : `Could not locate stop ${stop.stop_order}.`);
-          return;
-        }
-      }
-
-            const orderedStops = [...geocodedStops].sort((a, b) => {
-        const dateA =
-          `${a.scheduled_date || "9999-12-31"}T${a.scheduled_time || "23:59"}`;
-
-        const dateB =
-          `${b.scheduled_date || "9999-12-31"}T${b.scheduled_time || "23:59"}`;
-
-        return dateA.localeCompare(dateB);
-      });
-
-      
 
       const loadPayload = {
             company_id: form.company_id || null,
@@ -1022,20 +1103,24 @@ for (let index = 0; index < retainedStops.length; index++) {
 
 for (let index = 0; index < orderedStops.length; index++) {
   const stop = orderedStops[index];
-          const payload = {
-            load_id: editingLoadId,
-            stop_order: index + 1,
-            stop_type: stop.stop_type,
-            address: stop.address.trim() || null,
-            city: stop.city.trim(),
-            state: stop.state.trim(),
-            zip_code: stop.zip_code.trim() || null,
-            pickup_number: stop.stop_type === "pickup" ? (stop.pickup_number.trim() || null) : null,
-            latitude: stop.latitude,
-            longitude: stop.longitude,
-            scheduled_date: stop.scheduled_date || null,
-            scheduled_time: stop.scheduled_time || null,
-          };
+
+  const payload = {
+    load_id: editingLoadId,
+    stop_order: index + 1,
+    stop_type: stop.stop_type,
+    address: stop.address.trim() || null,
+    city: stop.city.trim(),
+    state: stop.state.trim(),
+    zip_code: stop.zip_code.trim() || null,
+    pickup_number:
+      stop.stop_type.trim().toLowerCase() === "pickup"
+        ? stop.pickup_number.trim() || null
+        : null,
+    latitude: stop.latitude,
+    longitude: stop.longitude,
+    scheduled_date: stop.scheduled_date || null,
+    scheduled_time: stop.scheduled_time || null,
+  };
           if (stop.stop_number && !stop.stop_number.startsWith("stop-")) {
             const { error: stopUpdateError } = await supabase.from("load_stops").update(payload).eq("id", stop.stop_number).eq("load_id", editingLoadId);
             if (stopUpdateError) throw new Error(stopUpdateError.message);
@@ -1068,16 +1153,26 @@ if (createError || !createdLoad) {
   return;
 }
 
+const orderedStopsForNewLoad = [...geocodedStops].sort((a, b) => {
+  const typeA = a.stop_type.trim().toLowerCase();
+  const typeB = b.stop_type.trim().toLowerCase();
 
-      
-const orderedStops = [...geocodedStops].sort((a, b) => {
-  const dateTimeA = `${a.scheduled_date || "9999-12-31"}T${a.scheduled_time || "23:59"}`;
-  const dateTimeB = `${b.scheduled_date || "9999-12-31"}T${b.scheduled_time || "23:59"}`;
+  const groupA = typeA === "pickup" ? 0 : 1;
+  const groupB = typeB === "pickup" ? 0 : 1;
+
+  if (groupA !== groupB) {
+    return groupA - groupB;
+  }
+
+  const dateTimeA =
+    `${a.scheduled_date || "9999-12-31"}T${a.scheduled_time || "23:59"}`;
+  const dateTimeB =
+    `${b.scheduled_date || "9999-12-31"}T${b.scheduled_time || "23:59"}`;
 
   return dateTimeA.localeCompare(dateTimeB);
 });
 
-const loadStops = orderedStops.map((stop, index) => ({
+const loadStops = orderedStopsForNewLoad.map((stop, index) => ({
   load_id: createdLoad.id,
   stop_order: index + 1,
   stop_type: stop.stop_type,
@@ -1086,7 +1181,7 @@ const loadStops = orderedStops.map((stop, index) => ({
   state: stop.state.trim(),
   zip_code: stop.zip_code.trim() || null,
   pickup_number:
-    stop.stop_type === "pickup"
+    stop.stop_type.trim().toLowerCase() === "pickup"
       ? stop.pickup_number.trim() || null
       : null,
   latitude: stop.latitude,
@@ -1096,24 +1191,47 @@ const loadStops = orderedStops.map((stop, index) => ({
   status: "pending",
 }));
 
-        const { data: insertedStops, error: stopsError } = await supabase
-          .from("load_stops").insert(loadStops).select("id, load_id, stop_order, stop_type");
-        if (stopsError || !insertedStops || insertedStops.length !== loadStops.length) {
-          await supabase.from("loads").delete().eq("id", createdLoad.id);
-          throw new Error(stopsError?.message ?? "The load stops could not be saved.");
-        }
-      }
+        const {
+  data: insertedStops,
+  error: stopsError,
+} = await supabase
+  .from("load_stops")
+  .insert(loadStops)
+  .select("id, load_id, stop_order, stop_type");
 
-      setMessage(editingLoadId ? text.loadUpdated : text.loadCreated);
-      setShowForm(false);
+if (
+  stopsError ||
+  !insertedStops ||
+  insertedStops.length !== loadStops.length
+) {
+  await supabase
+    .from("loads")
+    .delete()
+    .eq("id", createdLoad.id);
+
+  throw new Error(
+    stopsError?.message ?? "The load stops could not be saved."
+  );
+}      }
+
+      setMessage(
+        isES
+          ? "Carga guardada correctamente."
+          : "Load saved successfully."
+      );
+
+     setShowForm(false);
       setEditingLoadId(null);
-      resetForm();
       await loadData();
     } catch (error) {
+      console.error("SAVE LOAD ERROR:", error);
+
       setErrorMessage(
         error instanceof Error
           ? error.message
-          : text.stopsCreatedError
+          : isES
+            ? "No se pudo guardar la carga."
+            : "Failed to save load."
       );
     } finally {
       setSaving(false);
@@ -1849,385 +1967,234 @@ async function releaseLoadToDispatch(load: Load) {
                     "collapse",
                 }}
               >
-                <thead>
-                  <tr
-                    style={{
-                      background:
-                        "#f8fafc",
-                    }}
-                  >
-                    <th style={thStyle}>
-                      {text.load}
-                    </th>
+               <thead>
+  <tr
+    style={{
+      background: "#f8fafc",
+    }}
+  >
+    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+      {text.load}
+    </th>
 
-                    <th style={thStyle}>
-                      {text.brokerCustomer}
-                    </th>
+    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+      {text.brokerCustomer}
+    </th>
 
-                    <th style={thStyle}>
-                      {text.route}
-                    </th>
+    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+      {text.route}
+    </th>
 
-                    <th style={thStyle}>
-                      {text.dates}
-                    </th>
+    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+      {text.dates}
+    </th>
 
-                    <th style={thStyle}>
-                      {text.driver}
-                    </th>
+    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+      {text.driver}
+    </th>
 
-                    <th style={thStyle}>
-                      {text.truck}
-                    </th>
+    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+      {text.truck}
+    </th>
 
-                    <th style={thStyle}>
-                      {text.trailer}
-                    </th>
+    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+      {text.trailer}
+    </th>
 
-                    <th style={thStyle}>
-                      {text.miles}
-                    </th>
+    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+      {text.miles}
+    </th>
 
-                    <th style={thStyle}>
-                      {text.rate}
-                    </th>
+    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+      {text.rate}
+    </th>
 
-                    <th style={thStyle}>
-                      {text.status}
-                    </th>
+    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+      {text.status}
+    </th>
 
-                    <th style={thStyle}>
-                      {isES ? "Acciones" : "Actions"}
-                    </th>
-                  </tr>
-                </thead>
+    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+      {isES ? "Acciones" : "Actions"}
+    </th>
+  </tr>
+</thead>
 
-                <tbody>
-                  {filteredLoads.map(
-                    (load) => {
-                      const style =
-                        statusStyles[
-                          load.status ??
-                            "available"
-                        ] ??
-                        statusStyles.available;
+                
+<tbody>
+  {filteredLoads.map((load) => {
+    const style =
+      statusStyles[load.status ?? "available"] ??
+      statusStyles.available;
 
-                      return (
-                        <tr
-                          key={load.id}
-                          style={{
-                            borderTop:
-                              "1px solid #eef2f7",
-                          }}
-                        >
-                          <td
-                            style={tdStyle}
-                          >
-                            <div
-                              style={{
-                                fontWeight: 800,
-                                color:
-                                  "#0f172a",
-                              }}
-                            >
-                              {
-                                load.load_number
-                              }
-                            </div>
+    const cellStyle = {
+      ...tdStyle,
+      whiteSpace: "nowrap" as const,
+      paddingTop: 8,
+      paddingBottom: 8,
+      verticalAlign: "middle" as const,
+    };
 
-                            <div
-                              style={{
-                                marginTop: 4,
-                                fontSize: 11,
-                                color:
-                                  "#94a3b8",
-                              }}
-                            >
-                              {companyName(
-                                load.company_id
-                              )}
-                            </div>
-                          </td>
+    const innerTextStyle = {
+      whiteSpace: "nowrap" as const,
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      maxWidth: 220,
+    };
 
-                          <td
-                            style={tdStyle}
-                          >
-                            <div
-                              style={{
-                                fontWeight: 700,
-                              }}
-                            >
-                              {
-                                load.broker_name ||
-                                "—"
-                              }
-                            </div>
+    return (
+      <tr
+        key={load.id}
+        style={{
+          borderTop: "1px solid #eef2f7",
+          height: 56,
+        }}
+      >
+        <td style={cellStyle}>
+          <div style={{ fontWeight: 800, color: "#0f172a" }}>
+            {`(${load.pickup_count ?? 0}-${load.delivery_count ?? 0})`}
+          </div>
+          <div
+            style={{
+              marginTop: 4,
+              fontSize: 11,
+              color: "#94a3b8",
+              ...innerTextStyle,
+            }}
+          >
+            {companyName(load.company_id)}
+          </div>
+        </td>
 
-                            <div
-                              style={{
-                                marginTop: 4,
-                                fontSize: 12,
-                                color:
-                                  "#64748b",
-                              }}
-                            >
-                              {
-                                load.customer_name ||
-                                text.noCustomer
-                              }
-                            </div>
-                          </td>
+        <td style={cellStyle}>
+          <div style={{ fontWeight: 700, ...innerTextStyle }}>
+            {load.broker_name || "—"}
+          </div>
+          <div
+            style={{
+              marginTop: 4,
+              fontSize: 12,
+              color: "#64748b",
+              ...innerTextStyle,
+            }}
+          >
+            {load.customer_name || text.noCustomer}
+          </div>
+        </td>
 
-                          <td
-                            style={tdStyle}
-                          >
-                            <div
-                              style={{
-                                fontWeight: 700,
-                              }}
-                            >
-                              {
-                                load.origin_city ||
-                                "—"
-                              }
-                              {load.origin_state
-                                ? `, ${load.origin_state}`
-                                : ""}
-                            </div>
+        <td style={cellStyle}>
+          <div style={{ fontWeight: 700, ...innerTextStyle }}>
+            {load.origin_city || "—"}
+            {load.origin_state ? `, ${load.origin_state}` : ""}
+          </div>
+          <div style={{ margin: "3px 0", color: "#94a3b8" }}>↓</div>
+          <div style={{ fontWeight: 700, ...innerTextStyle }}>
+            {load.destination_city || "—"}
+            {load.destination_state ? `, ${load.destination_state}` : ""}
+          </div>
+        </td>
 
-                            <div
-                              style={{
-                                margin:
-                                  "5px 0",
-                                fontSize: 11,
-                                color:
-                                  "#94a3b8",
-                              }}
-                            >
-                              ↓
-                            </div>
+        <td style={cellStyle}>
+          <div style={{ whiteSpace: "nowrap" }}>
+            <span style={{ color: "#94a3b8", fontSize: 11 }}>
+              {text.pickup}
+            </span>{" "}
+            <strong>
+              {formatDate(load.pickup_date)}
+              {load.pickup_date
+                ? ` · ${formatTime(load.pickup_date)} ET`
+                : ""}
+            </strong>
+          </div>
+          <div style={{ marginTop: 5, whiteSpace: "nowrap" }}>
+            <span style={{ color: "#94a3b8", fontSize: 11 }}>
+              {text.delivery}
+            </span>{" "}
+            <strong>
+              {formatDate(load.delivery_date)}
+              {load.delivery_date
+                ? ` · ${formatTime(load.delivery_date)} ET`
+                : ""}
+            </strong>
+          </div>
+        </td>
 
-                            <div
-                              style={{
-                                fontWeight: 700,
-                              }}
-                            >
-                              {
-                                load.destination_city ||
-                                "—"
-                              }
-                              {load.destination_state
-                                ? `, ${load.destination_state}`
-                                : ""}
-                            </div>
-                          </td>
+        <td style={cellStyle}>
+          <div style={{ fontWeight: 700, ...innerTextStyle }}>
+            {driverName(load.driver_id)}
+          </div>
+        </td>
 
-                          <td
-                            style={tdStyle}
-                          >
-                            <div>
-                              <span
-                                style={{
-                                  color:
-                                    "#94a3b8",
-                                  fontSize: 11,
-                                }}
-                              >
-                                {text.pickup}
-                              </span>
+        <td style={cellStyle}>
+          <div style={{ fontWeight: 700, ...innerTextStyle }}>
+            {truckName(load.truck_id)}
+          </div>
+        </td>
 
-                              <br />
+        <td style={cellStyle}>
+          <div style={{ fontWeight: 700, ...innerTextStyle }}>
+            {trailerName(load.trailer_id)}
+          </div>
+        </td>
 
-                              <strong>
-                                {formatDate(
-                                  load.pickup_date
-                                )}
+        <td style={cellStyle}>
+          <strong>{formatNumber(load.miles)}</strong>
+        </td>
 
-                                {load.pickup_date
-                                  ? ` · ${formatTime(
-                                      load.pickup_date
-                                    )} ET`
-                                  : ""}
-                              </strong>
-                            </div>
+        <td style={cellStyle}>
+          <strong>{formatCurrency(load.rate)}</strong>
+        </td>
 
-                            <div
-                              style={{
-                                marginTop: 8,
-                              }}
-                            >
-                              <span
-                                style={{
-                                  color:
-                                    "#94a3b8",
-                                  fontSize: 11,
-                                }}
-                              >
-                                {
-                                  text.delivery
-                                }
-                              </span>
+        <td style={cellStyle}>
+          <button
+            type="button"
+            onClick={(event) => toggleStatusMenu(load.id, event)}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 7,
+              minWidth: 125,
+              justifyContent: "space-between",
+              padding: "7px 10px",
+              borderRadius: 999,
+              border: `1px solid ${style.border}`,
+              background: style.background,
+              color: style.color,
+              fontSize: 12,
+              fontWeight: 800,
+              cursor: "pointer",
+              whiteSpace: "nowrap",
+            }}
+          >
+            <span>{statusLabel(load.status)}</span>
+            <span style={{ fontSize: 10 }}>▾</span>
+          </button>
+        </td>
 
-                              <br />
+        <td style={cellStyle}>
+          <button
+            type="button"
+            onClick={() => openEditForm(load)}
+            style={{
+              height: 34,
+              padding: "0 12px",
+              border: "1px solid #cbd5e1",
+              borderRadius: 8,
+              background: "#ffffff",
+              color: "#0f172a",
+              fontSize: 12,
+              fontWeight: 800,
+              cursor: "pointer",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {text.edit}
+          </button>
+        </td>
+      </tr>
+    );
+  })}
+</tbody>
 
-                              <strong>
-                                {formatDate(
-                                  load.delivery_date
-                                )}
-
-                                {load.delivery_date
-                                  ? ` · ${formatTime(
-                                      load.delivery_date
-                                    )} ET`
-                                  : ""}
-                              </strong>
-                            </div>
-                          </td>
-
-                          <td
-                            style={tdStyle}
-                          >
-                            <div
-                              style={{
-                                fontWeight: 700,
-                                whiteSpace:
-                                  "nowrap",
-                              }}
-                            >
-                              {driverName(
-                                load.driver_id
-                              )}
-                            </div>
-                          </td>
-
-                          <td
-                            style={tdStyle}
-                          >
-                            <div
-                              style={{
-                                fontWeight: 700,
-                                whiteSpace:
-                                  "nowrap",
-                              }}
-                            >
-                              {truckName(
-                                load.truck_id
-                              )}
-                            </div>
-                          </td>
-
-                          <td
-                            style={tdStyle}
-                          >
-                            <div
-                              style={{
-                                fontWeight: 700,
-                                whiteSpace:
-                                  "nowrap",
-                              }}
-                            >
-                              {trailerName(
-                                load.trailer_id
-                              )}
-                            </div>
-                          </td>
-
-                          <td
-                            style={tdStyle}
-                          >
-                            <strong>
-                              {formatNumber(
-                                load.miles
-                              )}
-                            </strong>
-                          </td>
-
-                          <td
-                            style={tdStyle}
-                          >
-                            <strong>
-                              {formatCurrency(
-                                load.rate
-                              )}
-                            </strong>
-                          </td>
-
-                          <td
-                            style={tdStyle}
-                          >
-                            <button
-                              type="button"
-                              onClick={(
-                                event
-                              ) =>
-                                toggleStatusMenu(
-                                  load.id,
-                                  event
-                                )
-                              }
-                              style={{
-                                display:
-                                  "inline-flex",
-                                alignItems:
-                                  "center",
-                                gap: 7,
-                                minWidth: 125,
-                                justifyContent:
-                                  "space-between",
-                                padding:
-                                  "7px 10px",
-                                borderRadius:
-                                  999,
-                                border: `1px solid ${style.border}`,
-                                background:
-                                  style.background,
-                                color:
-                                  style.color,
-                                fontSize: 12,
-                                fontWeight: 800,
-                                cursor:
-                                  "pointer",
-                              }}
-                            >
-                              <span>
-                                {statusLabel(
-                                  load.status
-                                )}
-                              </span>
-
-                              <span
-                                style={{
-                                  fontSize: 10,
-                                }}
-                              >
-                                ▾
-                              </span>
-                            </button>
-                          </td>
-                          <td style={tdStyle}>
-                            <button
-                              type="button"
-                              onClick={() => openEditForm(load)}
-                              style={{
-                                height: 34,
-                                padding: "0 12px",
-                                border: "1px solid #cbd5e1",
-                                borderRadius: 8,
-                                background: "#ffffff",
-                                color: "#0f172a",
-                                fontSize: 12,
-                                fontWeight: 800,
-                                cursor: "pointer",
-                              }}
-                            >
-                              {text.edit}
-                            </button>
-                          </td>
-                        </tr>
-                      );
-                    }
-                  )}
-                </tbody>
               </table>
             </div>
           )}

@@ -4,9 +4,11 @@ import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { useLanguage } from "@/lib/LanguageProvider";
 
+
 type Load = {
   id: string;
   load_number: string;
+  customer_name: string | null;
   broker_name: string | null;
   origin_city: string | null;
   origin_state: string | null;
@@ -19,6 +21,7 @@ type Load = {
   truck_id: string | null;
   trailer_id: string | null;
 };
+
 
 type LoadStop = {
   id: string;
@@ -391,14 +394,20 @@ export default function DispatchPage() {
         trucksResult,
         trailersResult,
       ] = await Promise.all([
-        supabase
-          .from("loads")
-          .select(
-            "id, load_number, broker_name, origin_city, origin_state, destination_city, destination_state, miles, rate, status, driver_id, truck_id, trailer_id"
-          )
-          .order("load_number", {
-            ascending: false,
-          }),
+       supabase
+  .from("loads")
+
+.select(
+ 
+"id, load_number, customer_name, broker_name, origin_city, origin_state, destination_city, destination_state, miles, rate, status, driver_id, truck_id, trailer_id"
+
+)
+
+  .neq("status", "pending_review")
+  .order("load_number", {
+    ascending: false,
+  }),
+
 
         supabase
           .from("drivers")
@@ -723,16 +732,39 @@ export default function DispatchPage() {
     [trailers]
   );
 
-  function stopsForLoad(loadId: string) {
-    return loadStops
-      .filter(
-        (stop) => stop.load_id === loadId
-      )
-      .sort(
-        (a, b) =>
-          a.stop_order - b.stop_order
-      );
-  }
+  
+function stopsForLoad(loadId: string) {
+  return loadStops
+    .filter((stop) => stop.load_id === loadId)
+    .sort((a, b) => {
+      const typeA = (a.stop_type || "").toLowerCase();
+      const typeB = (b.stop_type || "").toLowerCase();
+
+      // Todas las recogidas deben aparecer antes de las entregas.
+      const rankA = typeA === "pickup" ? 0 : 1;
+      const rankB = typeB === "pickup" ? 0 : 1;
+
+      if (rankA !== rankB) {
+        return rankA - rankB;
+      }
+
+      // Dentro de cada tipo, ordenar por fecha y hora programadas.
+      const dateTimeA =
+        `${a.scheduled_date || "9999-12-31"}T${a.scheduled_time || "23:59:59"}`;
+      const dateTimeB =
+        `${b.scheduled_date || "9999-12-31"}T${b.scheduled_time || "23:59:59"}`;
+
+      const dateTimeCompare = dateTimeA.localeCompare(dateTimeB);
+
+      if (dateTimeCompare !== 0) {
+        return dateTimeCompare;
+      }
+
+      // Si faltan fechas o coinciden, conservar el orden existente.
+      return a.stop_order - b.stop_order;
+    });
+}
+
 
   function stopTypeLabel(stopType: string) {
     return stopType.toLowerCase() ===
@@ -1146,104 +1178,81 @@ export default function DispatchPage() {
     );
   }
 
-  function buildSequenceStops(
-    loadIds: string[]
-  ) {
-    const result: SequenceStop[] = [];
+ 
+function buildSequenceStops(
+  loadIds: string[]
+): SequenceStop[] {
+  const selectedLoads = loadIds
+    .map((id) => loads.find((load) => load.id === id))
+    .filter((load): load is Load => Boolean(load));
 
-    const selectedLoads = loadIds
-      .map((id) =>
-        loads.find(
-          (load) => load.id === id
-        )
-      )
-      .filter(
-        (load): load is Load =>
-          Boolean(load)
-      );
+  const result: SequenceStop[] = [];
 
-    selectedLoads.forEach(
-      (load, loadIndex) => {
-        const relationshipNumber =
-          loadIndex + 1;
+  selectedLoads.forEach((load, loadIndex) => {
+    const relationshipNumber = loadIndex + 1;
 
-        const stops = stopsForLoad(
-          load.id
+    const stops = [...stopsForLoad(load.id)]
+      .filter((stop) => {
+        const type = (stop.stop_type || "").toLowerCase();
+        return type === "pickup" || type === "delivery";
+      })
+      .sort((a, b) => {
+        if (a.stop_order !== b.stop_order) {
+          return a.stop_order - b.stop_order;
+        }
+
+        const dateA = a.scheduled_date || "";
+        const dateB = b.scheduled_date || "";
+
+        if (dateA !== dateB) {
+          return dateA.localeCompare(dateB);
+        }
+
+        return (a.scheduled_time || "").localeCompare(
+          b.scheduled_time || ""
         );
+      });
 
-        let pickupCounter = 0;
-        let deliveryCounter = 0;
+    let pickupCounter = 0;
+    let deliveryCounter = 0;
 
-        const totalPickups =
-          stops.filter(
-            (item) =>
-              item.stop_type.toLowerCase() ===
-              "pickup"
-          ).length;
+    const totalPickups = stops.filter(
+      (stop) => stop.stop_type.toLowerCase() === "pickup"
+    ).length;
 
-        const totalDeliveries =
-          stops.filter(
-            (item) =>
-              item.stop_type.toLowerCase() ===
-              "delivery"
-          ).length;
+    const totalDeliveries = stops.filter(
+      (stop) => stop.stop_type.toLowerCase() === "delivery"
+    ).length;
 
-        /*
-         * IMPORTANT:
-         * load_stops.stop_order is the source
-         * order for the stops inside each load.
-         *
-         * We preserve that order here.
-         *
-         * After the sequence builder opens, the
-         * dispatcher can change the physical order
-         * with Move Up / Move Down.
-         */
-        stops.forEach((stop) => {
-          const stopType =
-            stop.stop_type.toLowerCase();
+    stops.forEach((stop) => {
+      const isPickup =
+        stop.stop_type.toLowerCase() === "pickup";
 
-          const isPickup =
-            stopType === "pickup";
-
-          if (!isPickup &&
-              stopType !== "delivery") {
-            return;
-          }
-
-          if (isPickup) {
-            pickupCounter += 1;
-
-            const stopCode =
-              totalPickups === 1
-                ? `PU-${relationshipNumber}`
-                : `PU-${relationshipNumber}.${pickupCounter}`;
-
-            result.push({
-              loadStop: stop,
-              load,
-              stopCode,
-            });
-          } else {
-            deliveryCounter += 1;
-
-            const stopCode =
-              totalDeliveries === 1
-                ? `DEL-${relationshipNumber}`
-                : `DEL-${relationshipNumber}.${deliveryCounter}`;
-
-            result.push({
-              loadStop: stop,
-              load,
-              stopCode,
-            });
-          }
-        });
+      if (isPickup) {
+        pickupCounter += 1;
+      } else {
+        deliveryCounter += 1;
       }
-    );
 
-    return result;
-  }
+      const stopCode = isPickup
+        ? totalPickups === 1
+          ? `PU-${relationshipNumber}`
+          : `PU-${relationshipNumber}.${pickupCounter}`
+        : totalDeliveries === 1
+          ? `DEL-${relationshipNumber}`
+          : `DEL-${relationshipNumber}.${deliveryCounter}`;
+
+      result.push({
+        loadStop: stop,
+        load,
+        stopCode,
+      });
+    });
+  });
+
+  return result;
+}
+
 
   function openSequenceBuilder() {
     setMessage("");
@@ -1809,854 +1818,567 @@ export default function DispatchPage() {
           />
         </section>
 
-        <section
+       
+<section
+  style={{
+    background: "#ffffff",
+    border: "1px solid #e5e7eb",
+    borderRadius: 14,
+    overflow: "hidden",
+  }}
+>
+  <div
+    style={{
+      padding: "18px 20px",
+      borderBottom: "1px solid #e5e7eb",
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      gap: 20,
+    }}
+  >
+    <div>
+      <h2
+        style={{
+          margin: 0,
+          fontSize: 17,
+          fontWeight: 800,
+        }}
+      >
+        {text.dispatchBoard}
+      </h2>
+
+      <p
+        style={{
+          margin: "5px 0 0",
+          color: "#64748b",
+          fontSize: 12,
+        }}
+      >
+        {text.dispatchBoardSubtitle}
+      </p>
+    </div>
+
+    <button
+      onClick={openSequenceBuilder}
+      disabled={selectedSequenceLoadIds.length < 2}
+      style={{
+        padding: "10px 14px",
+        borderRadius: 9,
+        border: 0,
+        background:
+          selectedSequenceLoadIds.length >= 2
+            ? "#111827"
+            : "#cbd5e1",
+        color: "#ffffff",
+        fontWeight: 800,
+        fontSize: 12,
+        cursor:
+          selectedSequenceLoadIds.length >= 2
+            ? "pointer"
+            : "not-allowed",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {text.createSequence}
+      {selectedSequenceLoadIds.length > 0
+        ? ` (${selectedSequenceLoadIds.length})`
+        : ""}
+    </button>
+  </div>
+
+  {loading ? (
+    <div
+      style={{
+        padding: 45,
+        textAlign: "center",
+        color: "#64748b",
+      }}
+    >
+      {text.loadingBoard}
+    </div>
+  ) : dispatchLoads.length === 0 ? (
+    <div
+      style={{
+        padding: 50,
+        textAlign: "center",
+        color: "#64748b",
+      }}
+    >
+      {text.noLoads}
+    </div>
+  ) : (
+    <div
+      style={{
+        overflowX: "auto",
+        width: "100%",
+      }}
+    >
+      <div style={{ minWidth: 1500 }}>
+        <div
           style={{
-            background: "#ffffff",
-            border:
-              "1px solid #e5e7eb",
-            borderRadius: 14,
-            overflow: "hidden",
+            display: "grid",
+            gridTemplateColumns:
+              "48px 70px 170px 220px 160px 160px 130px 130px 85px 85px 90px 120px 110px",
+            background: "#f8fafc",
+            borderBottom: "1px solid #e5e7eb",
+            alignItems: "stretch",
           }}
         >
           <div
             style={{
-              padding:
-                "18px 20px",
-              borderBottom:
-                "1px solid #e5e7eb",
-              display: "flex",
-              justifyContent:
-                "space-between",
-              alignItems:
-                "center",
-              gap: 20,
+              padding: "13px 10px",
+              fontSize: 10,
+              fontWeight: 800,
+              color: "#64748b",
+              textAlign: "center",
             }}
           >
-            <div>
-              <h2
-                style={{
-                  margin: 0,
-                  fontSize: 17,
-                  fontWeight: 800,
-                }}
-              >
-                {
-                  text.dispatchBoard
-                }
-              </h2>
-
-              <p
-                style={{
-                  margin:
-                    "5px 0 0",
-                  color:
-                    "#64748b",
-                  fontSize: 12,
-                }}
-              >
-                {
-                  text.dispatchBoardSubtitle
-                }
-              </p>
-            </div>
-
-            <button
-              onClick={
-                openSequenceBuilder
-              }
-              disabled={
-                selectedSequenceLoadIds.length <
-                2
-              }
-              style={{
-                padding:
-                  "10px 14px",
-                borderRadius: 9,
-                border: 0,
-                background:
-                  selectedSequenceLoadIds.length >=
-                  2
-                    ? "#111827"
-                    : "#cbd5e1",
-                color: "#ffffff",
-                fontWeight: 800,
-                fontSize: 12,
-                cursor:
-                  selectedSequenceLoadIds.length >=
-                  2
-                    ? "pointer"
-                    : "not-allowed",
-                whiteSpace:
-                  "nowrap",
-              }}
-            >
-              {
-                text.createSequence
-              }
-
-              {selectedSequenceLoadIds.length >
-              0
-                ? ` (${selectedSequenceLoadIds.length})`
-                : ""}
-            </button>
+            SEQ
           </div>
 
-          {loading ? (
+          <div style={headerStyle}>Load</div>
+          <div style={headerStyle}>Customer</div>
+          <div style={headerStyle}>Route / Stops</div>
+          <div style={headerStyle}>Pickup</div>
+          <div style={headerStyle}>Delivery</div>
+          <div style={headerStyle}>{text.broker}</div>
+          <div style={headerStyle}>{text.driver}</div>
+          <div style={headerStyle}>{text.truck}</div>
+          <div style={headerStyle}>{text.miles}</div>
+          <div style={headerStyle}>{text.rate}</div>
+          <div style={headerStyle}>{text.status}</div>
+          <div style={headerStyle}>{text.action}</div>
+        </div>
+
+        {dispatchLoads.map((load) => {
+          const stops = stopsForLoad(load.id);
+
+          const routeStops = stops
+            .filter((stop) => {
+              const type = stop.stop_type.toLowerCase();
+              return type === "pickup" || type === "delivery";
+            })
+            .sort((a, b) => a.stop_order - b.stop_order);
+
+          const pickupStops = routeStops.filter(
+            (stop) => stop.stop_type.toLowerCase() === "pickup"
+          );
+
+          const deliveryStops = routeStops.filter(
+            (stop) => stop.stop_type.toLowerCase() === "delivery"
+          );
+
+          const pickupCount = pickupStops.length;
+          const deliveryCount = deliveryStops.length;
+          const isSelected = selectedSequenceLoadIds.includes(load.id);
+
+          const addressList = (
+            items: typeof routeStops,
+            color: string
+          ) => (
             <div
               style={{
-                padding: 45,
-                textAlign:
-                  "center",
-                color:
-                  "#64748b",
+                display: "flex",
+                flexDirection: "column",
+                gap: 5,
+                minWidth: 0,
               }}
             >
-              {
-                text.loadingBoard
-              }
+              {items.length > 0 ? (
+                items.map((stop) => (
+                  <div
+                    key={stop.id}
+                    title={[
+                      stop.address,
+                      stop.city,
+                      stop.state,
+                      stop.zip_code,
+                    ]
+                      .filter(Boolean)
+                      .join(", ")}
+                    style={{
+                      fontSize: 11,
+                      lineHeight: 1.35,
+                      fontWeight: 650,
+                      color,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      minWidth: 0,
+                    }}
+                  >
+                    {stop.address || "—"}
+                  </div>
+                ))
+              ) : (
+                <span style={{ color: "#94a3b8", fontSize: 10 }}>
+                  —
+                </span>
+              )}
             </div>
-          ) : dispatchLoads.length ===
-            0 ? (
+          );
+
+          return (
             <div
+              key={load.id}
               style={{
-                padding: 50,
-                textAlign:
-                  "center",
-                color:
-                  "#64748b",
+                display: "grid",
+                gridTemplateColumns:
+                  "48px 70px 170px 220px 160px 160px 130px 130px 85px 85px 90px 120px 110px",
+                background: isSelected ? "#f8fafc" : "#ffffff",
+                borderBottom: "1px solid #f1f5f9",
+                alignItems: "stretch",
               }}
             >
-              {text.noLoads}
-            </div>
-          ) : (
-            <div
-              style={{
-                overflowX:
-                  "auto",
-                width: "100%",
-              }}
-            >
+              {/* SEQ */}
               <div
                 style={{
-                  minWidth: 1500,
+                  padding: 8,
+                  display: "flex",
+                  alignItems: "flex-start",
+                  justifyContent: "center",
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={isSelected}
+                  onChange={() => toggleSequenceLoad(load.id)}
+                  title={text.selectForSequence}
+                  style={{
+                    width: 15,
+                    height: 15,
+                    marginTop: 3,
+                    cursor: "pointer",
+                  }}
+                />
+              </div>
+
+              {/* LOAD: pickup count - delivery count */}
+              <div style={{ padding: 9, minWidth: 0 }}>
+                <div
+                  title={`${pickupCount}-${deliveryCount}`}
+                  style={{
+                    fontWeight: 850,
+                    fontSize: 12,
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {pickupCount}-{deliveryCount}
+                </div>
+              </div>
+
+              {/* CUSTOMER */}
+              <div style={{ padding: 9, minWidth: 0 }}>
+                <div
+                  title={load.customer_name || ""}
+                  style={{
+                    fontSize: 10,
+                    fontWeight: 700,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {load.customer_name || "—"}
+                </div>
+              </div>
+
+              {/* ROUTE: all stops in stop_order */}
+              <div
+                style={{
+                  padding: 8,
+                  minWidth: 0,
+                  boxSizing: "border-box",
+                }}
+              >
+                {routeStops.length > 0 ? (
+                  <div
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 5,
+                      minWidth: 0,
+                    }}
+                  >
+                    {routeStops.map((stop, index) => (
+                      <div
+                        key={stop.id}
+                        title={[
+                          stop.address,
+                          stop.city,
+                          stop.state,
+                          stop.zip_code,
+                        ]
+                          .filter(Boolean)
+                          .join(", ")}
+                        style={{
+                          fontSize: 11,
+                          lineHeight: 1.35,
+                          fontWeight: 650,
+                          color: "#334155",
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          minWidth: 0,
+                        }}
+                      >
+                        {index + 1}.{" "}
+                        {stop.stop_type.toLowerCase() === "pickup"
+                          ? "Pickup: "
+                          : "Delivery: "}
+                        {stop.address || "—"}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <span style={{ fontSize: 10, color: "#64748b" }}>
+                    {text.noStops}
+                  </span>
+                )}
+              </div>
+
+              {/* PICKUP */}
+              <div
+                style={{
+                  padding: 6,
+                  minWidth: 0,
+                  background: "#f0fdf4",
+                  borderLeft: "1px solid #dcfce7",
                 }}
               >
                 <div
                   style={{
-                    display:
-                      "grid",
-                    gridTemplateColumns:
-                      "58px 105px 430px 150px 155px 105px 90px 105px 140px 105px",
-                    background:
-                      "#f8fafc",
-                    borderBottom:
-                      "1px solid #e5e7eb",
-                    alignItems:
-                      "stretch",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 8,
+                    minWidth: 0,
                   }}
                 >
-                  <div
-                    style={{
-                      padding:
-                        "13px 10px",
-                      fontSize: 10,
-                      fontWeight: 800,
-                      color:
-                        "#64748b",
-                      textAlign:
-                        "center",
-                    }}
-                  >
-                    SEQ
-                  </div>
-
-                  <div
-                    style={
-                      headerStyle
-                    }
-                  >
-                    {text.load}
-                  </div>
-
-                  <div
-                    style={
-                      headerStyle
-                    }
-                  >
-                    {text.route}
-                  </div>
-
-                  <div
-                    style={
-                      headerStyle
-                    }
-                  >
-                    {text.broker}
-                  </div>
-
-                  <div
-                    style={
-                      headerStyle
-                    }
-                  >
-                    {text.driver}
-                  </div>
-
-                  <div
-                    style={
-                      headerStyle
-                    }
-                  >
-                    {text.truck}
-                  </div>
-
-                  <div
-                    style={
-                      headerStyle
-                    }
-                  >
-                    {text.miles}
-                  </div>
-
-                  <div
-                    style={
-                      headerStyle
-                    }
-                  >
-                    {text.rate}
-                  </div>
-
-                  <div
-                    style={
-                      headerStyle
-                    }
-                  >
-                    {text.status}
-                  </div>
-
-                  <div
-                    style={
-                      headerStyle
-                    }
-                  >
-                    {text.action}
-                  </div>
-                </div>
-
-                {dispatchLoads.map(
-                  (load) => {
-                    const stops =
-                      stopsForLoad(
-                        load.id
-                      );
-
-                    const isSelected =
-                      selectedSequenceLoadIds.includes(
-                        load.id
-                      );
-
-                    return (
+                  {pickupStops.length > 0 ? (
+                    pickupStops.map((stop) => (
                       <div
-                        key={load.id}
+                        key={stop.id}
+                        title={
+                          stop.pickup_number
+                            ? `PU${stop.pickup_number}`
+                            : "Pickup"
+                        }
                         style={{
-                          display:
-                            "grid",
-                          gridTemplateColumns:
-                            "58px 105px 430px 150px 155px 105px 90px 105px 140px 105px",
-                          background:
-                            isSelected
-                              ? "#f8fafc"
-                              : "#ffffff",
-                          borderBottom:
-                            "1px solid #f1f5f9",
-                          alignItems:
-                            "stretch",
+                          fontSize: 10,
+                          lineHeight: 1.8,
+                          fontWeight: 700,
+                          color: "#15803d",
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
                         }}
                       >
-                        <div
-                          style={{
-                            padding: 10,
-                            textAlign:
-                              "center",
-                            display:
-                              "flex",
-                            alignItems:
-                              "flex-start",
-                            justifyContent:
-                              "center",
-                          }}
-                        >
-                          <input
-                            type="checkbox"
-                            checked={
-                              isSelected
-                            }
-                            onChange={() =>
-                              toggleSequenceLoad(
-                                load.id
-                              )
-                            }
-                            title={
-                              text.selectForSequence
-                            }
-                            style={{
-                              width: 16,
-                              height: 16,
-                              marginTop: 3,
-                              cursor:
-                                "pointer",
-                            }}
-                          />
-                        </div>
-
-                        <div
-                          style={{
-                            padding: 15,
-                            minWidth: 0,
-                          }}
-                        >
-                          <div
-                            style={{
-                              fontWeight:
-                                850,
-                              fontSize: 13,
-                              whiteSpace:
-                                "nowrap",
-                              overflow:
-                                "hidden",
-                              textOverflow:
-                                "ellipsis",
-                            }}
-                          >
-                            {
-                              load.load_number
-                            }
-                          </div>
-                        </div>
-
-                        <div
-                          style={{
-                            padding: 12,
-                            minWidth: 0,
-                            boxSizing:
-                              "border-box",
-                          }}
-                        >
-                          {stops.length >
-                          0 ? (
-                            <div
-                              style={{
-                                display:
-                                  "flex",
-                                flexDirection:
-                                  "column",
-                                width:
-                                  "100%",
-                                minWidth:
-                                  0,
-                              }}
-                            >
-                              {stops.map(
-                                (
-                                  stop,
-                                  index
-                                ) => {
-                                  const stopType =
-                                    stop.stop_type.toLowerCase();
-
-                                  const isPickup =
-                                    stopType ===
-                                    "pickup";
-
-                                  const isDelivery =
-                                    stopType ===
-                                    "delivery";
-
-                                  if (
-                                    !isPickup &&
-                                    !isDelivery
-                                  ) {
-                                    return null;
-                                  }
-
-                                  return (
-                                    <div
-                                      key={
-                                        stop.id
-                                      }
-                                      style={{
-                                        position:
-                                          "relative",
-                                        display:
-                                          "flex",
-                                        gap: 10,
-                                        padding:
-                                          "7px 4px",
-                                        minWidth:
-                                          0,
-                                      }}
-                                    >
-                                      {index <
-                                        stops.length -
-                                          1 && (
-                                        <div
-                                          style={{
-                                            position:
-                                              "absolute",
-                                            left: 15,
-                                            top: 31,
-                                            bottom:
-                                              -7,
-                                            width: 1,
-                                            background:
-                                              "#cbd5e1",
-                                          }}
-                                        />
-                                      )}
-
-                                      <div
-                                        style={{
-                                          position:
-                                            "relative",
-                                          zIndex: 1,
-                                          width: 24,
-                                          height: 24,
-                                          minWidth: 24,
-                                          borderRadius:
-                                            999,
-                                          background:
-                                            isPickup
-                                              ? "#fff7ed"
-                                              : "#eff6ff",
-                                          color:
-                                            isPickup
-                                              ? "#c2410c"
-                                              : "#1d4ed8",
-                                          display:
-                                            "flex",
-                                          alignItems:
-                                            "center",
-                                          justifyContent:
-                                            "center",
-                                          fontSize: 10,
-                                          fontWeight: 900,
-                                        }}
-                                      >
-                                        {
-                                          stop.stop_order
-                                        }
-                                      </div>
-
-                                      <div
-                                        style={{
-                                          minWidth:
-                                            0,
-                                          flex: 1,
-                                          boxSizing:
-                                            "border-box",
-                                        }}
-                                      >
-                                        <div
-                                          style={{
-                                            display:
-                                              "flex",
-                                            alignItems:
-                                              "center",
-                                            gap: 7,
-                                            flexWrap:
-                                              "wrap",
-                                            minWidth:
-                                              0,
-                                          }}
-                                        >
-                                          <span
-                                            style={{
-                                              fontSize: 10,
-                                              fontWeight: 900,
-                                              color:
-                                                isPickup
-                                                  ? "#c2410c"
-                                                  : "#1d4ed8",
-                                              textTransform:
-                                                "uppercase",
-                                              letterSpacing:
-                                                0.4,
-                                            }}
-                                          >
-                                            {stopTypeLabel(
-                                              stop.stop_type
-                                            )}
-                                          </span>
-
-                                          {isPickup &&
-                                            stop.pickup_number && (
-                                              <span
-                                                style={{
-                                                  display:
-                                                    "inline-flex",
-                                                  alignItems:
-                                                    "center",
-                                                  padding:
-                                                    "2px 6px",
-                                                  borderRadius:
-                                                    5,
-                                                  background:
-                                                    "#fff7ed",
-                                                  color:
-                                                    "#9a3412",
-                                                  fontSize:
-                                                    9,
-                                                  fontWeight:
-                                                    900,
-                                                }}
-                                              >
-                                                PU{" "}
-                                                {
-                                                  stop.pickup_number
-                                                }
-                                              </span>
-                                            )}
-                                        </div>
-
-                                        <div
-                                          style={{
-                                            marginTop:
-                                              2,
-                                            fontSize:
-                                              12,
-                                            fontWeight:
-                                              750,
-                                            whiteSpace:
-                                              "nowrap",
-                                            overflow:
-                                              "hidden",
-                                            textOverflow:
-                                              "ellipsis",
-                                          }}
-                                          title={
-                                            stop.address ||
-                                            ""
-                                          }
-                                        >
-                                          {
-                                            stop.address ||
-                                            "—"
-                                          }
-                                        </div>
-
-                                        <div
-                                          style={{
-                                            marginTop:
-                                              1,
-                                            display:
-                                              "flex",
-                                            gap: 6,
-                                            flexWrap:
-                                              "wrap",
-                                            fontSize:
-                                              11,
-                                            color:
-                                              "#64748b",
-                                          }}
-                                        >
-                                          <span>
-                                            {
-                                              stop.city ||
-                                              "—"
-                                            }
-
-                                            {stop.state
-                                              ? `, ${stop.state}`
-                                              : ""}
-                                          </span>
-
-                                          {stop.zip_code && (
-                                            <span
-                                              style={{
-                                                color:
-                                                  "#475569",
-                                                fontWeight:
-                                                  700,
-                                              }}
-                                            >
-                                              ZIP{" "}
-                                              {
-                                                stop.zip_code
-                                              }
-                                            </span>
-                                          )}
-                                        </div>
-                                      </div>
-                                    </div>
-                                  );
-                                }
-                              )}
-                            </div>
-                          ) : (
-                            <div
-                              style={{
-                                fontSize:
-                                  12,
-                                color:
-                                  "#64748b",
-                              }}
-                            >
-                              {
-                                text.noStops
-                              }
-                            </div>
-                          )}
-                        </div>
-
-                        <div
-                          style={{
-                            padding: 15,
-                            minWidth: 0,
-                          }}
-                        >
-                          <div
-                            style={{
-                              fontSize: 12,
-                              fontWeight: 700,
-                              whiteSpace:
-                                "nowrap",
-                              overflow:
-                                "hidden",
-                              textOverflow:
-                                "ellipsis",
-                            }}
-                            title={
-                              load.broker_name ||
-                              ""
-                            }
-                          >
-                            {load.broker_name ||
-                              text.noBroker}
-                          </div>
-                        </div>
-
-                        <div
-                          style={{
-                            padding: 15,
-                            minWidth: 0,
-                          }}
-                        >
-                          <div
-                            style={{
-                              fontSize: 12,
-                              fontWeight: 700,
-                              whiteSpace:
-                                "nowrap",
-                              overflow:
-                                "hidden",
-                              textOverflow:
-                                "ellipsis",
-                            }}
-                          >
-                            {driverName(
-                              load.driver_id
-                            )}
-                          </div>
-                        </div>
-
-                        <div
-                          style={{
-                            padding: 15,
-                            minWidth: 0,
-                          }}
-                        >
-                          <div
-                            style={{
-                              fontSize: 12,
-                              fontWeight: 700,
-                              whiteSpace:
-                                "nowrap",
-                              overflow:
-                                "hidden",
-                              textOverflow:
-                                "ellipsis",
-                            }}
-                          >
-                            {truckName(
-                              load.truck_id
-                            )}
-                          </div>
-                        </div>
-
-                        <div
-                          style={{
-                            padding: 15,
-                            fontSize: 12,
-                            fontWeight: 700,
-                            whiteSpace:
-                              "nowrap",
-                          }}
-                        >
-                          {load.miles !==
-                          null
-                            ? `${load.miles} mi`
-                            : "—"}
-                        </div>
-
-                        <div
-                          style={{
-                            padding: 15,
-                            fontSize: 12,
-                            fontWeight: 800,
-                            whiteSpace:
-                              "nowrap",
-                          }}
-                        >
-                          {formatMoney(
-                            load.rate
-                          )}
-                        </div>
-
-                        <div
-                          style={{
-                            padding: 10,
-                            minWidth: 0,
-                          }}
-                        >
-                          <select
-                            value={
-                              load.status ||
-                              ""
-                            }
-                            onChange={(
-                              event
-                            ) =>
-                              changeStatus(
-                                load,
-                                event.target
-                                  .value
-                              )
-                            }
-                            style={{
-                              width:
-                                "100%",
-                              minWidth:
-                                0,
-                              boxSizing:
-                                "border-box",
-                              padding:
-                                "8px 9px",
-                              borderRadius:
-                                8,
-                              border:
-                                "1px solid #e2e8f0",
-                              background:
-                                statusBackground(
-                                  load.status
-                                ),
-                              color:
-                                statusColor(
-                                  load.status
-                                ),
-                              fontSize:
-                                11,
-                              fontWeight:
-                                800,
-                              outline:
-                                "none",
-                              cursor:
-                                "pointer",
-                            }}
-                          >
-                            <option value="available">
-                              Available
-                            </option>
-
-                            <option value="assigned">
-                              Assigned
-                            </option>
-
-                            <option value="in_transit">
-                              In Transit
-                            </option>
-
-                            <option value="delivered">
-                              Delivered
-                            </option>
-                          </select>
-                        </div>
-
-                       
-<div
-  style={{
-    display: "flex",
-    flexDirection: "column",
-    gap: 6,
-    alignItems: "stretch",
-  }}
->
-  <button
-    onClick={() => openDispatch(load)}
-    style={{
-      padding: "8px 10px",
-      borderRadius: 7,
-      border: "none",
-      background: "#2563eb",
-      color: "#ffffff",
-      fontSize: 11,
-      fontWeight: 800,
-      cursor: "pointer",
-    }}
-  >
-    {load.driver_id && load.truck_id
-      ? text.manage
-      : text.dispatch}
-  </button>
-
-  <button
-    onClick={() => cancelLoad(load)}
-    disabled={
-      saving ||
-      ["cancelled", "delivered"].includes(
-        (load.status || "").toLowerCase()
-      )
-    }
-    style={{
-      padding: "8px 10px",
-      borderRadius: 7,
-      border: "1px solid #fecaca",
-      background:
-        saving ||
-        ["cancelled", "delivered"].includes(
-          (load.status || "").toLowerCase()
-        )
-          ? "#f1f5f9"
-          : "#fef2f2",
-      color:
-        saving ||
-        ["cancelled", "delivered"].includes(
-          (load.status || "").toLowerCase()
-        )
-          ? "#94a3b8"
-          : "#b91c1c",
-      fontSize: 11,
-      fontWeight: 800,
-      cursor:
-        saving ||
-        ["cancelled", "delivered"].includes(
-          (load.status || "").toLowerCase()
-        )
-          ? "not-allowed"
-          : "pointer",
-    }}
-  >
-    {text.cancelLoad}
-  </button>
-</div>
-
+                        {stop.pickup_number
+                          ? String(stop.pickup_number)
+                              .toUpperCase()
+                              .startsWith("PU")
+                            ? stop.pickup_number
+                            : `PU${stop.pickup_number}`
+                          : "—"}
                       </div>
-                    );
+                    ))
+                  ) : (
+                    <span style={{ color: "#94a3b8", fontSize: 10 }}>
+                      —
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* DELIVERY */}
+              <div
+                style={{
+                  padding: 6,
+                  minWidth: 0,
+                  background: "#eff6ff",
+                  borderLeft: "1px solid #dbeafe",
+                }}
+              >
+                {addressList(deliveryStops, "#1d4ed8")}
+              </div>
+
+              {/* BROKER */}
+              <div style={{ padding: 9, minWidth: 0 }}>
+                <div
+                  title={load.broker_name || ""}
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 700,
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                  }}
+                >
+                  {load.broker_name || text.noBroker}
+                </div>
+              </div>
+
+              {/* DRIVER */}
+              <div style={{ padding: 9, minWidth: 0 }}>
+                <div
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 700,
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                  }}
+                >
+                  {driverName(load.driver_id)}
+                </div>
+              </div>
+
+              {/* TRUCK */}
+              <div style={{ padding: 9, minWidth: 0 }}>
+                <div
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 700,
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                  }}
+                >
+                  {truckName(load.truck_id)}
+                </div>
+              </div>
+
+              {/* MILES */}
+              <div
+                style={{
+                  padding: 9,
+                  fontSize: 11,
+                  fontWeight: 700,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {load.miles !== null ? `${load.miles} mi` : "—"}
+              </div>
+
+              {/* RATE */}
+              <div
+                style={{
+                  padding: 9,
+                  fontSize: 11,
+                  fontWeight: 800,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {formatMoney(load.rate)}
+              </div>
+
+              {/* STATUS */}
+              <div style={{ padding: 7, minWidth: 0 }}>
+                <select
+                  value={load.status || ""}
+                  onChange={(event) =>
+                    changeStatus(load, event.target.value)
                   }
-                )}
+                  style={{
+                    width: "100%",
+                    minWidth: 0,
+                    boxSizing: "border-box",
+                    padding: "7px 5px",
+                    borderRadius: 7,
+                    border: "1px solid #e2e8f0",
+                    background: statusBackground(load.status),
+                    color: statusColor(load.status),
+                    fontSize: 10,
+                    fontWeight: 800,
+                    outline: "none",
+                    cursor: "pointer",
+                  }}
+                >
+                  <option value="available">Available</option>
+                  <option value="assigned">Assigned</option>
+                  <option value="in_transit">In Transit</option>
+                  <option value="delivered">Delivered</option>
+                </select>
+              </div>
+
+              {/* ACTION */}
+              <div
+                style={{
+                  padding: 7,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 5,
+                  alignItems: "stretch",
+                  minWidth: 0,
+                }}
+              >
+                <button
+                  onClick={() => openDispatch(load)}
+                  style={{
+                    padding: "7px 5px",
+                    borderRadius: 6,
+                    border: "none",
+                    background: "#2563eb",
+                    color: "#ffffff",
+                    fontSize: 10,
+                    fontWeight: 800,
+                    cursor: "pointer",
+                  }}
+                >
+                  {load.driver_id && load.truck_id
+                    ? text.manage
+                    : text.dispatch}
+                </button>
+
+                <button
+                  onClick={() => cancelLoad(load)}
+                  disabled={
+                    saving ||
+                    ["cancelled", "delivered"].includes(
+                      (load.status || "").toLowerCase()
+                    )
+                  }
+                  style={{
+                    padding: "7px 5px",
+                    border: "1px solid #fecaca",
+                    borderRadius: 6,
+                    background:
+                      saving ||
+                      ["cancelled", "delivered"].includes(
+                        (load.status || "").toLowerCase()
+                      )
+                        ? "#f1f5f9"
+                        : "#fef2f2",
+                    color:
+                      saving ||
+                      ["cancelled", "delivered"].includes(
+                        (load.status || "").toLowerCase()
+                      )
+                        ? "#94a3b8"
+                        : "#b91c1c",
+                    fontSize: 10,
+                    fontWeight: 800,
+                    cursor:
+                      saving ||
+                      ["cancelled", "delivered"].includes(
+                        (load.status || "").toLowerCase()
+                      )
+                        ? "not-allowed"
+                        : "pointer",
+                  }}
+                >
+                  {text.cancelLoad}
+                </button>
               </div>
             </div>
-          )}
-        </section>
+          );
+        })}
+      </div>
+    </div>
+  )}
+</section>
+
 
         <div
           style={{
@@ -2949,30 +2671,22 @@ export default function DispatchPage() {
                                   )}
                                 </span>
 
-                                {isPickup &&
-                                  stop.pickup_number && (
-                                    <span
-                                      style={{
-                                        padding:
-                                          "2px 6px",
-                                        borderRadius:
-                                          5,
-                                        background:
-                                          "#fff7ed",
-                                        color:
-                                          "#9a3412",
-                                        fontSize:
-                                          9,
-                                        fontWeight:
-                                          900,
-                                      }}
-                                    >
-                                      PU{" "}
-                                      {
-                                        stop.pickup_number
-                                      }
-                                    </span>
-                                  )}
+                                {isPickup && stop.pickup_number && (
+  <span
+    style={{
+      padding: "2px 6px",
+      borderRadius: 5,
+      background: "#fff7ed",
+      color: "#9a3412",
+      fontSize: 9,
+      fontWeight: 900,
+    }}
+  >
+    {String(stop.pickup_number).toUpperCase().startsWith("PU")
+      ? stop.pickup_number
+      : `PU${stop.pickup_number}`}
+  </span>
+)}
                               </div>
 
                               <div

@@ -28,12 +28,27 @@ type Load = {
 type Document = {
   id: string;
   load_id: string | null;
+  load_stop_id: string | null;
   document_type: string;
   file_name: string;
   storage_path: string | null;
   status: string | null;
   uploaded_at: string | null;
 };
+
+
+type LoadStop = {
+  id: string;
+  load_id: string;
+  stop_order: number;
+  stop_type: string;
+  address: string | null;
+  city: string | null;
+  state: string | null;
+  pickup_number: string | null;
+  status: string | null;
+};
+
 
 type ReviewResult = {
   load: boolean;
@@ -42,6 +57,11 @@ type ReviewResult = {
   loadStatus: boolean;
   invoiceReady: boolean;
   bolNumber: string | null;
+  pickupNumber: string | null;
+  podNumber: string | null;
+  validationPassed: boolean | null;
+  summary: string | null;
+  issues: string[];
   loadNumber: string | null;
   broker: string | null;
   origin: string | null;
@@ -96,6 +116,16 @@ function formatDate(value: string | null | undefined) {
   return date.toLocaleDateString("en-US");
 }
 
+function formatPickupNumber(value: string | null | undefined) {
+  const pickupNumber = String(value ?? "").trim();
+  if (!pickupNumber) return "";
+  if (/^PU\s*/i.test(pickupNumber)) {
+    return pickupNumber.replace(/^PU\s*/i, "PU");
+  }
+  if (/^PL\s*/i.test(pickupNumber)) return pickupNumber;
+  return `PU${pickupNumber}`;
+}
+
 export default function DocumentsPage() {
   const { language } = useLanguage();
   const isES = language === "ES";
@@ -127,6 +157,38 @@ export default function DocumentsPage() {
     selectedLoad: isES ? "Carga seleccionada" : "Selected Load",
     loadRate: isES ? "Tarifa de carga" : "Load Rate",
     documentType: isES ? "Tipo de documento" : "Document Type",
+    stop: isES ? "Parada asociada" : "Associated Stop",
+    pickup: isES ? "Recogida" : "Pickup",
+    delivery: isES ? "Entrega" : "Delivery",
+    selectStop: isES ? "Selecciona una parada" : "Select a stop",
+    loadingStops: isES ? "Cargando paradas..." : "Loading stops...",
+    pickupStopRequired: isES
+      ? "Selecciona la recogida correspondiente para el BOL."
+      : "Select the corresponding pickup stop for the BOL.",
+    deliveryStopRequired: isES
+      ? "Selecciona la entrega correspondiente para el POD."
+      : "Select the corresponding delivery stop for the POD.",
+    noPickupStops: isES
+      ? "Esta carga no tiene paradas de recogida disponibles."
+      : "This load has no available pickup stops.",
+    noDeliveryStops: isES
+      ? "Esta carga no tiene paradas de entrega disponibles."
+      : "This load has no available delivery stops.",
+    correctAssociatedStop: isES
+      ? "Corregir parada asociada"
+      : "Correct associated stop",
+    saveStopAndReview: isES
+      ? "Guardar parada y revisar con IA"
+      : "Save stop and review with AI",
+    savingStop: isES
+      ? "Guardando parada..."
+      : "Saving stop...",
+    chooseCorrectStop: isES
+      ? "Selecciona la parada correcta para este documento. La revisión de IA se ejecutará después de guardar."
+      : "Select the correct stop for this document. AI review will run after saving.",
+    noMatchingStops: isES
+      ? "No hay paradas compatibles para este tipo de documento."
+      : "There are no matching stops for this document type.",
     file: isES ? "Archivo" : "File",
     selected: isES ? "Seleccionado" : "Selected",
     uploading: isES ? "Subiendo..." : "Uploading...",
@@ -196,7 +258,13 @@ export default function DocumentsPage() {
     intelligence: isES
       ? "Inteligencia del documento"
       : "Document Intelligence",
-    bolNumber: isES ? "Número BOL" : "BOL Number",
+    bolNumber: isES ? "Número del documento BOL" : "BOL Document Number",
+    pickupNumber: isES ? "Número PU del pickup" : "PU Pickup Number",
+    podNumber: isES ? "Número del documento POD" : "POD Document Number",
+    aiSummary: isES ? "Resultado de la IA" : "AI Summary",
+    aiIssues: isES ? "Discrepancias detectadas" : "Detected Discrepancies",
+    validationPassed: isES ? "Validación automática aprobada" : "Automatic Validation Passed",
+    validationFailed: isES ? "Validación automática con discrepancias" : "Automatic Validation Found Issues",
     documentDate: isES ? "Fecha del documento" : "Document Date",
     documentAmount: isES ? "Monto del documento" : "Document Amount",
     amountDifference: isES
@@ -286,7 +354,8 @@ export default function DocumentsPage() {
 
   const [loads, setLoads] = useState<Load[]>([]);
   const [selectedLoadId, setSelectedLoadId] = useState("");
-  const [loadPickupLabels, setLoadPickupLabels] = useState<Record<string, string[]>>({});
+  const [loadStops, setLoadStops] = useState<LoadStop[]>([]);
+  const [selectedLoadStopId, setSelectedLoadStopId] = useState("");
   const [documents, setDocuments] = useState<Document[]>([]);
   const [selectedDocumentType, setSelectedDocumentType] = useState("BOL");
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -302,6 +371,8 @@ export default function DocumentsPage() {
     useState<ReviewResult | null>(null);
 
   const [reviewing, setReviewing] = useState(false);
+  const [reviewStopId, setReviewStopId] = useState("");
+  const [savingStopAssociation, setSavingStopAssociation] = useState(false);
   const [approving, setApproving] = useState(false);
   const [declining, setDeclining] = useState(false);
 
@@ -313,6 +384,21 @@ export default function DocumentsPage() {
       loads.find((load) => load.id === selectedLoadId) ?? null,
     [loads, selectedLoadId]
   );
+
+  const getPickupLabelsForLoad = (loadId: string) =>
+    loadStops
+      .filter((stop) => {
+        const stopType = stop.stop_type.trim().toLowerCase();
+        return stop.load_id === loadId && ["pickup", "pick_up", "pick-up"].includes(stopType);
+      })
+      .sort((a, b) => a.stop_order - b.stop_order)
+      .map((stop) => formatPickupNumber(stop.pickup_number))
+      .filter(Boolean)
+      .filter((value, index, all) => all.indexOf(value) === index);
+
+  const selectedPickupLabels = selectedLoad
+    ? getPickupLabelsForLoad(selectedLoad.id)
+    : [];
 
   const reviewedCount = useMemo(
     () =>
@@ -359,6 +445,115 @@ export default function DocumentsPage() {
     [documents]
   );
 
+  const requiredStopType =
+    selectedDocumentType === "BOL"
+      ? "pickup"
+      : selectedDocumentType === "POD"
+        ? "delivery"
+        : null;
+
+  const eligibleStops = useMemo(() => {
+    if (!selectedLoad || !requiredStopType) return [];
+
+    return loadStops
+      .filter((stop) => {
+        const normalizedType = stop.stop_type.trim().toLowerCase();
+        const isPickup = ["pickup", "pick_up", "pick-up"].includes(normalizedType);
+        const isDelivery = ["delivery", "dropoff", "drop_off", "drop-off"].includes(normalizedType);
+        return (
+          stop.load_id === selectedLoad.id &&
+          (requiredStopType === "pickup" ? isPickup : isDelivery)
+        );
+      })
+      .sort((a, b) => a.stop_order - b.stop_order);
+  }, [loadStops, requiredStopType, selectedLoad]);
+
+  const reviewEligibleStops = useMemo(() => {
+    if (!reviewingDocument || !reviewingDocument.load_id) return [];
+
+    const expectedType =
+      reviewingDocument.document_type.trim().toUpperCase() === "BOL"
+        ? "pickup"
+        : reviewingDocument.document_type.trim().toUpperCase() === "POD"
+          ? "delivery"
+          : null;
+
+    if (!expectedType) return [];
+
+    const normalizeStopType = (value: string) =>
+      value.trim().toLowerCase().replace(/[\s-]+/g, "_");
+
+    return loadStops
+      .filter((stop) => {
+        const type = normalizeStopType(stop.stop_type);
+        const isPickup = ["pickup", "pick_up"].includes(type);
+        const isDelivery = ["delivery", "dropoff", "drop_off"].includes(type);
+        return stop.load_id === reviewingDocument.load_id &&
+          (expectedType === "pickup" ? isPickup : isDelivery);
+      })
+      .sort((a, b) => a.stop_order - b.stop_order);
+  }, [loadStops, reviewingDocument]);
+
+ 
+const financeReady = useMemo(() => {
+  if (!selectedLoad) return false;
+
+  const normalizeStopType = (value: string) =>
+    value.trim().toLowerCase().replace(/[\s-]+/g, "_");
+
+  const stops = loadStops.filter(
+    (stop) => stop.load_id === selectedLoad.id
+  );
+
+  const pickupStops = stops.filter((stop) =>
+    ["pickup", "pick_up"].includes(
+      normalizeStopType(stop.stop_type)
+    )
+  );
+
+  const deliveryStops = stops.filter((stop) =>
+    ["delivery", "dropoff", "drop_off"].includes(
+      normalizeStopType(stop.stop_type)
+    )
+  );
+
+  if (pickupStops.length === 0 || deliveryStops.length === 0) {
+    return false;
+  }
+
+  const hasReviewedDocument = (
+    type: "BOL" | "POD",
+    stopId: string
+  ) =>
+    documents.some((documentRow) =>
+      documentRow.load_id === selectedLoad.id &&
+      documentRow.load_stop_id === stopId &&
+      documentRow.document_type.trim().toUpperCase() === type &&
+      ["reviewed", "approved"].includes(
+        (documentRow.status ?? "").trim().toLowerCase()
+      )
+    );
+
+  const allBOLsReviewed = pickupStops.every((stop) =>
+    hasReviewedDocument("BOL", stop.id)
+  );
+
+  const allPODsReviewed = deliveryStops.every((stop) =>
+    hasReviewedDocument("POD", stop.id)
+  );
+
+  return (
+  allBOLsReviewed &&
+  allPODsReviewed
+);
+}, [selectedLoad, loadStops, documents]);
+
+  useEffect(() => {
+    if (!eligibleStops.some((stop) => stop.id === selectedLoadStopId)) {
+      setSelectedLoadStopId("");
+    }
+  }, [eligibleStops, selectedLoadStopId]);
+
   useEffect(() => {
     loadData();
   }, []);
@@ -372,67 +567,56 @@ export default function DocumentsPage() {
     loadDocuments(selectedLoadId);
   }, [selectedLoadId]);
 
-  // Load pickup numbers for the Documents selector.
-// Cargar los números de recogida para el selector de Documents.
-useEffect(() => {
-  const loadIds = loads.map((load) => String(load.id));
+  // Load stops so the Documents page can show PU identifiers independently from document numbers.
+  // Cargar las paradas para mostrar los identificadores PU por separado de los números de documento.
+  useEffect(() => {
+    const loadIds = loads.map((load) => String(load.id));
 
-  if (loadIds.length === 0) {
-    setLoadPickupLabels({});
-    return;
-  }
-
-  let cancelled = false;
-
-  void (async () => {
-    const { data, error } = await supabase
-      .from("load_stops")
-      .select("load_id, stop_order, stop_type, pickup_number")
-      .in("load_id", loadIds)
-      .order("stop_order", { ascending: true });
-
-    if (cancelled) return;
-
-    if (error) {
-      console.error("DOCUMENT PICKUP LABELS ERROR:", error);
-      setLoadPickupLabels({});
+    if (loadIds.length === 0) {
+      setLoadStops([]);
       return;
     }
 
-    const labels: Record<string, string[]> = {};
+    let cancelled = false;
 
-    for (const stop of data ?? []) {
-      const stopType = String(stop.stop_type ?? "")
-        .trim()
-        .toLowerCase();
+    void (async () => {
+    
+const { data, error } = await supabase
+  .from("load_stops")
+  .select(
+    "id, load_id, stop_order, stop_type, address, city, state, pickup_number, status"
+  )
+  .in("load_id", loadIds)
+  .order("stop_order", { ascending: true });
 
-      const pickupNumber = String(stop.pickup_number ?? "").trim();
 
-      if (
-        !["pickup", "pick_up", "pick-up"].includes(stopType) ||
-        !pickupNumber
-      ) {
-        continue;
+      if (cancelled) return;
+
+      if (error) {
+        console.error("DOCUMENT STOP LABELS ERROR:", error);
+        setLoadStops([]);
+        return;
       }
 
-      const loadId = String(stop.load_id);
+      setLoadStops(
+        (data ?? []).map((stop) => ({
+          id: String(stop.id),
+          load_id: String(stop.load_id),
+          stop_order: Number(stop.stop_order ?? 0),
+          stop_type: String(stop.stop_type ?? ""),
+          address: stop.address ?? null,
+          city: stop.city ?? null,
+          state: stop.state ?? null,
+          pickup_number: stop.pickup_number ?? null,
+          status: stop.status ?? null,
+        }))
+      );
+    })();
 
-      if (!labels[loadId]) {
-        labels[loadId] = [];
-      }
-
-      if (!labels[loadId].includes(pickupNumber)) {
-        labels[loadId].push(pickupNumber);
-      }
-    }
-
-    setLoadPickupLabels(labels);
-  })();
-
-  return () => {
-    cancelled = true;
-  };
-}, [loads, supabase]);
+    return () => {
+      cancelled = true;
+    };
+  }, [loads, supabase]);
 
   async function loadData() {
     setLoadingLoads(true);
@@ -497,6 +681,7 @@ useEffect(() => {
         `
         id,
         load_id,
+        load_stop_id,
         document_type,
         file_name,
         storage_path,
@@ -571,6 +756,27 @@ useEffect(() => {
       return;
     }
 
+    if (requiredStopType && !selectedLoadStopId) {
+      setErrorMessage(
+        selectedDocumentType === "BOL"
+          ? text.pickupStopRequired
+          : text.deliveryStopRequired
+      );
+      return;
+    }
+
+    if (
+      requiredStopType &&
+      !eligibleStops.some((stop) => stop.id === selectedLoadStopId)
+    ) {
+      setErrorMessage(
+        selectedDocumentType === "BOL"
+          ? text.noPickupStops
+          : text.noDeliveryStops
+      );
+      return;
+    }
+
     setUploading(true);
 
     try {
@@ -597,6 +803,7 @@ useEffect(() => {
         .insert({
           company_id: selectedLoad.company_id,
           load_id: selectedLoad.id,
+          load_stop_id: requiredStopType ? selectedLoadStopId : null,
           document_type: selectedDocumentType,
           file_name: selectedFile.name,
           storage_path: storagePath,
@@ -612,6 +819,7 @@ useEffect(() => {
       }
 
       setSelectedFile(null);
+      setSelectedLoadStopId("");
 
       const input = document.getElementById(
         "document-file"
@@ -788,6 +996,11 @@ useEffect(() => {
       loadStatus: loadStatusOk,
       invoiceReady,
       bolNumber: null,
+      pickupNumber: null,
+      podNumber: null,
+      validationPassed: null,
+      summary: null,
+      issues: [],
       loadNumber: load?.load_number ?? null,
       broker: load?.broker_name ?? null,
       origin:
@@ -818,27 +1031,142 @@ useEffect(() => {
 
   async function startAIReview(documentRow: Document) {
     setReviewingDocument(documentRow);
+    setReviewStopId(documentRow.load_stop_id ?? "");
     setReviewResult(null);
     setErrorMessage("");
     setMessage("");
     setReviewing(true);
 
-    const load =
-      loads.find(
-        (item) => item.id === documentRow.load_id
-      ) ?? null;
+    const load = loads.find((item) => item.id === documentRow.load_id) ?? null;
 
-    await new Promise((resolve) =>
-      setTimeout(resolve, 900)
-    );
+    try {
+      if (documentRow.document_type === "BOL" || documentRow.document_type === "POD") {
+        const response = await fetch("/api/documents-ai", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ documentId: documentRow.id }),
+        });
 
-    const result = buildIntelligence(
-      load,
-      documentRow
-    );
+        const payload: unknown = await response.json().catch(() => null);
+        const resultPayload = payload && typeof payload === "object"
+          ? payload as Record<string, unknown>
+          : {};
 
-    setReviewResult(result);
-    setReviewing(false);
+        if (!response.ok) {
+          throw new Error(
+            typeof resultPayload.error === "string"
+              ? resultPayload.error
+              : text.unableReview
+          );
+        }
+
+        const analysis = resultPayload.analysis && typeof resultPayload.analysis === "object"
+          ? resultPayload.analysis as Record<string, unknown>
+          : {};
+        const asString = (value: unknown): string | null =>
+          typeof value === "string" && value.trim() ? value.trim() : null;
+        const issues = Array.isArray(analysis.issues)
+          ? analysis.issues.filter((item): item is string => typeof item === "string")
+          : [];
+        const validationPassed = resultPayload.validationPassed === true;
+        const base = buildIntelligence(load, documentRow);
+        const aiChecks = [
+          typeof analysis.documentTypeMatches === "boolean"
+            ? `${isES ? "Tipo de documento" : "Document type"}: ${analysis.documentTypeMatches ? text.pass : text.fail}`
+            : null,
+          typeof analysis.documentReadable === "boolean"
+            ? `${isES ? "Legibilidad" : "Readability"}: ${analysis.documentReadable ? text.pass : text.fail}`
+            : null,
+          typeof analysis.stopMatches === "boolean"
+            ? `${isES ? "Parada asociada" : "Associated stop"}: ${analysis.stopMatches ? text.pass : text.fail}`
+            : null,
+          ...issues,
+        ].filter((item): item is string => Boolean(item));
+
+        const mappedResult: ReviewResult = {
+          ...base,
+          documentType: analysis.documentTypeMatches === true,
+          file: analysis.documentReadable === true,
+          invoiceReady: validationPassed,
+          bolNumber: asString(analysis.bolNumber),
+          pickupNumber: asString(analysis.pickupNumber),
+          podNumber: asString(analysis.podNumber),
+          validationPassed,
+          summary: asString(analysis.summary) ?? (typeof resultPayload.message === "string" ? resultPayload.message : null),
+          issues,
+          documentDate: asString(analysis.documentDate),
+          commodity: asString(analysis.commodity),
+          pieces: asString(analysis.pieces),
+          weight: asString(analysis.weight),
+          checks: aiChecks.length ? aiChecks : [typeof resultPayload.message === "string" ? resultPayload.message : text.unableReview],
+        };
+
+        const newStatus = typeof resultPayload.status === "string"
+          ? resultPayload.status
+          : validationPassed ? "reviewed" : "rejected";
+        setDocuments((current) => current.map((item) =>
+          item.id === documentRow.id ? { ...item, status: newStatus } : item
+        ));
+        setReviewResult(mappedResult);
+        return;
+      }
+
+      // Other document types are informational and never block BOL/POD operations.
+      const result = buildIntelligence(load, documentRow);
+      setReviewResult(result);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : text.unableReview);
+      setReviewResult(null);
+    } finally {
+      setReviewing(false);
+    }
+  }
+
+  async function saveStopAssociationAndReview() {
+    if (!reviewingDocument || !reviewingDocument.load_id || !reviewStopId) {
+      setErrorMessage(text.chooseCorrectStop);
+      return;
+    }
+
+    const chosenStop = reviewEligibleStops.find((stop) => stop.id === reviewStopId);
+    if (!chosenStop) {
+      setErrorMessage(text.noMatchingStops);
+      return;
+    }
+
+    setSavingStopAssociation(true);
+    setErrorMessage("");
+    setMessage("");
+
+    try {
+      const { error } = await supabase
+        .from("documents")
+        .update({ load_stop_id: chosenStop.id, status: "uploaded" })
+        .eq("id", reviewingDocument.id)
+        .eq("load_id", reviewingDocument.load_id);
+
+      if (error) throw new Error(error.message);
+
+      const updatedDocument: Document = {
+        ...reviewingDocument,
+        load_stop_id: chosenStop.id,
+        status: "uploaded",
+      };
+
+      setDocuments((current) => current.map((row) =>
+        row.id === updatedDocument.id ? updatedDocument : row
+      ));
+      setReviewingDocument(updatedDocument);
+      setMessage("");
+      setReviewResult(null);
+
+      await startAIReview(updatedDocument);
+      if (selectedLoadId) await loadDocuments(selectedLoadId);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : text.unableReview);
+    } finally {
+      setSavingStopAssociation(false);
+    }
   }
 
   async function approveDocument() {
@@ -942,7 +1270,7 @@ useEffect(() => {
   }
 
   function closeReview() {
-    if (approving || declining) return;
+    if (reviewing || savingStopAssociation || approving || declining) return;
 
     setReviewingDocument(null);
     setReviewResult(null);
@@ -1163,9 +1491,10 @@ useEffect(() => {
 
                   <select
                     value={selectedLoadId}
-                    onChange={(event) =>
-                      setSelectedLoadId(event.target.value)
-                    }
+                    onChange={(event) => {
+                      setSelectedLoadId(event.target.value);
+                      setSelectedLoadStopId("");
+                    }}
                     style={{
                       width: "100%",
                       boxSizing: "border-box",
@@ -1184,18 +1513,15 @@ useEffect(() => {
                         : text.selectLoad}
                     </option>
 
-         {loads.map((load) => {
-  const pickupLabels = loadPickupLabels[String(load.id)];
-
-  return (
-    <option key={load.id} value={load.id}>
-      {pickupLabels?.length
-        ? pickupLabels.join(" / ")
-        : load.load_number}
-      {load.broker_name ? ` — ${load.broker_name}` : ""}
-    </option>
-  );
-})}
+                  {loads.map((load) => {
+                    const pickupLabels = getPickupLabelsForLoad(load.id);
+                    return (
+                      <option key={load.id} value={load.id}>
+                        {pickupLabels.length ? pickupLabels.join(" / ") : load.load_number}
+                        {load.broker_name ? ` — ${load.broker_name}` : ""}
+                      </option>
+                    );
+                  })}
                   </select>
                 </div>
 
@@ -1227,7 +1553,9 @@ useEffect(() => {
                         color: "#0f172a",
                       }}
                     >
-                      {selectedLoad.load_number}
+                      {selectedPickupLabels.length
+                        ? selectedPickupLabels.join(" / ")
+                        : selectedLoad.load_number}
                     </div>
 
                     <div
@@ -1282,11 +1610,10 @@ useEffect(() => {
 
                   <select
                     value={selectedDocumentType}
-                    onChange={(event) =>
-                      setSelectedDocumentType(
-                        event.target.value
-                      )
-                    }
+                    onChange={(event) => {
+                      setSelectedDocumentType(event.target.value);
+                      setSelectedLoadStopId("");
+                    }}
                     style={{
                       width: "100%",
                       boxSizing: "border-box",
@@ -1306,6 +1633,76 @@ useEffect(() => {
                     ))}
                   </select>
                 </div>
+
+                {requiredStopType && (
+                  <div>
+                    <label
+                      style={{
+                        display: "block",
+                        marginBottom: "7px",
+                        fontSize: "12px",
+                        fontWeight: 700,
+                        color: "#334155",
+                      }}
+                    >
+                      {text.stop} ({selectedDocumentType === "BOL" ? text.pickup : text.delivery})
+                    </label>
+
+                    <select
+                      value={selectedLoadStopId}
+                      onChange={(event) => setSelectedLoadStopId(event.target.value)}
+                      disabled={!selectedLoad || loadingLoads || loadStops.length === 0 || eligibleStops.length === 0}
+                      required
+                      style={{
+                        width: "100%",
+                        boxSizing: "border-box",
+                        border: "1px solid #cbd5e1",
+                        borderRadius: "9px",
+                        background: "#ffffff",
+                        padding: "10px 12px",
+                        fontSize: "13px",
+                        color: "#334155",
+                        outline: "none",
+                      }}
+                    >
+                      <option value="">
+                        {loadStops.length === 0
+                          ? text.loadingStops
+                          : eligibleStops.length === 0
+                            ? selectedDocumentType === "BOL"
+                              ? text.noPickupStops
+                              : text.noDeliveryStops
+                            : text.selectStop}
+                      </option>
+                      {eligibleStops.map((stop) => {
+                        const stopAddress = [stop.address, stop.city, stop.state]
+                          .filter(Boolean)
+                          .join(", ");
+                        const stopLabel =
+                          selectedDocumentType === "BOL"
+                            ? (formatPickupNumber(stop.pickup_number) || `PU-${stop.stop_order}`)
+                            : `Delivery ${stop.stop_order}`;
+                        return (
+                          <option key={stop.id} value={stop.id}>
+                            {stopLabel}{stopAddress ? ` — ${stopAddress}` : ""}
+                          </option>
+                        );
+                      })}
+                    </select>
+                    <p
+                      style={{
+                        margin: "6px 0 0",
+                        fontSize: "11px",
+                        color: "#64748b",
+                        lineHeight: 1.5,
+                      }}
+                    >
+                      {selectedDocumentType === "BOL"
+                        ? text.pickupStopRequired
+                        : text.deliveryStopRequired}
+                    </p>
+                  </div>
+                )}
 
                 <div>
                   <label
@@ -1432,15 +1829,10 @@ useEffect(() => {
 
                   <strong
                     style={{
-                      color:
-                        documents.length > 0
-                          ? "#059669"
-                          : "#94a3b8",
+                      color: financeReady ? "#059669" : "#94a3b8",
                     }}
                   >
-                    {documents.length > 0
-                      ? text.available
-                      : text.waiting}
+                    {financeReady ? text.available : text.waiting}
                   </strong>
                 </div>
               </div>
@@ -1451,7 +1843,7 @@ useEffect(() => {
             title={text.loadDocuments}
             description={
               selectedLoad
-                ? `${text.associated} ${selectedLoad.load_number}`
+                ? `${text.associated} ${selectedPickupLabels.length ? selectedPickupLabels.join(" / ") : selectedLoad.load_number}`
                 : text.selectToView
             }
           >
@@ -1616,11 +2008,116 @@ useEffect(() => {
               <ActionButton
                 variant="secondary"
                 onClick={closeReview}
-                disabled={approving || declining}
+                disabled={reviewing || savingStopAssociation || approving || declining}
               >
                 {text.close}
               </ActionButton>
             </div>
+
+            {(reviewingDocument.document_type.trim().toUpperCase() === "BOL" ||
+              reviewingDocument.document_type.trim().toUpperCase() === "POD") && (
+              <div
+                style={{
+                  padding: "16px 22px",
+                  borderBottom: "1px solid #e2e8f0",
+                  background: "#f8fafc",
+                }}
+              >
+                <label
+                  htmlFor="review-associated-stop"
+                  style={{
+                    display: "block",
+                    marginBottom: "7px",
+                    fontSize: "12px",
+                    fontWeight: 800,
+                    color: "#334155",
+                  }}
+                >
+                  {text.correctAssociatedStop}
+                </label>
+                <div
+                  style={{
+                    display: "flex",
+                    flexWrap: "wrap",
+                    gap: "10px",
+                    alignItems: "center",
+                  }}
+                >
+                  <select
+                    id="review-associated-stop"
+                    value={reviewStopId}
+                    onChange={(event) => setReviewStopId(event.target.value)}
+                    disabled={reviewing || savingStopAssociation}
+                    style={{
+                      flex: "1 1 340px",
+                      minWidth: 0,
+                      padding: "10px 12px",
+                      border: "1px solid #cbd5e1",
+                      borderRadius: "8px",
+                      background: "#ffffff",
+                      color: "#0f172a",
+                      fontSize: "12px",
+                    }}
+                  >
+                    <option value="">{text.selectStop}</option>
+                    {reviewEligibleStops.map((stop) => {
+                      const label = reviewingDocument.document_type.trim().toUpperCase() === "BOL"
+                        ? formatPickupNumber(stop.pickup_number)
+                        : `${text.delivery} ${stop.stop_order}`;
+                      const address = [stop.address, stop.city, stop.state].filter(Boolean).join(", ");
+                      return (
+                        <option key={stop.id} value={stop.id}>
+                          {`${label || `${text.stop} ${stop.stop_order}`} — ${address || "—"}`}
+                        </option>
+                      );
+                    })}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={saveStopAssociationAndReview}
+                    disabled={reviewing || savingStopAssociation || !reviewStopId || reviewEligibleStops.length === 0}
+                    style={{
+                      border: "none",
+                      borderRadius: "8px",
+                      padding: "10px 13px",
+                      background: "#2563eb",
+                      color: "#ffffff",
+                      fontSize: "12px",
+                      fontWeight: 800,
+                      cursor: reviewing || savingStopAssociation || !reviewStopId || reviewEligibleStops.length === 0
+                        ? "not-allowed"
+                        : "pointer",
+                      opacity: reviewing || savingStopAssociation || !reviewStopId || reviewEligibleStops.length === 0
+                        ? 0.55
+                        : 1,
+                    }}
+                  >
+                    {savingStopAssociation ? text.savingStop : text.saveStopAndReview}
+                  </button>
+                </div>
+                <p style={{ margin: "7px 0 0", color: "#64748b", fontSize: "11px", lineHeight: 1.5 }}>
+                  {reviewEligibleStops.length > 0 ? text.chooseCorrectStop : text.noMatchingStops}
+                </p>
+              </div>
+            )}
+
+            {errorMessage && (
+              <div
+                role="alert"
+                style={{
+                  margin: "16px 22px 0",
+                  padding: "11px 13px",
+                  border: "1px solid #fecaca",
+                  borderRadius: "9px",
+                  background: "#fef2f2",
+                  color: "#991b1b",
+                  fontSize: "12px",
+                  lineHeight: 1.5,
+                }}
+              >
+                {errorMessage}
+              </div>
+            )}
 
             {reviewing ? (
               <div
@@ -1830,6 +2327,14 @@ useEffect(() => {
                           reviewResult.bolNumber,
                         ],
                         [
+                          text.pickupNumber,
+                          reviewResult.pickupNumber,
+                        ],
+                        [
+                          text.podNumber,
+                          reviewResult.podNumber,
+                        ],
+                        [
                           text.documentDate,
                           reviewResult.documentDate,
                         ],
@@ -1884,6 +2389,29 @@ useEffect(() => {
                     </div>
                   </SectionCard>
                 </div>
+
+                {(reviewResult.summary || reviewResult.issues.length > 0 || reviewResult.validationPassed !== null) && (
+                  <SectionCard title={text.aiSummary}>
+                    {reviewResult.validationPassed !== null && (
+                      <p style={{ margin: "0 0 10px", fontSize: "12px", fontWeight: 800, color: reviewResult.validationPassed ? "#166534" : "#b91c1c" }}>
+                        {reviewResult.validationPassed ? text.validationPassed : text.validationFailed}
+                      </p>
+                    )}
+                    {reviewResult.summary && (
+                      <p style={{ margin: 0, fontSize: "12px", lineHeight: 1.6, color: "#334155", whiteSpace: "pre-wrap" }}>
+                        {reviewResult.summary}
+                      </p>
+                    )}
+                    {reviewResult.issues.length > 0 && (
+                      <div style={{ marginTop: "12px" }}>
+                        <strong style={{ fontSize: "12px", color: "#334155" }}>{text.aiIssues}</strong>
+                        <ul style={{ margin: "6px 0 0", paddingLeft: "20px", fontSize: "12px", lineHeight: 1.6, color: "#475569" }}>
+                          {reviewResult.issues.map((issue, index) => <li key={`${issue}-${index}`}>{issue}</li>)}
+                        </ul>
+                      </div>
+                    )}
+                  </SectionCard>
+                )}
 
                 <SectionCard title={text.checks}>
                   <div
@@ -1995,6 +2523,7 @@ useEffect(() => {
                   </div>
                 </div>
 
+                {reviewingDocument.document_type !== "BOL" && reviewingDocument.document_type !== "POD" && (
                 <div
                   style={{
                     display: "flex",
@@ -2051,6 +2580,7 @@ useEffect(() => {
                       : text.approve}
                   </button>
                 </div>
+                )}
               </div>
             ) : (
               <div

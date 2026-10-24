@@ -1,4 +1,5 @@
 
+
 "use client";
 
 import { useEffect, useRef, useState } from "react";
@@ -25,6 +26,7 @@ interface TruckMapProps {
   } | null;
   destination: NavigationStop | null;
   isES: boolean;
+  fullScreen?: boolean;
   onArrival?: (stop: NavigationStop) => void;
 }
 
@@ -286,6 +288,7 @@ export default function TruckMap({
   lastLocation,
   destination,
   isES,
+  fullScreen = false,
   onArrival,
 }: TruckMapProps) {
 
@@ -946,7 +949,13 @@ useEffect(() => {
   }, [destination, lastLocation, rerouteVersion, isES]);
 
   return (
-    <div className="relative w-full overflow-hidden rounded-xl border border-slate-700 shadow-lg">
+    <div
+      className={
+        fullScreen
+          ? "relative h-full min-h-0 w-full overflow-hidden bg-slate-200"
+          : "relative w-full overflow-hidden rounded-xl border border-slate-700 shadow-lg"
+      }
+    >
       {destination && (
         <div
           className="absolute left-3 right-3 top-3 z-[1000] rounded-xl bg-white p-3 shadow-lg"
@@ -1069,9 +1078,11 @@ useEffect(() => {
 
       <div
         ref={containerRef}
-        className="z-10 h-[450px] w-full"
+        className={fullScreen ? "z-10 h-full w-full" : "z-10 h-[450px] w-full"}
+        role="application"
+        aria-label={isES ? "Mapa de navegación del camión" : "Truck navigation map"}
         style={{
-          height: 450,
+          height: fullScreen ? "100%" : 450,
           width: "100%",
           background: "#e2e8f0",
         }}

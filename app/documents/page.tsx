@@ -286,6 +286,7 @@ export default function DocumentsPage() {
 
   const [loads, setLoads] = useState<Load[]>([]);
   const [selectedLoadId, setSelectedLoadId] = useState("");
+  const [loadPickupLabels, setLoadPickupLabels] = useState<Record<string, string[]>>({});
   const [documents, setDocuments] = useState<Document[]>([]);
   const [selectedDocumentType, setSelectedDocumentType] = useState("BOL");
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -370,6 +371,68 @@ export default function DocumentsPage() {
 
     loadDocuments(selectedLoadId);
   }, [selectedLoadId]);
+
+  // Load pickup numbers for the Documents selector.
+// Cargar los números de recogida para el selector de Documents.
+useEffect(() => {
+  const loadIds = loads.map((load) => String(load.id));
+
+  if (loadIds.length === 0) {
+    setLoadPickupLabels({});
+    return;
+  }
+
+  let cancelled = false;
+
+  void (async () => {
+    const { data, error } = await supabase
+      .from("load_stops")
+      .select("load_id, stop_order, stop_type, pickup_number")
+      .in("load_id", loadIds)
+      .order("stop_order", { ascending: true });
+
+    if (cancelled) return;
+
+    if (error) {
+      console.error("DOCUMENT PICKUP LABELS ERROR:", error);
+      setLoadPickupLabels({});
+      return;
+    }
+
+    const labels: Record<string, string[]> = {};
+
+    for (const stop of data ?? []) {
+      const stopType = String(stop.stop_type ?? "")
+        .trim()
+        .toLowerCase();
+
+      const pickupNumber = String(stop.pickup_number ?? "").trim();
+
+      if (
+        !["pickup", "pick_up", "pick-up"].includes(stopType) ||
+        !pickupNumber
+      ) {
+        continue;
+      }
+
+      const loadId = String(stop.load_id);
+
+      if (!labels[loadId]) {
+        labels[loadId] = [];
+      }
+
+      if (!labels[loadId].includes(pickupNumber)) {
+        labels[loadId].push(pickupNumber);
+      }
+    }
+
+    setLoadPickupLabels(labels);
+  })();
+
+  return () => {
+    cancelled = true;
+  };
+}, [loads, supabase]);
 
   async function loadData() {
     setLoadingLoads(true);
@@ -1121,17 +1184,18 @@ export default function DocumentsPage() {
                         : text.selectLoad}
                     </option>
 
-                    {loads.map((load) => (
-                      <option
-                        key={load.id}
-                        value={load.id}
-                      >
-                        {load.load_number}
-                        {load.broker_name
-                          ? ` — ${load.broker_name}`
-                          : ""}
-                      </option>
-                    ))}
+         {loads.map((load) => {
+  const pickupLabels = loadPickupLabels[String(load.id)];
+
+  return (
+    <option key={load.id} value={load.id}>
+      {pickupLabels?.length
+        ? pickupLabels.join(" / ")
+        : load.load_number}
+      {load.broker_name ? ` — ${load.broker_name}` : ""}
+    </option>
+  );
+})}
                   </select>
                 </div>
 

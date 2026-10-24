@@ -1,7 +1,8 @@
 
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import type { ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase";
 import { useLanguage } from "@/lib/LanguageProvider";
@@ -18,86 +19,100 @@ type Load = {
   driver: string;
   truck: string;
   revenue: string;
+  pickup_labels?: string;
+  route?: string;
 };
 
-const initialLoads: Load[] = [
-  {
-    id: "1",
-    load_number: "PL-1001",
-    broker_name: "Broker 001",
-    origin_city: "Miami",
-    origin_state: "FL",
-    destination_city: "Atlanta",
-    destination_state: "GA",
-    status: "In Transit",
-    driver: "Driver 001",
-    truck: "Truck 101",
-    revenue: "$2,850",
-  },
-  {
-    id: "2",
-    load_number: "PL-1002",
-    broker_name: "Broker 002",
-    origin_city: "Orlando",
-    origin_state: "FL",
-    destination_city: "Charlotte",
-    destination_state: "NC",
-    status: "At Pickup",
-    driver: "Driver 002",
-    truck: "Truck 102",
-    revenue: "$2,420",
-  },
-  {
-    id: "3",
-    load_number: "PL-1003",
-    broker_name: "Broker 003",
-    origin_city: "Tampa",
-    origin_state: "FL",
-    destination_city: "Dallas",
-    destination_state: "TX",
-    status: "Delivered",
-    driver: "Driver 003",
-    truck: "Truck 103",
-    revenue: "$3,150",
-  },
-];
+type LoadStop = {
+  id: string;
+  load_id: string;
+  stop_order: number;
+  stop_type: string | null;
+  pickup_number: string | null;
+  address: string | null;
+  city: string | null;
+  state: string | null;
+};
 
 const statusStyle = (status: string) => {
-  if (status === "In Transit") {
-    return {
-      background: "#eff6ff",
-      color: "#2563eb",
-    };
+  const normalized = status.trim().toLowerCase();
+
+  if (normalized === "in transit") {
+    return { background: "#eff6ff", color: "#2563eb" };
   }
 
-  if (status === "At Pickup") {
-    return {
-      background: "#fff7ed",
-      color: "#ea580c",
-    };
+  if (normalized === "at pickup") {
+    return { background: "#fff7ed", color: "#ea580c" };
   }
 
-  if (status === "Delivered") {
-    return {
-      background: "#ecfdf5",
-      color: "#059669",
-    };
+  if (normalized === "delivered") {
+    return { background: "#ecfdf5", color: "#059669" };
   }
 
-  return {
-    background: "#f1f5f9",
-    color: "#475569",
-  };
+  if (normalized === "cancelled" || normalized === "canceled") {
+    return { background: "#fef2f2", color: "#dc2626" };
+  }
+
+  return { background: "#f1f5f9", color: "#475569" };
 };
+
+function normalizeStatus(value: string | null | undefined): string {
+  const status = String(value ?? "new")
+    .trim()
+    .toLowerCase()
+    .replace(/-/g, "_");
+
+  if (
+    ["in_transit", "in transit", "en_route", "en route"].includes(status)
+  ) {
+    return "In Transit";
+  }
+
+  if (
+    ["at_pickup", "at pickup", "pickup", "pick_up"].includes(status)
+  ) {
+    return "At Pickup";
+  }
+
+  if (["delivered", "completed"].includes(status)) {
+    return "Delivered";
+  }
+
+  if (status === "pending_review") {
+    return "Pending Review";
+  }
+
+  if (status === "assigned") {
+    return "Assigned";
+  }
+
+  if (status === "cancelled" || status === "canceled") {
+    return "Cancelled";
+  }
+
+  if (status === "available") {
+    return "Available";
+  }
+
+  if (status === "new") {
+    return "New";
+  }
+
+  return status
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
 
 export default function OperationsPage() {
   const router = useRouter();
   const { language, t } = useLanguage();
 
-  const [loads, setLoads] = useState<Load[]>(initialLoads);
+  const [loads, setLoads] = useState<Load[]>([]);
   const [showNewLoad, setShowNewLoad] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
+  const [loading, setLoading] = useState(true);
 
   const [loadNumber, setLoadNumber] = useState("");
   const [brokerName, setBrokerName] = useState("");
@@ -105,6 +120,177 @@ export default function OperationsPage() {
   const [originState, setOriginState] = useState("");
   const [destinationCity, setDestinationCity] = useState("");
   const [destinationState, setDestinationState] = useState("");
+
+  useEffect(() => {
+    let active = true;
+
+    async function fetchOperationsLoads() {
+      setLoading(true);
+
+      const [
+        loadsResult,
+        stopsResult,
+        driversResult,
+        trucksResult,
+      ] = await Promise.all([
+        supabase
+          .from("loads")
+          .select(
+            "id, load_number, broker_name, origin_city, origin_state, destination_city, destination_state, status, driver_id, truck_id, rate, created_at"
+          )
+          .order("created_at", { ascending: false })
+          .limit(100),
+
+        supabase
+          .from("load_stops")
+          .select(
+            "id, load_id, stop_order, stop_type, pickup_number, address, city, state"
+          )
+          .order("stop_order", { ascending: true }),
+
+        supabase
+          .from("drivers")
+          .select("id, full_name"),
+
+        supabase
+          .from("trucks")
+          .select("id, unit_number"),
+      ]);
+
+      if (!active) return;
+
+      const queryError =
+        loadsResult.error ??
+        stopsResult.error ??
+        driversResult.error ??
+        trucksResult.error;
+
+      if (queryError) {
+        setMessage(
+          language === "ES"
+            ? `Error al cargar las operaciones: ${queryError.message}`
+            : `Error loading operations: ${queryError.message}`
+        );
+        setLoading(false);
+        return;
+      }
+
+      const stops = (stopsResult.data ?? []) as LoadStop[];
+
+      const driverNames = new Map(
+        (driversResult.data ?? []).map((driver) => [
+          driver.id,
+          driver.full_name,
+        ])
+      );
+
+      const truckNumbers = new Map(
+        (trucksResult.data ?? []).map((truck) => [
+          truck.id,
+          truck.unit_number,
+        ])
+      );
+
+      const currency = new Intl.NumberFormat(
+        language === "ES" ? "es-US" : "en-US",
+        {
+          style: "currency",
+          currency: "USD",
+          maximumFractionDigits: 2,
+        }
+      );
+
+      const realLoads: Load[] = (loadsResult.data ?? []).map((load) => {
+        const loadStops = stops
+          .filter((stop) => stop.load_id === load.id)
+          .sort((a, b) => a.stop_order - b.stop_order);
+
+        const pickupLabels = loadStops
+          .filter((stop) =>
+            ["pickup", "pick_up", "pick-up"].includes(
+              String(stop.stop_type ?? "").trim().toLowerCase()
+            )
+          )
+          .map((stop) => String(stop.pickup_number ?? "").trim())
+          .filter((number) => number.length > 0)
+          .filter(
+            (number, index, numbers) =>
+              numbers.indexOf(number) === index
+          )
+          .join(" / ");
+
+        const route = loadStops
+          .map((stop) => {
+            const location = [
+              stop.address,
+              [stop.city, stop.state].filter(Boolean).join(", "),
+            ]
+              .filter(Boolean)
+              .join(" — ");
+
+            return location || "—";
+          })
+          .join(" → ");
+
+        return {
+          id: String(load.id),
+          load_number: String(load.load_number ?? ""),
+          broker_name: String(load.broker_name ?? ""),
+          origin_city: String(load.origin_city ?? ""),
+          origin_state: String(load.origin_state ?? ""),
+          destination_city: String(load.destination_city ?? ""),
+          destination_state: String(load.destination_state ?? ""),
+          status: normalizeStatus(load.status),
+          driver: load.driver_id
+            ? String(driverNames.get(load.driver_id) ?? "Unassigned")
+            : "Unassigned",
+          truck: load.truck_id
+            ? String(truckNumbers.get(load.truck_id) ?? "Unassigned")
+            : "Unassigned",
+          revenue:
+            load.rate == null
+              ? "—"
+              : currency.format(Number(load.rate)),
+          pickup_labels: pickupLabels,
+          route:
+            route ||
+            `${load.origin_city || "—"}, ${load.origin_state || ""} → ${
+              load.destination_city || "—"
+            }, ${load.destination_state || ""}`,
+        };
+      });
+
+      if (active) {
+        setLoads(realLoads);
+        setLoading(false);
+      }
+    }
+
+    void fetchOperationsLoads();
+
+    return () => {
+      active = false;
+    };
+  }, [language]);
+
+  const activeLoads = loads.filter(
+    (load) =>
+      !["delivered", "completed", "cancelled", "canceled"].includes(
+        load.status.toLowerCase()
+      )
+  ).length;
+
+  const inTransitLoads = loads.filter(
+    (load) => load.status.toLowerCase() === "in transit"
+  ).length;
+
+  const atPickupLoads = loads.filter(
+    (load) => load.status.toLowerCase() === "at pickup"
+  ).length;
+
+  const deliveredLoads = loads.filter(
+    (load) => load.status.toLowerCase() === "delivered"
+  ).length;
 
   const openNewLoad = () => {
     setMessage("");
@@ -197,22 +383,33 @@ export default function OperationsPage() {
       }
 
       const newLoad: Load = {
-        id: data.id,
-        load_number: data.load_number,
-        broker_name: data.broker_name,
-        origin_city: data.origin_city,
-        origin_state: data.origin_state,
-        destination_city: data.destination_city,
-        destination_state: data.destination_state,
+        id: String(data.id),
+        load_number: String(data.load_number ?? loadNumber.trim()),
+        broker_name: String(data.broker_name ?? brokerName.trim()),
+        origin_city: String(data.origin_city ?? originCity.trim()),
+        origin_state: String(
+          data.origin_state ?? originState.trim().toUpperCase()
+        ),
+        destination_city: String(
+          data.destination_city ?? destinationCity.trim()
+        ),
+        destination_state: String(
+          data.destination_state ?? destinationState.trim().toUpperCase()
+        ),
         status: "New",
         driver: "Unassigned",
         truck: "Unassigned",
         revenue: "—",
+        pickup_labels: "",
+        route: `${originCity.trim()}, ${originState.trim().toUpperCase()} → ${destinationCity.trim()}, ${destinationState.trim().toUpperCase()}`,
       };
 
-      setLoads((current) => [newLoad, ...current]);
-      setShowNewLoad(false);
+      setLoads((current) => [
+        newLoad,
+        ...current.filter((load) => load.id !== newLoad.id),
+      ]);
 
+      setShowNewLoad(false);
       setLoadNumber("");
       setBrokerName("");
       setOriginCity("");
@@ -222,8 +419,8 @@ export default function OperationsPage() {
 
       setMessage(
         language === "ES"
-          ? `Carga ${data.load_number} creada correctamente.`
-          : `Load ${data.load_number} created successfully.`
+          ? `Carga ${newLoad.load_number} creada correctamente.`
+          : `Load ${newLoad.load_number} created successfully.`
       );
     } catch (error) {
       console.error(error);
@@ -247,6 +444,10 @@ export default function OperationsPage() {
       if (status === "At Pickup") return "En Recogida";
       if (status === "Delivered") return t.operations.delivered;
       if (status === "New") return "Nueva";
+      if (status === "Assigned") return "Asignada";
+      if (status === "Pending Review") return "Pendiente de revisión";
+      if (status === "Available") return "Disponible";
+      if (status === "Cancelled") return "Cancelada";
       if (status === "Unassigned") return "Sin asignar";
     }
 
@@ -279,12 +480,7 @@ export default function OperationsPage() {
           "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif",
       }}
     >
-      <div
-        style={{
-          maxWidth: 1400,
-          margin: "0 auto",
-        }}
-      >
+      <div style={{ maxWidth: 1400, margin: "0 auto" }}>
         <div
           style={{
             display: "flex",
@@ -351,6 +547,7 @@ export default function OperationsPage() {
 
         {message && (
           <div
+            role="status"
             style={{
               marginBottom: 22,
               padding: "13px 16px",
@@ -374,13 +571,22 @@ export default function OperationsPage() {
             marginBottom: 26,
           }}
         >
-          <StatCard label={t.operations.activeLoads} value="18" />
-          <StatCard label={t.operations.inTransit} value="6" />
+          <StatCard
+            label={t.operations.activeLoads}
+            value={activeLoads}
+          />
+          <StatCard
+            label={t.operations.inTransit}
+            value={inTransitLoads}
+          />
           <StatCard
             label={language === "ES" ? "En Recogida" : "At Pickup"}
-            value="4"
+            value={atPickupLoads}
           />
-          <StatCard label={t.operations.delivered} value="8" />
+          <StatCard
+            label={t.operations.delivered}
+            value={deliveredLoads}
+          />
         </div>
 
         <section
@@ -441,7 +647,9 @@ export default function OperationsPage() {
                 cursor: "pointer",
               }}
             >
-              {language === "ES" ? "Ver Todas las Cargas" : "View All Loads"}
+              {language === "ES"
+                ? "Ver Todas las Cargas"
+                : "View All Loads"}
             </button>
           </div>
 
@@ -462,9 +670,7 @@ export default function OperationsPage() {
                 >
                   <Th>{t.operations.loadNumber}</Th>
                   <Th>{t.operations.status}</Th>
-                  <Th>
-                    {language === "ES" ? "Ruta" : "Route"}
-                  </Th>
+                  <Th>{language === "ES" ? "Ruta" : "Route"}</Th>
                   <Th>{t.operations.driver}</Th>
                   <Th>{t.operations.truck}</Th>
                   <Th>{t.operations.revenue}</Th>
@@ -472,94 +678,122 @@ export default function OperationsPage() {
               </thead>
 
               <tbody>
-                {loads.map((load) => {
-                  const style = statusStyle(load.status);
+                {loading ? (
+                  <tr>
+                    <Td colSpan={6}>
+                      {language === "ES"
+                        ? "Cargando operaciones..."
+                        : "Loading operations..."}
+                    </Td>
+                  </tr>
+                ) : loads.length === 0 ? (
+                  <tr>
+                    <Td colSpan={6}>
+                      {language === "ES"
+                        ? "No hay cargas para mostrar."
+                        : "No loads to display."}
+                    </Td>
+                  </tr>
+                ) : (
+                  loads.map((load) => {
+                    const style = statusStyle(load.status);
 
-                  return (
-                    <tr
-                      key={load.id}
-                      style={{
-                        borderBottom: "1px solid #e2e8f0",
-                      }}
-                    >
-                      <Td>
-                        <span
-                          style={{
-                            fontWeight: 750,
-                            color: "#172033",
-                          }}
-                        >
-                          {load.load_number}
-                        </span>
-                      </Td>
+                    return (
+                      <tr
+                        key={load.id}
+                        style={{
+                          borderBottom: "1px solid #e2e8f0",
+                        }}
+                      >
+                        <Td>
+                          <span
+                            style={{
+                              fontWeight: 750,
+                              color: "#172033",
+                              overflowWrap: "anywhere",
+                            }}
+                          >
+                            {load.pickup_labels || load.load_number}
+                          </span>
+                        </Td>
 
-                      <Td>
-                        <span
-                          style={{
-                            display: "inline-flex",
-                            alignItems: "center",
-                            padding: "6px 10px",
-                            borderRadius: 999,
-                            background: style.background,
-                            color: style.color,
-                            fontSize: 12,
-                            fontWeight: 700,
-                          }}
-                        >
-                          {translateStatus(load.status)}
-                        </span>
-                      </Td>
+                        <Td>
+                          <span
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              padding: "6px 10px",
+                              borderRadius: 999,
+                              background: style.background,
+                              color: style.color,
+                              fontSize: 12,
+                              fontWeight: 700,
+                            }}
+                          >
+                            {translateStatus(load.status)}
+                          </span>
+                        </Td>
 
-                      <Td>
-                        <span
-                          style={{
-                            color: "#475569",
-                          }}
-                        >
-                          {load.origin_city}, {load.origin_state} →{" "}
-                          {load.destination_city}, {load.destination_state}
-                        </span>
-                      </Td>
+                        <Td>
+                          <span
+                            style={{
+                              color: "#475569",
+                              whiteSpace: "normal",
+                              display: "block",
+                              minWidth: 240,
+                              maxWidth: 520,
+                              lineHeight: 1.7,
+                            }}
+                          >
+                            {load.route ||
+                              `${load.origin_city || "—"}, ${
+                                load.origin_state || ""
+                              } → ${load.destination_city || "—"}, ${
+                                load.destination_state || ""
+                              }`}
+                          </span>
+                        </Td>
 
-                      <Td>
-                        <span
-                          style={{
-                            color:
-                              load.driver === "Unassigned"
-                                ? "#94a3b8"
-                                : "#475569",
-                          }}
-                        >
-                          {translateDriver(load.driver)}
-                        </span>
-                      </Td>
+                        <Td>
+                          <span
+                            style={{
+                              color:
+                                load.driver === "Unassigned"
+                                  ? "#94a3b8"
+                                  : "#475569",
+                            }}
+                          >
+                            {translateDriver(load.driver)}
+                          </span>
+                        </Td>
 
-                      <Td>
-                        <span
-                          style={{
-                            color:
-                              load.truck === "Unassigned"
-                                ? "#94a3b8"
-                                : "#475569",
-                          }}
-                        >
-                          {translateTruck(load.truck)}
-                        </span>
-                      </Td>
+                        <Td>
+                          <span
+                            style={{
+                              color:
+                                load.truck === "Unassigned"
+                                  ? "#94a3b8"
+                                  : "#475569",
+                            }}
+                          >
+                            {translateTruck(load.truck)}
+                          </span>
+                        </Td>
 
-                      <Td>
-                        <span
-                          style={{
-                            fontWeight: 750,
-                            color: "#172033",
-                          }}
-                        >
-                          {load.revenue}
-                        </span>
-                      </Td>
-                    </tr>
-                  );
-                })}
+                        <Td>
+                          <span
+                            style={{
+                              fontWeight: 750,
+                              color: "#172033",
+                            }}
+                          >
+                            {load.revenue}
+                          </span>
+                        </Td>
+                      </tr>
+                    );
+                  })
+                )}
               </tbody>
             </table>
           </div>
@@ -647,11 +881,7 @@ export default function OperationsPage() {
               </button>
             </div>
 
-            <div
-              style={{
-                padding: 24,
-              }}
-            >
+            <div style={{ padding: 24 }}>
               <div
                 style={{
                   display: "grid",
@@ -671,7 +901,9 @@ export default function OperationsPage() {
                   value={brokerName}
                   onChange={setBrokerName}
                   placeholder={
-                    language === "ES" ? "Nombre del broker" : "Broker name"
+                    language === "ES"
+                      ? "Nombre del broker"
+                      : "Broker name"
                   }
                 />
 
@@ -686,7 +918,9 @@ export default function OperationsPage() {
 
                 <Field
                   label={
-                    language === "ES" ? "Estado de Origen" : "Origin State"
+                    language === "ES"
+                      ? "Estado de Origen"
+                      : "Origin State"
                   }
                   value={originState}
                   onChange={setOriginState}
@@ -797,7 +1031,7 @@ function StatCard({
   value,
 }: {
   label: string;
-  value: string;
+  value: string | number;
 }) {
   return (
     <div
@@ -834,7 +1068,7 @@ function StatCard({
   );
 }
 
-function Th({ children }: { children: React.ReactNode }) {
+function Th({ children }: { children: ReactNode }) {
   return (
     <th
       style={{
@@ -851,9 +1085,16 @@ function Th({ children }: { children: React.ReactNode }) {
   );
 }
 
-function Td({ children }: { children: React.ReactNode }) {
+function Td({
+  children,
+  colSpan,
+}: {
+  children: ReactNode;
+  colSpan?: number;
+}) {
   return (
     <td
+      colSpan={colSpan}
       style={{
         padding: "17px 18px",
         fontSize: 13,
@@ -914,4 +1155,3 @@ function Field({
     </div>
   );
 }
-

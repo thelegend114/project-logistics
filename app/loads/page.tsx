@@ -63,6 +63,7 @@ type Load = {
   created_at: string | null;
   pickup_count?: number;
   delivery_count?: number;
+  stops?: LoadStop[];
 };
 
 type StopType = "pickup" | "delivery";
@@ -81,6 +82,23 @@ type LoadStop = {
   scheduled_date: string;
   scheduled_time: string;
 };
+
+function sortStopsByOperationalSequence<T extends {
+  stop_type: string;
+  scheduled_date: string | null | undefined;
+  scheduled_time: string | null | undefined;
+}>(items: T[]): T[] {
+  return [...items].sort((a, b) => {
+    const groupA = a.stop_type.trim().toLowerCase() === "pickup" ? 0 : 1;
+    const groupB = b.stop_type.trim().toLowerCase() === "pickup" ? 0 : 1;
+
+    if (groupA !== groupB) return groupA - groupB;
+
+    const dateTimeA = `${a.scheduled_date || "9999-12-31"}T${a.scheduled_time || "23:59"}`;
+    const dateTimeB = `${b.scheduled_date || "9999-12-31"}T${b.scheduled_time || "23:59"}`;
+    return dateTimeA.localeCompare(dateTimeB);
+  });
+}
 
 const statusStyles: Record<
   string,
@@ -510,7 +528,8 @@ async function loadData() {
 
     supabase
       .from("load_stops")
-      .select("load_id, stop_type"),
+      .select("id, load_id, stop_order, stop_type, address, city, state, zip_code, pickup_number, latitude, longitude, scheduled_date, scheduled_time")
+      .order("stop_order", { ascending: true }),
 
     supabase
       .from("companies")
@@ -546,38 +565,48 @@ async function loadData() {
       string,
       { pickups: number; deliveries: number }
     >();
+    const stopsByLoad = new Map<string, LoadStop[]>();
 
     for (const load of loadsResult.data ?? []) {
-      stopCounts.set(load.id, {
-        pickups: 0,
-        deliveries: 0,
-      });
+      stopCounts.set(load.id, { pickups: 0, deliveries: 0 });
+      stopsByLoad.set(load.id, []);
     }
 
-    for (const stop of stopsResult.data ?? []) {
-      const counts = stopCounts.get(stop.load_id);
-
+    for (const row of stopsResult.data ?? []) {
+      const counts = stopCounts.get(row.load_id);
       if (!counts) continue;
 
-      const stopType = String(stop.stop_type ?? "")
-        .trim()
-        .toLowerCase();
+      const stopType = String(row.stop_type ?? "").trim().toLowerCase();
+      if (stopType === "pickup") counts.pickups += 1;
+      else if (stopType === "delivery") counts.deliveries += 1;
 
-      if (stopType === "pickup") {
-        counts.pickups += 1;
-      } else if (stopType === "delivery") {
-        counts.deliveries += 1;
+      const loadStops = stopsByLoad.get(row.load_id);
+      if (loadStops) {
+        loadStops.push({
+          stop_number: String(row.id),
+          stop_order: Number(row.stop_order) || 0,
+          stop_type: stopType === "delivery" ? "delivery" : "pickup",
+          address: row.address ?? "",
+          city: row.city ?? "",
+          state: row.state ?? "",
+          zip_code: row.zip_code ?? "",
+          pickup_number: row.pickup_number ?? "",
+          latitude: row.latitude == null ? null : Number(row.latitude),
+          longitude: row.longitude == null ? null : Number(row.longitude),
+          scheduled_date: row.scheduled_date ?? "",
+          scheduled_time: row.scheduled_time ?? "",
+        });
       }
     }
 
     setLoads(
       (loadsResult.data ?? []).map((load) => {
         const counts = stopCounts.get(load.id);
-
         return {
           ...load,
           pickup_count: counts?.pickups ?? 0,
           delivery_count: counts?.deliveries ?? 0,
+          stops: sortStopsByOperationalSequence(stopsByLoad.get(load.id) ?? []),
         };
       }) as Load[]
     );
@@ -679,6 +708,13 @@ async function loadData() {
           load.destination_state,
           load.pickup_address,
           load.delivery_address,
+          ...(load.stops ?? []).flatMap((stop) => [
+            stop.pickup_number,
+            stop.address,
+            stop.city,
+            stop.state,
+            stop.zip_code,
+          ]),
           driverName,
           truckName,
           trailerName,
@@ -877,8 +913,9 @@ async function loadData() {
       return;
     }
 
-    const firstStop = stops[0];
-    const lastStop = stops[stops.length - 1];
+    const orderedInputStops = sortStopsByOperationalSequence(stops);
+    const firstStop = orderedInputStops[0];
+    const lastStop = orderedInputStops[orderedInputStops.length - 1];
 
     const invalidStop = stops.some(
       (stop) =>
@@ -962,26 +999,6 @@ for (const stop of stops) {
     return;
   }
 }
-
-const orderedStops = [...geocodedStops].sort((a, b) => {
-  const typeA = a.stop_type.trim().toLowerCase();
-  const typeB = b.stop_type.trim().toLowerCase();
-
-  const groupA = typeA === "pickup" ? 0 : 1;
-  const groupB = typeB === "pickup" ? 0 : 1;
-
-  if (groupA !== groupB) {
-    return groupA - groupB;
-  }
-
-  const dateA =
-    `${a.scheduled_date || "9999-12-31"}T${a.scheduled_time || "23:59"}`;
-
-  const dateB =
-    `${b.scheduled_date || "9999-12-31"}T${b.scheduled_time || "23:59"}`;
-
-  return dateA.localeCompare(dateB);
-});
 
       const loadPayload = {
             company_id: form.company_id || null,
@@ -1094,12 +1111,7 @@ for (let index = 0; index < retainedStops.length; index++) {
   }
 }
 
-        const orderedStops = [...geocodedStops].sort((a, b) => {
-  const dateTimeA = `${a.scheduled_date || "9999-12-31"}T${a.scheduled_time || "23:59"}`;
-  const dateTimeB = `${b.scheduled_date || "9999-12-31"}T${b.scheduled_time || "23:59"}`;
-
-  return dateTimeA.localeCompare(dateTimeB);
-});
+        const orderedStops = sortStopsByOperationalSequence(geocodedStops);
 
 for (let index = 0; index < orderedStops.length; index++) {
   const stop = orderedStops[index];
@@ -1153,24 +1165,7 @@ if (createError || !createdLoad) {
   return;
 }
 
-const orderedStopsForNewLoad = [...geocodedStops].sort((a, b) => {
-  const typeA = a.stop_type.trim().toLowerCase();
-  const typeB = b.stop_type.trim().toLowerCase();
-
-  const groupA = typeA === "pickup" ? 0 : 1;
-  const groupB = typeB === "pickup" ? 0 : 1;
-
-  if (groupA !== groupB) {
-    return groupA - groupB;
-  }
-
-  const dateTimeA =
-    `${a.scheduled_date || "9999-12-31"}T${a.scheduled_time || "23:59"}`;
-  const dateTimeB =
-    `${b.scheduled_date || "9999-12-31"}T${b.scheduled_time || "23:59"}`;
-
-  return dateTimeA.localeCompare(dateTimeB);
-});
+const orderedStopsForNewLoad = sortStopsByOperationalSequence(geocodedStops);
 
 const loadStops = orderedStopsForNewLoad.map((stop, index) => ({
   load_id: createdLoad.id,
@@ -2051,7 +2046,7 @@ async function releaseLoadToDispatch(load: Load) {
       >
         <td style={cellStyle}>
           <div style={{ fontWeight: 800, color: "#0f172a" }}>
-            {`(${load.pickup_count ?? 0}-${load.delivery_count ?? 0})`}
+            {`${load.pickup_count ?? 0}-${load.delivery_count ?? 0}`}
           </div>
           <div
             style={{
@@ -2081,15 +2076,67 @@ async function releaseLoadToDispatch(load: Load) {
           </div>
         </td>
 
-        <td style={cellStyle}>
-          <div style={{ fontWeight: 700, ...innerTextStyle }}>
-            {load.origin_city || "—"}
-            {load.origin_state ? `, ${load.origin_state}` : ""}
-          </div>
-          <div style={{ margin: "3px 0", color: "#94a3b8" }}>↓</div>
-          <div style={{ fontWeight: 700, ...innerTextStyle }}>
-            {load.destination_city || "—"}
-            {load.destination_state ? `, ${load.destination_state}` : ""}
+        <td style={{ ...cellStyle, minWidth: 260, maxWidth: 420, whiteSpace: "normal" }}>
+          <div
+            title={(load.stops ?? []).map((stop) => {
+              const rawPickupNumber = stop.pickup_number?.trim() ?? "";
+              const pickupLabel = rawPickupNumber
+                ? (/^PU/i.test(rawPickupNumber) ? rawPickupNumber.toUpperCase() : `PU${rawPickupNumber}`)
+                : (isES ? "Recogida" : "Pickup");
+              const label = stop.stop_type === "pickup"
+                ? pickupLabel
+                : (isES ? "Entrega" : "Delivery");
+              return `${label}: ${[stop.address, stop.city, stop.state, stop.zip_code].filter(Boolean).join(", ")}`;
+            }).join("\n")}
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "stretch",
+              gap: 5,
+              maxWidth: 420,
+              whiteSpace: "normal",
+              fontSize: 11,
+            }}
+          >
+            {(load.stops?.length ?? 0) > 0 ? (
+              load.stops!.map((stop) => {
+                const rawPickupNumber = stop.pickup_number?.trim() ?? "";
+                const pickupLabel = rawPickupNumber
+                  ? (/^PU/i.test(rawPickupNumber) ? rawPickupNumber.toUpperCase() : `PU${rawPickupNumber}`)
+                  : (isES ? "Recogida" : "Pickup");
+                const label = stop.stop_type === "pickup"
+                  ? pickupLabel
+                  : (isES ? "Entrega" : "Delivery");
+                const location = [stop.address, stop.city, stop.state, stop.zip_code]
+                  .filter(Boolean)
+                  .join(", ");
+                return (
+                  <div
+                    key={stop.stop_number}
+                    style={{
+                      display: "flex",
+                      alignItems: "flex-start",
+                      gap: 6,
+                      minWidth: 0,
+                      lineHeight: 1.35,
+                    }}
+                  >
+                    <span style={{ color: stop.stop_type === "pickup" ? "#1d4ed8" : "#047857", fontWeight: 800, flexShrink: 0 }}>
+                      {label}
+                    </span>
+                    <span style={{ color: "#334155", overflowWrap: "anywhere", minWidth: 0 }}>
+                      {location || "—"}
+                    </span>
+                  </div>
+                );
+              })
+            ) : (
+              <span style={{ fontWeight: 700, ...innerTextStyle }}>
+                {[load.pickup_address, load.origin_city, load.origin_state].filter(Boolean).join(", ") || "—"}
+                <span style={{ color: "#94a3b8", margin: "0 7px" }}>→</span>
+                {[load.delivery_address, load.destination_city, load.destination_state].filter(Boolean).join(", ") || "—"}
+              </span>
+            )}
           </div>
         </td>
 
@@ -3009,7 +3056,7 @@ async function releaseLoadToDispatch(load: Load) {
       cursor: saving ? "not-allowed" : "pointer",
     }}
   >
-    + Add Pickup
+    {isES ? "+ Agregar recogida" : "+ Add Pickup"}
   </button>
 
   <button
@@ -3028,7 +3075,7 @@ async function releaseLoadToDispatch(load: Load) {
       cursor: saving ? "not-allowed" : "pointer",
     }}
   >
-    + Add Delivery
+    {isES ? "+ Agregar entrega" : "+ Add Delivery"}
   </button>
 </div>
                   </div>

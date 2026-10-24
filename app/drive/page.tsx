@@ -65,10 +65,11 @@ type HOS = {
   location: string | null;
 };
 
-// Renombrado: "Document" tapaba el tipo global del DOM.
+
 type LoadDocument = {
   id: string;
   load_id: string | null;
+  load_stop_id: string | null;
   driver_id: string | null;
   document_type: string | null;
   file_name: string | null;
@@ -76,6 +77,7 @@ type LoadDocument = {
   status: string | null;
   uploaded_at: string | null;
 };
+
 
 type GPSLocation = {
   lat: number;
@@ -98,14 +100,17 @@ type SequenceStop = {
   status: string;
 };
 
+
 type DocumentStop = {
   id: string;
   stop_order: number;
   stop_type: string;
+  pickup_number: string | null;
   address: string | null;
   city: string | null;
   state: string | null;
 };
+
 
 type DriverWorkStatus = "off_duty" | "hold" | "available" | "on_duty" | "driving";
 
@@ -472,10 +477,13 @@ export default function DriverPage() {
   const [gpsClockNow, setGpsClockNow] = useState(Date.now());
 
   const [navigationStop, setNavigationStop] = useState<SequenceStop | null>(null);
+  const [navigationFullscreen, setNavigationFullscreen] = useState(false);
+  const [navigationDetailsOpen, setNavigationDetailsOpen] = useState(false);
+  const navigationTouchStartX = useRef<number | null>(null);
 
   const [documentModalOpen, setDocumentModalOpen] = useState(false);
   const [documentType, setDocumentType] = useState("POD");
-
+  const [loadPickupLabels, setLoadPickupLabels] = useState<Record<string, string[]>>({});
   const [documentStops, setDocumentStops] = useState<DocumentStop[]>([]);
   const [selectedDocumentStopId, setSelectedDocumentStopId] = useState("");
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -486,7 +494,6 @@ export default function DriverPage() {
 
   const gpsWatchId = useRef<number | null>(null);
   const gpsInsertInProgress = useRef(false);
-  const sequenceProcessing = useRef(false);
   const messageTimer = useRef<number | null>(null);
   const realtimeRetryCount = useRef(0);
   const startGpsRef = useRef<() => void>(() => {});
@@ -569,20 +576,27 @@ export default function DriverPage() {
     setHosEvents((data || []) as HOS[]);
   }
 
-  async function loadDocuments(loadId: string) {
-    const { data, error } = await supabase
-      .from("documents")
-      .select("id, load_id, driver_id, document_type, file_name, storage_path, status, uploaded_at")
-      .eq("load_id", loadId)
-      .order("uploaded_at", { ascending: false });
+  
+async function loadDocuments(loadId: string) {
+  const { data, error } = await supabase
+    .from("documents")
+    .select(
+      "id, load_id, load_stop_id, driver_id, document_type, file_name, storage_path, status, uploaded_at"
+    )
+    .eq("load_id", loadId)
+    .order("uploaded_at", { ascending: false });
 
-    if (error) {
-      showMessage(`Documents error: ${error.message}`);
-      return;
-    }
-
-    setDocuments((data || []) as LoadDocument[]);
+  if (error) {
+    showMessage(
+      isES
+        ? `Error al cargar documentos: ${error.message}`
+        : `Documents error: ${error.message}`
+    );
+    return;
   }
+
+  setDocuments((data || []) as LoadDocument[]);
+}
 
   async function loadPreviousLoadDocuments(loadId: string) {
     const { data, error } = await supabase
@@ -1386,10 +1400,15 @@ console.log(
     }
   }, [selectedLoadId]);
 
-  // NUEVO: cargar las paradas de la carga cuando se abre el modal de documentos.
-  // Sin esto el selector de parada del POD no tenía datos ni existía en pantalla.
+  
+  
+  
+  // Cargar las paradas de la carga seleccionada en Documents.
+  // Load stops for the load selected in Documents.
   useEffect(() => {
-    if (!documentModalOpen || !selectedLoadId) {
+    const loadId = selectedLoad?.id;
+
+    if (!loadId) {
       setDocumentStops([]);
       return;
     }
@@ -1399,8 +1418,10 @@ console.log(
     void (async () => {
       const { data, error } = await supabase
         .from("load_stops")
-        .select("id, stop_order, stop_type, address, city, state")
-        .eq("load_id", selectedLoadId)
+        .select(
+          "id, stop_order, stop_type, pickup_number, address, city, state"
+        )
+        .eq("load_id", loadId)
         .order("stop_order", { ascending: true });
 
       if (cancelled) return;
@@ -1416,6 +1437,10 @@ console.log(
           id: String(stop.id),
           stop_order: Number(stop.stop_order),
           stop_type: String(stop.stop_type ?? "").trim().toLowerCase(),
+          pickup_number:
+            stop.pickup_number == null
+              ? null
+              : String(stop.pickup_number),
           address: stop.address ?? null,
           city: stop.city ?? null,
           state: stop.state ?? null,
@@ -1426,24 +1451,108 @@ console.log(
     return () => {
       cancelled = true;
     };
-  }, [documentModalOpen, selectedLoadId]);
+  }, [selectedLoad?.id]);
 
-  const deliveryStops = useMemo(
+  const pickupStops = useMemo(
     () =>
-      documentStops.filter((stop) => ["delivery", "dropoff", "drop_off"].includes(stop.stop_type)),
+      documentStops.filter((stop) =>
+        ["pickup", "pick_up", "pick-up"].includes(stop.stop_type)
+      ),
     [documentStops]
   );
 
-  // Si el POD solo tiene una parada de entrega posible, se selecciona sola.
-  useEffect(() => {
-    if (!documentModalOpen) return;
-    if (String(documentType).trim().toUpperCase() !== "POD") return;
-    if (selectedDocumentStopId) return;
+ const deliveryStops = useMemo(
+  () =>
+    documentStops.filter((stop) =>
+      ["delivery", "dropoff", "drop_off"].includes(stop.stop_type)
+    ),
+  [documentStops]
+);
 
-    if (deliveryStops.length === 1) {
-      setSelectedDocumentStopId(deliveryStops[0].id);
+// Auto-select a single eligible stop for POD or BOL.
+// Selecciona automáticamente una única parada elegible para POD o BOL.
+useEffect(() => {
+  if (!documentModalOpen) return;
+  if (selectedDocumentStopId) return;
+
+  const normalizedType = String(documentType).trim().toUpperCase();
+
+  if (normalizedType === "POD" && deliveryStops.length === 1) {
+    setSelectedDocumentStopId(deliveryStops[0].id);
+  }
+
+  if (normalizedType === "BOL" && pickupStops.length === 1) {
+    setSelectedDocumentStopId(pickupStops[0].id);
+  }
+}, [
+  documentModalOpen,
+  documentType,
+  selectedDocumentStopId,
+  pickupStops,
+  deliveryStops,
+]);
+
+// Cargar los números PU para las cargas de Documents.
+// Load PU numbers for the Documents loads.
+useEffect(() => {
+  const loadIds = selectableLoads.map((load) => String(load.id));
+
+  if (loadIds.length === 0) {
+    setLoadPickupLabels({});
+    return;
+  }
+
+  let cancelled = false;
+
+  void (async () => {
+    const { data, error } = await supabase
+      .from("load_stops")
+      .select("load_id, stop_order, stop_type, pickup_number")
+      .in("load_id", loadIds)
+      .order("stop_order", { ascending: true });
+
+    if (cancelled) return;
+
+    if (error) {
+      console.error("DOCUMENT PICKUP LABELS ERROR:", error);
+      setLoadPickupLabels({});
+      return;
     }
-  }, [documentModalOpen, documentType, deliveryStops, selectedDocumentStopId]);
+
+    const labels: Record<string, string[]> = {};
+
+    for (const stop of data || []) {
+      const stopType = String(stop.stop_type ?? "")
+        .trim()
+        .toLowerCase();
+
+      const pickupNumber = String(stop.pickup_number ?? "").trim();
+
+      if (
+        !["pickup", "pick_up", "pick-up"].includes(stopType) ||
+        !pickupNumber
+      ) {
+        continue;
+      }
+
+      const loadId = String(stop.load_id);
+
+      if (!labels[loadId]) {
+        labels[loadId] = [];
+      }
+
+      if (!labels[loadId].includes(pickupNumber)) {
+        labels[loadId].push(pickupNumber);
+      }
+    }
+
+    setLoadPickupLabels(labels);
+  })();
+
+  return () => {
+    cancelled = true;
+  };
+}, [selectableLoads, supabase]);
 
   async function loadInitialData() {
     setLoading(true);
@@ -1885,8 +1994,10 @@ async function startDrive(): Promise<boolean> {
 
   setDriverWorkStatus("driving");
 
-  // Mantener la función de rastreo existente sin cambios.
+  // El mapa existente permanece montado: entrar en pantalla completa no reinicia el GPS.
   startGpsTracking();
+  setNavigationDetailsOpen(false);
+  setNavigationFullscreen(true);
 
   showMessage(
     isES
@@ -1897,196 +2008,6 @@ async function startDrive(): Promise<boolean> {
   return true;
 }
 
-
-  async function processSequenceArrival(arrivedStop: {
-    id: string;
-    stop_order: number;
-    stop_type: string;
-  }): Promise<boolean> {
-    if (sequenceProcessing.current) {
-      console.warn("SEQUENCE ENGINE - ARRIVAL SKIPPED: already processing");
-      return false;
-    }
-
-    sequenceProcessing.current = true;
-
-    try {
-      if (!selectedDriverId || !selectedLoadId || !arrivedStop?.id) {
-        console.warn("SEQUENCE ENGINE - ARRIVAL SKIPPED: missing ids", {
-          selectedDriverId,
-          selectedLoadId,
-          arrivedStopId: arrivedStop?.id ?? null,
-        });
-        return false;
-      }
-
-      const driverId = selectedDriverId;
-      const loadId = selectedLoadId;
-
-      const { data: loadRecord, error: loadCheckError } = await supabase
-        .from("loads")
-        .select("id, driver_id, status")
-        .eq("id", loadId)
-        .eq("driver_id", driverId)
-        .neq("status", "cancelled")
-        .maybeSingle();
-
-      if (loadCheckError || !loadRecord) {
-        console.error("SEQUENCE ENGINE - LOAD CHECK ERROR:", loadCheckError);
-        return false;
-      }
-
-      const currentStop = await getCurrentSequenceStop(loadId);
-
-      if (!currentStop || currentStop.id !== arrivedStop.id) {
-        console.warn("SEQUENCE ENGINE - STALE ARRIVAL IGNORED:", {
-          arrivedStopId: arrivedStop.id,
-          currentStopId: currentStop?.id ?? null,
-        });
-        return false;
-      }
-
-      const stopType = String(currentStop.stop_type ?? "")
-        .trim()
-        .toLowerCase();
-
-      if (stopType !== "pickup" && stopType !== "delivery") {
-        console.error("SEQUENCE ENGINE - UNKNOWN STOP TYPE:", currentStop.stop_type);
-        return false;
-      }
-
-      const nextStopStatus = stopType === "pickup" ? "at_pickup" : "at_delivery";
-
-      // CORREGIDO: antes solo aceptaba "pending". Una parada "in_progress"
-      // (como la parada 1 de tu carga) se tomaba como ya procesada y la llegada
-      // nunca se registraba. Ahora ambos estados pueden recibir la llegada.
-      const arrivableStatuses = ["pending", "in_progress"];
-
-      // No volver a procesar una parada que ya cambió de estado (at_pickup, completed...).
-      if (!arrivableStatuses.includes(currentStop.status)) {
-        console.log("SEQUENCE ENGINE - STOP ALREADY PROCESSED:", {
-          stopId: currentStop.id,
-          status: currentStop.status,
-        });
-        return false;
-      }
-
-      // Registrar la llegada a la parada exacta confirmada por el mapa.
-      const { data: updatedStop, error: stopError } = await supabase
-        .from("load_stops")
-        .update({ status: nextStopStatus })
-        .eq("id", currentStop.id)
-        .eq("load_id", loadId)
-        .eq("status", currentStop.status)
-        .select("id, status")
-        .maybeSingle();
-
-      if (stopError || !updatedStop) {
-        console.error("SEQUENCE ENGINE - STOP UPDATE ERROR:", stopError);
-        return false;
-      }
-
-      // Sincronizar el estado de la carga.
-      const { data: updatedLoad, error: loadError } = await supabase
-        .from("loads")
-        .update({ status: nextStopStatus })
-        .eq("id", loadId)
-        .eq("driver_id", driverId)
-        .select(LOAD_SELECT)
-        .maybeSingle();
-
-      if (loadError || !updatedLoad) {
-        console.error("SEQUENCE ENGINE - LOAD UPDATE ERROR:", loadError);
-
-        await supabase
-          .from("load_stops")
-          .update({ status: currentStop.status })
-          .eq("id", currentStop.id)
-          .eq("status", nextStopStatus);
-
-        return false;
-      }
-
-      const { data: updatedDriver, error: driverError } = await supabase
-        .from("drivers")
-        .update({ status: "on_duty" })
-        .eq("id", driverId)
-        .select("id, status")
-        .maybeSingle();
-
-      if (driverError || !updatedDriver) {
-        console.error("SEQUENCE ENGINE - DRIVER UPDATE ERROR:", driverError);
-
-        await supabase
-          .from("loads")
-          .update({ status: loadRecord.status })
-          .eq("id", loadId)
-          .eq("driver_id", driverId)
-          .eq("status", nextStopStatus);
-
-        await supabase
-          .from("load_stops")
-          .update({ status: currentStop.status })
-          .eq("id", currentStop.id)
-          .eq("status", nextStopStatus);
-
-        return false;
-      }
-
-      const hosSaved = await setHosStatus("On Duty");
-
-      if (!hosSaved) {
-        console.error("SEQUENCE ENGINE - HOS ON DUTY EVENT FAILED");
-
-        await supabase
-          .from("drivers")
-          .update({ status: "driving" })
-          .eq("id", driverId)
-          .eq("status", "on_duty");
-
-        await supabase
-          .from("loads")
-          .update({ status: loadRecord.status })
-          .eq("id", loadId)
-          .eq("driver_id", driverId)
-          .eq("status", nextStopStatus);
-
-        await supabase
-          .from("load_stops")
-          .update({ status: currentStop.status })
-          .eq("id", currentStop.id)
-          .eq("status", nextStopStatus);
-
-        setDriverWorkStatus("driving");
-        return false;
-      }
-
-      setDrivers((current) =>
-        current.map((driver) =>
-          driver.id === driverId ? { ...driver, status: "on_duty" } : driver
-        )
-      );
-
-      setDriverWorkStatus("on_duty");
-
-      setLoads((current) =>
-        current.map((load) => (load.id === updatedLoad.id ? (updatedLoad as Load) : load))
-      );
-
-      showMessage(
-        isES
-          ? `Llegada confirmada: ${stopType === "pickup" ? "Pickup" : "Delivery"} #${currentStop.stop_order}.`
-          : `Arrival confirmed: ${stopType === "pickup" ? "Pickup" : "Delivery"} #${currentStop.stop_order}.`
-      );
-
-      return true;
-    } catch (error) {
-      console.error("SEQUENCE ENGINE - UNEXPECTED ERROR:", error);
-      return false;
-    } finally {
-      sequenceProcessing.current = false;
-    }
-  }
 
    async function updateLoadStatus(status: string): Promise<boolean> {
   if (!selectedLoad) {
@@ -2469,17 +2390,8 @@ async function startDrive(): Promise<boolean> {
         return false;
       }
 
-      if (currentLoadStatus === "in_transit") {
-        showMessage(
-          isES
-            ? "El viaje ya está en curso. No se puede reiniciar desde este botón."
-            : "The trip is already in progress. It cannot be restarted from this button."
-        );
-        return false;
-      }
-
       if (
-        !["assigned", "pending", "in_progress", "at_pickup"].includes(
+        !["assigned", "pending", "in_progress", "at_pickup", "in_transit"].includes(
           currentLoadStatus
         )
       ) {
@@ -3224,6 +3136,8 @@ async function startDrive(): Promise<boolean> {
 
     // Clear the active navigation destination when GPS is stopped.
     setNavigationStop(null);
+    setNavigationFullscreen(false);
+    setNavigationDetailsOpen(false);
   }
 
   function closeDocumentModal() {
@@ -3272,48 +3186,66 @@ async function startDrive(): Promise<boolean> {
 
     let loadStopId: string | null = null;
 
-    if (normalizedDocumentType === "POD") {
-      if (!selectedDocumentStopId) {
-        showMessage(
-          isES
-            ? "Seleccione la parada de entrega para este POD."
-            : "Select the delivery stop for this POD."
-        );
-        return;
-      }
+    
+if (
+  normalizedDocumentType === "POD" ||
+  normalizedDocumentType === "BOL"
+) {
+  const isPod = normalizedDocumentType === "POD";
+  const expectedStopTypes = isPod
+    ? ["delivery", "dropoff", "drop_off"]
+    : ["pickup", "pick_up", "pick-up"];
 
-      const { data: stop, error: stopError } = await supabase
-        .from("load_stops")
-        .select("id, load_id, stop_type")
-        .eq("id", selectedDocumentStopId)
-        .eq("load_id", selectedLoad.id)
-        .maybeSingle();
+  if (!selectedDocumentStopId) {
+    showMessage(
+      isES
+        ? isPod
+          ? "Seleccione la parada de entrega para este POD."
+          : "Seleccione la parada de recogida para este BOL."
+        : isPod
+          ? "Select the delivery stop for this POD."
+          : "Select the pickup stop for this BOL."
+    );
+    return;
+  }
 
-      if (stopError || !stop) {
-        console.error("POD STOP VALIDATION ERROR:", stopError);
-        showMessage(
-          isES
-            ? "No se pudo verificar la parada seleccionada."
-            : "Could not verify the selected stop."
-        );
-        return;
-      }
+  const { data: stop, error: stopError } = await supabase
+    .from("load_stops")
+    .select("id, load_id, stop_type")
+    .eq("id", selectedDocumentStopId)
+    .eq("load_id", selectedLoad.id)
+    .maybeSingle();
 
-      const stopType = String(stop.stop_type ?? "")
-        .trim()
-        .toLowerCase();
+  if (stopError || !stop) {
+    console.error("DOCUMENT STOP VALIDATION ERROR:", stopError);
+    showMessage(
+      isES
+        ? "No se pudo verificar la parada seleccionada."
+        : "Could not verify the selected stop."
+    );
+    return;
+  }
 
-      if (!["delivery", "dropoff", "drop_off"].includes(stopType)) {
-        showMessage(
-          isES
-            ? "El POD debe estar asociado a una parada de entrega."
-            : "A POD must be linked to a delivery stop."
-        );
-        return;
-      }
+  const stopType = String(stop.stop_type ?? "")
+    .trim()
+    .toLowerCase();
 
-      loadStopId = stop.id;
-    }
+  if (!expectedStopTypes.includes(stopType)) {
+    showMessage(
+      isES
+        ? isPod
+          ? "El POD debe estar asociado a una parada de entrega."
+          : "El BOL debe estar asociado a una parada de recogida."
+        : isPod
+          ? "A POD must be linked to a delivery stop."
+          : "A BOL must be linked to a pickup stop."
+    );
+    return;
+  }
+
+  loadStopId = stop.id;
+}
+
 
     setUploadingDocument(true);
 
@@ -3781,7 +3713,11 @@ async function startDrive(): Promise<boolean> {
                           : "border-slate-200 bg-white hover:bg-slate-50"
                       }`}
                     >
-                      <p className="font-semibold text-slate-900">{load.load_number || load.id}</p>
+                     <p className="font-semibold text-slate-900">
+  {loadPickupLabels[String(load.id)]?.length
+    ? loadPickupLabels[String(load.id)].join(" / ")
+    : load.load_number || load.id}
+</p>
 
                       <p className="mt-1 text-sm text-slate-600">
                         {load.origin_city || "—"} → {load.destination_city || "—"}
@@ -3818,11 +3754,17 @@ async function startDrive(): Promise<boolean> {
               >
                 <option value="">{text.selectLoad}</option>
 
-                {selectableLoads.map((load) => (
-                  <option key={load.id} value={load.id}>
-                    {load.load_number || load.id}
-                  </option>
-                ))}
+             {selectableLoads.map((load) => {
+  const pickupLabels = loadPickupLabels[String(load.id)];
+
+  return (
+    <option key={load.id} value={load.id}>
+      {pickupLabels?.length
+        ? pickupLabels.join(" / ")
+        : load.load_number || load.id}
+    </option>
+  );
+})}
               </select>
             )}
           </div>
@@ -3935,7 +3877,6 @@ value={
   label="START TRIP"
   active={normalizeLoadStatus(selectedLoad.status) === "in_transit"}
   disabled={
-    normalizeLoadStatus(selectedLoad.status) === "in_transit" ||
     !navigationStop ||
     navigationStop.stop_type !== "delivery"
   }
@@ -4068,31 +4009,146 @@ value={
             )}
           </div>
 
-          <div className="mt-5 overflow-hidden rounded-xl border border-slate-200 bg-white">
-            <div className="border-b border-slate-200 px-4 py-3">
-              <h3 className="text-sm font-bold text-slate-900">
-                {isES ? "Mapa en vivo del camión" : "Live Truck Map"}
-              </h3>
-              <p className="mt-1 text-xs text-slate-500">
-                {lastLocation
-                  ? isES
-                    ? "Mostrando la última ubicación GPS recibida."
-                    : "Showing the latest GPS location received."
-                  : isES
-                    ? "Esperando la primera ubicación GPS."
-                    : "Waiting for the first GPS location."}
-              </p>
+          <div
+            className={
+              navigationFullscreen
+                ? "fixed inset-0 z-[9999] overflow-hidden bg-slate-950"
+                : "mt-5 overflow-hidden rounded-xl border border-slate-200 bg-white"
+            }
+            onTouchStart={(event) => {
+              const touch = event.touches[0];
+              // Solo iniciar el gesto desde el borde derecho para no bloquear el paneo del mapa.
+              navigationTouchStartX.current =
+                navigationFullscreen && touch.clientX >= window.innerWidth - 36
+                  ? touch.clientX
+                  : null;
+            }}
+            onTouchEnd={(event) => {
+              const startX = navigationTouchStartX.current;
+              navigationTouchStartX.current = null;
+              if (startX === null || !navigationFullscreen) return;
+              const deltaX = event.changedTouches[0].clientX - startX;
+              if (deltaX < -65) setNavigationDetailsOpen(true);
+            }}
+          >
+            <div className={navigationFullscreen ? "absolute left-0 right-0 top-0 z-[1100] flex items-center justify-between gap-3 bg-slate-950/90 px-3 py-2 text-white" : "border-b border-slate-200 px-4 py-3"}>
+              <div className="min-w-0">
+                <h3 className={navigationFullscreen ? "truncate text-sm font-bold text-white" : "text-sm font-bold text-slate-900"}>
+                  {navigationFullscreen
+                    ? (isES ? "Navegación activa" : "Active navigation")
+                    : (isES ? "Mapa en vivo del camión" : "Live Truck Map")}
+                </h3>
+                {!navigationFullscreen && (
+                  <p className="mt-1 text-xs text-slate-500">
+                    {lastLocation
+                      ? isES
+                        ? "Mostrando la última ubicación GPS recibida."
+                        : "Showing the latest GPS location received."
+                      : isES
+                        ? "Esperando la primera ubicación GPS."
+                        : "Waiting for the first GPS location."}
+                  </p>
+                )}
+              </div>
+              {navigationFullscreen && (
+                <div className="flex shrink-0 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setNavigationDetailsOpen((open) => !open)}
+                    className="rounded-lg border border-white/30 px-3 py-2 text-xs font-bold text-white"
+                  >
+                    {navigationDetailsOpen
+                      ? (isES ? "Ocultar detalles" : "Hide details")
+                      : (isES ? "Detalles" : "Details")}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setNavigationFullscreen(false)}
+                    className="rounded-lg bg-white px-3 py-2 text-xs font-bold text-slate-900"
+                  >
+                    {isES ? "Volver" : "Back"}
+                  </button>
+                </div>
+              )}
             </div>
 
-            {/* GPS solo rastrea la ubicación. Las paradas cambian mediante botones manuales. */}
-<TruckMap
-  lastLocation={lastLocation}
-  destination={navigationStop}
-  isES={isES}
-  onArrival={() => {
-    console.log("GPS ARRIVAL IGNORED: operational status changes are manual.");
-  }}
-/>
+            {/* Una sola instancia del mapa; cambiar de panel no reinicia GPS ni la ruta. */}
+            <div className={navigationFullscreen ? "absolute inset-x-0 bottom-0 top-12" : ""}>
+              <TruckMap
+                lastLocation={lastLocation}
+                destination={navigationStop}
+                isES={isES}
+                fullScreen={navigationFullscreen}
+                onArrival={(stop) => {
+                  // La proximidad GPS solo informa; los estados operativos siguen siendo manuales.
+                  console.log("GPS ARRIVAL DETECTED — MANUAL ACTION REQUIRED:", {
+                    stopId: stop.id,
+                    stopOrder: stop.stop_order,
+                    stopType: stop.stop_type,
+                  });
+                }}
+              />
+            </div>
+
+            {navigationFullscreen && navigationDetailsOpen && (
+              <div
+                className="absolute inset-y-0 right-0 z-[1200] w-[88vw] max-w-[360px] overflow-y-auto border-l border-slate-200 bg-white p-4 pt-16 shadow-2xl"
+                onTouchStart={(event) => {
+                  event.stopPropagation();
+                  navigationTouchStartX.current = event.touches[0].clientX;
+                }}
+                onTouchEnd={(event) => {
+                  event.stopPropagation();
+                  const startX = navigationTouchStartX.current;
+                  navigationTouchStartX.current = null;
+                  if (startX === null) return;
+                  if (event.changedTouches[0].clientX - startX > 65) {
+                    setNavigationDetailsOpen(false);
+                  }
+                }}
+              >
+                <div className="mb-4 flex items-center justify-between gap-2">
+                  <h3 className="text-base font-extrabold text-slate-900">
+                    {isES ? "Detalles de la carga" : "Load details"}
+                  </h3>
+                  <button type="button" onClick={() => setNavigationDetailsOpen(false)} className="rounded-lg border border-slate-300 px-3 py-2 text-xs font-bold text-slate-700">
+                    {isES ? "Cerrar" : "Close"}
+                  </button>
+                </div>
+                <div className="rounded-xl border border-blue-200 bg-blue-50 p-3">
+                  <div className="text-xs font-bold uppercase tracking-wide text-blue-700">
+                    {navigationStop
+                      ? `${navigationStop.stop_type === "pickup" ? "PU" : "DEL"} · ${navigationStop.stop_order}`
+                      : (isES ? "Próxima parada" : "Next stop")}
+                  </div>
+                  <div className="mt-1 break-words text-sm font-bold text-slate-900">
+                    {[navigationStop?.address, navigationStop?.city, navigationStop?.state].filter(Boolean).join(", ") || (isES ? "Dirección no disponible" : "Address unavailable")}
+                  </div>
+                </div>
+                <div className="mt-3 rounded-xl border border-slate-200 p-3 text-sm">
+                  <div className="text-xs text-slate-500">{isES ? "Carga" : "Load"}</div>
+                  <div className="font-bold text-slate-900">{selectedLoad?.load_number || "—"}</div>
+                  <div className="mt-2 text-xs text-slate-500">{isES ? "Estado" : "Status"}</div>
+                  <div className="font-semibold text-slate-800">{selectedLoad?.status || "—"}</div>
+                </div>
+                <div className="mt-4 grid gap-2">
+                  <PrimaryButton label="AT PICKUP" active={normalizeLoadStatus(selectedLoad?.status ?? null) === "at_pickup"} onClick={() => void updateLoadStatus("at_pickup")} />
+                  <PrimaryButton label="START TRIP" active={normalizeLoadStatus(selectedLoad?.status ?? null) === "in_transit"} disabled={!navigationStop || navigationStop.stop_type !== "delivery" || normalizeLoadStatus(selectedLoad?.status ?? null) === "in_transit"} onClick={() => void updateLoadStatus("in_transit")} />
+                  <PrimaryButton label="AT DELIVERY" active={normalizeLoadStatus(selectedLoad?.status ?? null) === "at_delivery"} onClick={() => void updateLoadStatus("at_delivery")} />
+                  <SecondaryButton label="DONE" active={normalizeLoadStatus(selectedLoad?.status ?? null) === "delivered"} onClick={() => void updateLoadStatus("done")} />
+                </div>
+                <p className="mt-4 text-xs leading-5 text-slate-500">
+                  {isES
+                    ? "Desliza hacia la derecha para volver al mapa. El GPS no cambia automáticamente los estados."
+                    : "Swipe right to return to the map. GPS does not change operational statuses automatically."}
+                </p>
+              </div>
+            )}
+            {navigationFullscreen && !navigationDetailsOpen && (
+              <button type="button" onClick={() => setNavigationDetailsOpen(true)} className="absolute bottom-5 right-4 z-[1100] rounded-full bg-white px-4 py-3 text-sm font-extrabold text-slate-900 shadow-xl">
+                {isES ? "Desliza desde el borde para ver detalles" : "Swipe from edge for details"}
+              </button>
+            )}
           </div>
 
           <div className="mt-4">
@@ -4255,6 +4311,11 @@ value={
                     <th className="px-4 py-3 text-xs font-bold uppercase tracking-wide text-slate-500">
                       {text.type}
                     </th>
+                    
+<th className="px-4 py-3 text-xs font-bold uppercase tracking-wide text-slate-500">
+  PU / Stop
+</th>
+
                     <th className="px-4 py-3 text-xs font-bold uppercase tracking-wide text-slate-500">
                       {text.file}
                     </th>
@@ -4279,6 +4340,27 @@ value={
                       <td className="px-4 py-3 text-sm font-semibold text-slate-800">
                         {doc.document_type || "—"}
                       </td>
+                      
+
+<td className="px-4 py-3 text-sm text-slate-600">
+  {doc.load_stop_id
+    ? (() => {
+        const linkedStop = documentStops.find(
+          (stop) => stop.id === doc.load_stop_id
+        );
+
+        return linkedStop
+          ? `PU #${linkedStop.stop_order}`
+          : isES
+            ? "Parada vinculada"
+            : "Stop linked";
+      })()
+    : isES
+      ? "Sin asignar"
+      : "Not assigned"}
+</td>
+
+
                       <td className="px-4 py-3 text-sm text-slate-600">{doc.file_name || "—"}</td>
                       <td className="px-4 py-3">
                         <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700">
@@ -4343,36 +4425,61 @@ value={
 
               {/* NUEVO: selector de parada de entrega. El POD lo exige (regla existente en
                   uploadDocument) pero antes no había ningún campo para elegirla. */}
-              {isPodSelected && (
-                <div>
-                  <label className="mb-2 block text-xs font-bold uppercase tracking-wide text-slate-500">
-                    {text.deliveryStop}
-                  </label>
+              
+{(isPodSelected || String(documentType).trim().toUpperCase() === "BOL") && (
+  <div>
+    <label className="mb-2 block text-xs font-bold uppercase tracking-wide text-slate-500">
+      {isPodSelected
+        ? text.deliveryStop
+        : isES
+          ? "Parada de recogida"
+          : "Pickup stop"}
+    </label>
 
-                  {deliveryStops.length === 0 ? (
-                    <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800">
-                      {text.noDeliveryStops}
-                    </div>
-                  ) : (
-                    <select
-                      value={selectedDocumentStopId}
-                      onChange={(e) => setSelectedDocumentStopId(e.target.value)}
-                      className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-900 outline-none focus:border-slate-400 focus:ring-2 focus:ring-slate-100"
-                    >
-                      <option value="">{text.selectDeliveryStop}</option>
-                      {deliveryStops.map((stop) => (
-                        <option key={stop.id} value={stop.id}>
-                          {`#${stop.stop_order} · ${
-                            [stop.city, stop.state].filter(Boolean).join(", ") ||
-                            stop.address ||
-                            "—"
-                          }`}
-                        </option>
-                      ))}
-                    </select>
-                  )}
-                </div>
-              )}
+    {(() => {
+      const eligibleStops = isPodSelected ? deliveryStops : pickupStops;
+
+      if (eligibleStops.length === 0) {
+        return (
+          <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800">
+            {isPodSelected
+              ? text.noDeliveryStops
+              : isES
+                ? "No hay paradas de recogida disponibles."
+                : "No pickup stops are available."}
+          </div>
+        );
+      }
+
+      return (
+        <select
+          value={selectedDocumentStopId}
+          onChange={(e) => setSelectedDocumentStopId(e.target.value)}
+          className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-900 outline-none focus:border-slate-400 focus:ring-2 focus:ring-slate-100"
+        >
+          <option value="">
+            {isPodSelected
+              ? text.selectDeliveryStop
+              : isES
+                ? "Seleccione la parada de recogida"
+                : "Select pickup stop"}
+          </option>
+
+          {eligibleStops.map((stop) => (
+            <option key={stop.id} value={stop.id}>
+              {`PU #${stop.stop_order} · ${
+                [stop.city, stop.state].filter(Boolean).join(", ") ||
+                stop.address ||
+                "—"
+              }`}
+            </option>
+          ))}
+        </select>
+      );
+    })()}
+  </div>
+)}
+
 
               <div>
                 <label className="mb-2 block text-xs font-bold uppercase tracking-wide text-slate-500">

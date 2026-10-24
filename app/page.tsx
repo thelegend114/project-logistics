@@ -54,10 +54,22 @@ type HOSEvent = {
   source: string | null;
 };
 
+type LoadStop = {
+  id: string;
+  load_id: string;
+  stop_order: number;
+  stop_type: string | null;
+  pickup_number: string | null;
+  address: string | null;
+  city: string | null;
+  state: string | null;
+};
+
 export default function CommandPage() {
   const { language, t } = useLanguage();
 
   const [loads, setLoads] = useState<Load[]>([]);
+  const [loadStops, setLoadStops] = useState<LoadStop[]>([]);
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [trucks, setTrucks] = useState<Truck[]>([]);
   const [gpsEvents, setGpsEvents] = useState<GPS[]>([]);
@@ -67,91 +79,109 @@ export default function CommandPage() {
   const [error, setError] = useState("");
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
+  
   async function loadDashboard() {
-    setLoading(true);
-    setError("");
+  setLoading(true);
+  setError("");
 
-    const [
-      loadsResult,
-      driversResult,
-      trucksResult,
-      gpsResult,
-      hosResult,
-    ] = await Promise.all([
-      supabase
-        .from("loads")
-        .select(
-          "id, load_number, broker_name, customer_name, origin_city, origin_state, destination_city, destination_state, miles, rate, status, driver_id, truck_id, created_at"
-        )
-        .order("created_at", { ascending: false })
-        .limit(100),
+  const [
+    loadsResult,
+    driversResult,
+    trucksResult,
+    gpsResult,
+    hosResult,
+    stopsResult,
+  ] = await Promise.all([
+    supabase
+      .from("loads")
+      .select(
+        "id, load_number, broker_name, customer_name, origin_city, origin_state, destination_city, destination_state, miles, rate, status, driver_id, truck_id, created_at"
+      )
+      .order("created_at", { ascending: false })
+      .limit(100),
 
-      supabase
-        .from("drivers")
-        .select("id, full_name, status")
-        .order("created_at", { ascending: false }),
+    supabase
+      .from("drivers")
+      .select("id, full_name, status")
+      .order("created_at", { ascending: false }),
 
-      supabase
-        .from("trucks")
-        .select("id, unit_number, status")
-        .order("created_at", { ascending: false }),
+    supabase
+      .from("trucks")
+      .select("id, unit_number, status")
+      .order("created_at", { ascending: false }),
 
-      supabase
-        .from("gps_events")
-        .select(
-          "id, driver_id, truck_id, latitude, longitude, speed, heading, recorded_at, load_id"
-        )
-        .order("recorded_at", { ascending: false })
-        .limit(20),
+    supabase
+      .from("gps_events")
+      .select(
+        "id, driver_id, truck_id, latitude, longitude, speed, heading, recorded_at, load_id"
+      )
+      .order("recorded_at", { ascending: false })
+      .limit(20),
 
-      supabase
-        .from("hos_events")
-        .select(
-          "id, driver_id, event_type, event_time, location, source"
-        )
-        .order("event_time", { ascending: false })
-        .limit(20),
-    ]);
+    supabase
+      .from("hos_events")
+      .select(
+        "id, driver_id, event_type, event_time, location, source"
+      )
+      .order("event_time", { ascending: false })
+      .limit(20),
 
-    if (loadsResult.error) {
-      setError(`Loads: ${loadsResult.error.message}`);
-      setLoading(false);
-      return;
-    }
+    supabase
+      .from("load_stops")
+      .select(
+        "id, load_id, stop_order, stop_type, pickup_number, address, city, state"
+      )
+      .order("stop_order", { ascending: true }),
+  ]);
 
-    if (driversResult.error) {
-      setError(`Drivers: ${driversResult.error.message}`);
-      setLoading(false);
-      return;
-    }
-
-    if (trucksResult.error) {
-      setError(`Trucks: ${trucksResult.error.message}`);
-      setLoading(false);
-      return;
-    }
-
-    if (gpsResult.error) {
-      setError(`GPS: ${gpsResult.error.message}`);
-      setLoading(false);
-      return;
-    }
-
-    if (hosResult.error) {
-      setError(`HOS: ${hosResult.error.message}`);
-      setLoading(false);
-      return;
-    }
-
-    setLoads(loadsResult.data || []);
-    setDrivers(driversResult.data || []);
-    setTrucks(trucksResult.data || []);
-    setGpsEvents(gpsResult.data || []);
-    setHosEvents(hosResult.data || []);
-    setLastUpdated(new Date());
-
+  if (loadsResult.error) {
+    setError(`Loads: ${loadsResult.error.message}`);
     setLoading(false);
+    return;
   }
+
+  if (driversResult.error) {
+    setError(`Drivers: ${driversResult.error.message}`);
+    setLoading(false);
+    return;
+  }
+
+  if (trucksResult.error) {
+    setError(`Trucks: ${trucksResult.error.message}`);
+    setLoading(false);
+    return;
+  }
+
+  if (gpsResult.error) {
+    setError(`GPS: ${gpsResult.error.message}`);
+    setLoading(false);
+    return;
+  }
+
+  if (hosResult.error) {
+    setError(`HOS: ${hosResult.error.message}`);
+    setLoading(false);
+    return;
+  }
+
+  if (stopsResult.error) {
+    setError(`Stops / Paradas: ${stopsResult.error.message}`);
+    setLoading(false);
+    return;
+  }
+
+  setLoads(loadsResult.data || []);
+  setLoadStops((stopsResult.data ?? []) as LoadStop[]);
+  setDrivers(driversResult.data || []);
+  setTrucks(trucksResult.data || []);
+  setGpsEvents(gpsResult.data || []);
+  setHosEvents(hosResult.data || []);
+  setLastUpdated(new Date());
+
+  setLoading(false);
+}
+
+  
 
   useEffect(() => {
     loadDashboard();
@@ -225,6 +255,28 @@ export default function CommandPage() {
       trucks: activeTrucks.length,
     };
   }, [loads, drivers, trucks]);
+
+  
+const loadStopsByLoad = useMemo(() => {
+  const grouped: Record<string, LoadStop[]> = {};
+
+  for (const stop of loadStops) {
+    const loadId = String(stop.load_id);
+
+    if (!grouped[loadId]) {
+      grouped[loadId] = [];
+    }
+
+    grouped[loadId].push(stop);
+  }
+
+  for (const stops of Object.values(grouped)) {
+    stops.sort((a, b) => a.stop_order - b.stop_order);
+  }
+
+  return grouped;
+}, [loadStops]);
+
 
   const latestGPS = gpsEvents[0] || null;
   const latestHOS = hosEvents[0] || null;
@@ -478,8 +530,20 @@ export default function CommandPage() {
                           fontSize: "13px",
                         }}
                       >
-                        {load.load_number ||
-                          t.command.unknown}
+                       
+{(loadStopsByLoad[String(load.id)] ?? [])
+  .filter((stop) =>
+    ["pickup", "pick_up", "pick-up"].includes(
+      String(stop.stop_type ?? "").trim().toLowerCase()
+    )
+  )
+  .map((stop) => String(stop.pickup_number ?? "").trim())
+  .filter((number) => number.length > 0)
+  .filter((number, index, numbers) => numbers.indexOf(number) === index)
+  .join(" / ") ||
+  load.load_number ||
+  t.command.unknown}
+
                       </div>
 
                       <div
@@ -501,11 +565,24 @@ export default function CommandPage() {
                           fontWeight: 700,
                         }}
                       >
-                        {load.origin_city || "—"},{" "}
-                        {load.origin_state || ""}
-                        {" → "}
-                        {load.destination_city || "—"},{" "}
-                        {load.destination_state || ""}
+                        
+{(loadStopsByLoad[String(load.id)] ?? []).length > 0
+  ? (loadStopsByLoad[String(load.id)] ?? [])
+      .map((stop) => {
+        const location = [
+          stop.address,
+          [stop.city, stop.state].filter(Boolean).join(", "),
+        ]
+          .filter(Boolean)
+          .join(" — ");
+
+        return location || "—";
+      })
+      .join(" → ")
+  : `${load.origin_city || "—"}, ${load.origin_state || ""} → ${
+      load.destination_city || "—"
+    }, ${load.destination_state || ""}`}
+
                       </div>
 
                       <div
@@ -1254,4 +1331,3 @@ const darkSectionStyle: React.CSSProperties = {
   borderRadius: "16px",
   padding: "22px",
 };
-

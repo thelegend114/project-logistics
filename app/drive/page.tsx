@@ -752,9 +752,10 @@ async function setHosStatus(status: string): Promise<boolean> {
     return false;
   }
 
-  // En escritorio, los cambios HOS son solo una vista previa local de prueba.
-  // Solo el navegador móvil guarda eventos HOS reales en Supabase.
-  if (!isMobileBrowser()) {
+  // Solo una sesión autenticada con rol driver puede guardar HOS real.
+  // Admin/owner/dispatcher y otros roles solo cambian una vista previa local,
+  // independientemente de si están usando computadora o teléfono.
+  if (userRole.trim().toLowerCase() !== "driver") {
     setHosPreview({
       driverId: selectedDriver.id,
       event_type: status,
@@ -3430,7 +3431,7 @@ if (
   startGpsRef.current = startGpsTracking;
 
   const activeLocalHosPreview =
-    !isMobileBrowser() &&
+    userRole.trim().toLowerCase() !== "driver" &&
     hosPreview?.driverId === selectedDriverId
       ? hosPreview
       : null;

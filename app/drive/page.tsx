@@ -449,6 +449,12 @@ export default function DriverPage() {
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [loads, setLoads] = useState<Load[]>([]);
   const [hosEvents, setHosEvents] = useState<HOS[]>([]);
+  // Vista previa HOS exclusiva del navegador de escritorio; nunca se guarda en Supabase.
+  const [hosPreview, setHosPreview] = useState<{
+    driverId: string;
+    event_type: string;
+    event_time: string;
+  } | null>(null);
   const [documents, setDocuments] = useState<LoadDocument[]>([]);
   const [previousLoadDocuments, setPreviousLoadDocuments] = useState<LoadDocument[]>([]);
 
@@ -735,10 +741,31 @@ async function loadDocuments(loadId: string) {
     return true;
   }
 
+function isMobileBrowser(): boolean {
+  if (typeof navigator === "undefined") return false;
+  return /Android|iPhone|iPad|iPod|Mobile|Windows Phone/i.test(navigator.userAgent);
+}
+
 async function setHosStatus(status: string): Promise<boolean> {
   if (!selectedDriver) {
     showMessage(text.selectDriverFirst);
     return false;
+  }
+
+  // En escritorio, los cambios HOS son solo una vista previa local de prueba.
+  // Solo el navegador móvil guarda eventos HOS reales en Supabase.
+  if (!isMobileBrowser()) {
+    setHosPreview({
+      driverId: selectedDriver.id,
+      event_type: status,
+      event_time: new Date().toISOString(),
+    });
+    showMessage(
+      isES
+        ? "HOS de prueba cambiado solo en esta computadora; no se guardó en el historial real."
+        : "Test HOS changed only on this computer; it was not saved to the real history."
+    );
+    return true;
   }
 
   const location = lastLocation
@@ -3402,7 +3429,12 @@ if (
   // Mantiene la referencia siempre al día para el reconectado por visibilitychange.
   startGpsRef.current = startGpsTracking;
 
-  const latestHosEvent = hosEvents[0] || null;
+  const activeLocalHosPreview =
+    !isMobileBrowser() &&
+    hosPreview?.driverId === selectedDriverId
+      ? hosPreview
+      : null;
+  const latestHosEvent = activeLocalHosPreview || hosEvents[0] || null;
   const latestHosTimestamp = latestHosEvent?.event_time
     ? new Date(latestHosEvent.event_time).getTime()
     : null;
@@ -3669,7 +3701,6 @@ if (
                     type="button"
                     onClick={async () => {
                       await updateDriverWorkStatus("off_duty");
-                      await setHosStatus("Off Duty");
                     }}
                     className={`rounded-xl border px-3 py-2 text-xs font-semibold transition ${
                       driverWorkStatus === "off_duty"

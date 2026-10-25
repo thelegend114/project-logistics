@@ -3668,10 +3668,9 @@ if (
                   <button
                     type="button"
                     onClick={async () => {
-                     const updated = await updateDriverWorkStatus("off_duty");
-                     if (!updated) return;
-                     await setHosStatus("Off Duty");
-                   }}
+                      await updateDriverWorkStatus("off_duty");
+                      await setHosStatus("Off Duty");
+                    }}
                     className={`rounded-xl border px-3 py-2 text-xs font-semibold transition ${
                       driverWorkStatus === "off_duty"
                         ? "border-slate-900 bg-slate-900 text-white"
@@ -3684,10 +3683,8 @@ if (
                   <button
                     type="button"
                     onClick={async () => {
-                    const updated = await updateDriverWorkStatus("hold");
-                    if (!updated) return;
-                    await setHosStatus("Sleeper");
-           }}
+                      await updateDriverWorkStatus("hold");
+                    }}
                     className={`rounded-xl border px-3 py-2 text-xs font-semibold transition ${
                       driverWorkStatus === "hold"
                         ? "border-slate-900 bg-slate-900 text-white"
@@ -4242,19 +4239,30 @@ value={
               { value: "Sleeper", label: text.sleeper },
               { value: "Driving", label: text.driving },
               { value: "On Duty", label: text.onDuty },
-            ].map((status) => (
-              <div
-                key={status.value}
-                className={`rounded-xl border px-3 py-3 text-center text-sm font-bold transition ${
-                  // CORREGIDO: antes "off duty" nunca coincidía con "off_duty".
-                  latestStatusNormalized === status.value.toLowerCase().replace(/[\s-]+/g, "_")
-                    ? "border-slate-900 bg-slate-900 text-white"
-                    : "border-slate-200 bg-white text-slate-700"
-                }`}
-              >
-                {status.label}
-              </div>
-            ))}
+            ].map((status) => {
+              const isActive =
+                latestStatusNormalized ===
+                status.value.toLowerCase().replace(/[\s-]+/g, "_");
+
+              return (
+                <button
+                  key={status.value}
+                  type="button"
+                  disabled={!selectedDriver || isActive}
+                  onClick={() => {
+                    if (isActive) return;
+                    void setHosStatus(status.value);
+                  }}
+                  className={`rounded-xl border px-3 py-3 text-center text-sm font-bold transition disabled:cursor-not-allowed disabled:opacity-60 ${
+                    isActive
+                      ? "border-slate-900 bg-slate-900 text-white"
+                      : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+                  }`}
+                >
+                  {status.label}
+                </button>
+              );
+            })}
           </div>
 
           <div className="mt-6">

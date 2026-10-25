@@ -158,8 +158,8 @@ const normalize = (value: string | null | undefined) =>
 function isApprovedDocument(document: Document) {
   const status = normalize(document.status);
 
+  // A document that was only reviewed is not yet approved for invoicing.
   return [
-    "reviewed",
     "approved",
     "document approved",
   ].includes(status);
@@ -186,11 +186,8 @@ function documentTypeMatches(
   }
 
   if (type === "rate") {
-    return (
-      value.includes("rate") ||
-      value.includes("confirmation") ||
-      value.includes("rate confirmation")
-    );
+    // Require both terms so unrelated confirmation documents do not qualify.
+    return value.includes("rate") && value.includes("confirmation");
   }
 
   return false;
@@ -537,10 +534,12 @@ export default function FinancePage() {
         "id, company_id, load_number, broker_name, origin_city, origin_state, destination_city, destination_state, status, rate"
       )
       .eq("company_id", companyId)
-      .eq("status", "Delivered")
+      .ilike("status", "delivered")
       .order("load_number", { ascending: true });
 
     const deliveredLoads = (loadsData || []) as Load[];
+console.log("[Finance] Company ID:", companyId);
+console.log("[Finance] Delivered loads found:", deliveredLoads);
 
     if (!deliveredLoads.length) {
       setReadiness([]);
@@ -780,21 +779,11 @@ const deductions = useMemo(
     [readiness]
   );
 
-  const filteredInvoices = useMemo(() => {
+  
+const filteredInvoices = useMemo(() => {
   const query = search.toLowerCase().trim();
 
   return invoices.filter((invoice) => {
-    const status = normalize(invoice.status);
-
-    const activeInvoice =
-      status !== "funded" &&
-      status !== "paid" &&
-      status !== "closed";
-
-    if (!activeInvoice) {
-      return false;
-    }
-
     if (!query) {
       return true;
     }
@@ -809,6 +798,7 @@ const deductions = useMemo(
       .includes(query);
   });
 }, [invoices, search]);
+
 
   const filteredExpenses = useMemo(() => {
     const query = search.toLowerCase().trim();

@@ -77,6 +77,7 @@ type LoadStop = {
   state: string;
   zip_code: string;
   pickup_number: string;
+  bol_number: string;
   latitude: number | null;
   longitude: number | null;
   scheduled_date: string;
@@ -164,6 +165,7 @@ function createEmptyStop(
     state: "",
     zip_code: "",
     pickup_number: "",
+    bol_number: "",
     latitude: null,
     longitude: null,
     scheduled_date: "",
@@ -342,6 +344,7 @@ export default function LoadsPage() {
     state: isES ? "Estado" : "State",
     zipCode: isES ? "Código ZIP" : "ZIP Code",
     pickupNumber: "PU",
+    bolNumber: isES ? "Número BOL" : "BOL Number",
     date: isES ? "Fecha" : "Date",
     time: isES ? "Hora" : "Time",
     originCity: isES ? "Ciudad de origen *" : "Origin City *",
@@ -528,7 +531,7 @@ async function loadData() {
 
     supabase
       .from("load_stops")
-      .select("id, load_id, stop_order, stop_type, address, city, state, zip_code, pickup_number, latitude, longitude, scheduled_date, scheduled_time")
+      .select("id, load_id, stop_order, stop_type, address, city, state, zip_code, pickup_number, bol_number, latitude, longitude, scheduled_date, scheduled_time")
       .order("stop_order", { ascending: true }),
 
     supabase
@@ -591,6 +594,7 @@ async function loadData() {
           state: row.state ?? "",
           zip_code: row.zip_code ?? "",
           pickup_number: row.pickup_number ?? "",
+          bol_number: row.bol_number ?? "",
           latitude: row.latitude == null ? null : Number(row.latitude),
           longitude: row.longitude == null ? null : Number(row.longitude),
           scheduled_date: row.scheduled_date ?? "",
@@ -710,6 +714,7 @@ async function loadData() {
           load.delivery_address,
           ...(load.stops ?? []).flatMap((stop) => [
             stop.pickup_number,
+            stop.bol_number,
             stop.address,
             stop.city,
             stop.state,
@@ -797,7 +802,7 @@ async function loadData() {
 
     const { data: stopRows, error: stopError } = await supabase
       .from("load_stops")
-      .select("id, stop_order, stop_type, address, city, state, zip_code, pickup_number, latitude, longitude, scheduled_date, scheduled_time, status")
+      .select("id, stop_order, stop_type, address, city, state, zip_code, pickup_number, bol_number, latitude, longitude, scheduled_date, scheduled_time, status")
       .eq("load_id", load.id)
       .order("stop_order", { ascending: true });
 
@@ -835,6 +840,7 @@ async function loadData() {
       state: stop.state ?? "",
       zip_code: stop.zip_code ?? "",
       pickup_number: stop.pickup_number ?? "",
+      bol_number: stop.bol_number ?? "",
       latitude: stop.latitude == null ? null : Number(stop.latitude),
       longitude: stop.longitude == null ? null : Number(stop.longitude),
       scheduled_date: stop.scheduled_date ?? "",
@@ -1128,6 +1134,10 @@ for (let index = 0; index < orderedStops.length; index++) {
       stop.stop_type.trim().toLowerCase() === "pickup"
         ? stop.pickup_number.trim() || null
         : null,
+    bol_number:
+      stop.stop_type.trim().toLowerCase() === "pickup"
+        ? stop.bol_number.trim() || null
+        : null,
     latitude: stop.latitude,
     longitude: stop.longitude,
     scheduled_date: stop.scheduled_date || null,
@@ -1178,6 +1188,10 @@ const loadStops = orderedStopsForNewLoad.map((stop, index) => ({
   pickup_number:
     stop.stop_type.trim().toLowerCase() === "pickup"
       ? stop.pickup_number.trim() || null
+      : null,
+  bol_number:
+    stop.stop_type.trim().toLowerCase() === "pickup"
+      ? stop.bol_number.trim() || null
       : null,
   latitude: stop.latitude,
   longitude: stop.longitude,
@@ -2955,7 +2969,20 @@ async function releaseLoadToDispatch(load: Load) {
                                     <input
                                       value={stop.pickup_number}
                                       onChange={(event) => updateStop(index, "pickup_number", event.target.value)}
-                                      placeholder="PU number"
+                                      placeholder="PU112"
+                                      disabled={saving}
+                                      style={inputStyle}
+                                    />
+                                  </Field>
+                                )}
+
+                                {/* BOL NUMBER: EACH PICKUP HAS ITS OWN BOL */}
+                                {stop.stop_type === "pickup" && (
+                                  <Field label={text.bolNumber}>
+                                    <input
+                                      value={stop.bol_number}
+                                      onChange={(event) => updateStop(index, "bol_number", event.target.value)}
+                                      placeholder="BOL number"
                                       disabled={saving}
                                       style={inputStyle}
                                     />

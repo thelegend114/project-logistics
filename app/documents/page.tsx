@@ -55,7 +55,8 @@ type ReviewResult = {
   documentType: boolean;
   file: boolean;
   loadStatus: boolean;
-  invoiceReady: boolean;
+  reviewPreconditions: boolean;
+  financeReady: boolean;
   bolNumber: string | null;
   pickupNumber: string | null;
   podNumber: string | null;
@@ -134,8 +135,8 @@ export default function DocumentsPage() {
     eyebrow: isES ? "Gestión documental" : "Document management",
     title: isES ? "Documentos" : "Documents",
     description: isES
-      ? "Gestión central de documentos, revisión con IA, validación cruzada y preparación para Finanzas."
-      : "Central document management, AI review, cross-document validation and Finance readiness.",
+      ? "Gestión central de documentos, revisión humana y preparación para Finanzas."
+      : "Central document management, human review and Finance readiness.",
     refresh: isES ? "Actualizar datos" : "Refresh Data",
 
     total: isES ? "Total de documentos" : "Total Documents",
@@ -144,7 +145,7 @@ export default function DocumentsPage() {
     rateConfirmations: isES
       ? "Confirmaciones de tarifa"
       : "Rate Confirmations",
-    aiReviewed: isES ? "Revisados por IA" : "AI Reviewed",
+    aiReviewed: isES ? "Aprobados por una persona" : "Human Approved",
     pendingReview: isES ? "Pendientes de revisión" : "Pending Review",
 
     uploadTitle: isES ? "Subir documento" : "Upload Document",
@@ -178,14 +179,14 @@ export default function DocumentsPage() {
       ? "Corregir parada asociada"
       : "Correct associated stop",
     saveStopAndReview: isES
-      ? "Guardar parada y revisar con IA"
-      : "Save stop and review with AI",
+      ? "Guardar parada asociada"
+      : "Save Associated Stop",
     savingStop: isES
       ? "Guardando parada..."
       : "Saving stop...",
     chooseCorrectStop: isES
-      ? "Selecciona la parada correcta para este documento. La revisión de IA se ejecutará después de guardar."
-      : "Select the correct stop for this document. AI review will run after saving.",
+      ? "Selecciona la parada correspondiente a este documento. Después, revisa el archivo original y decide si lo apruebas o rechazas."
+      : "Select the stop associated with this document. Then inspect the original file and decide whether to approve or reject it.",
     noMatchingStops: isES
       ? "No hay paradas compatibles para este tipo de documento."
       : "There are no matching stops for this document type.",
@@ -198,11 +199,11 @@ export default function DocumentsPage() {
       : "Supported formats: PDF, JPG, PNG, WEBP. Maximum file size: 15MB.",
 
     validationTitle: isES
-      ? "Validación entre documentos"
-      : "Cross-Document Validation",
+      ? "Estado documental para Finanzas"
+      : "Document Status for Finance",
     validationDescription: isES
-      ? "La revisión con IA compara el documento seleccionado con el registro de la carga y prepara la información necesaria para Finanzas."
-      : "AI review checks the selected document against the load record and prepares the information needed by Finance.",
+      ? "La preparación para Finanzas se calcula usando los documentos aprobados manualmente para cada parada requerida."
+      : "Finance readiness is calculated from documents manually approved for every required stop.",
     linkedLoad: isES ? "Carga vinculada" : "Load linked",
     documents: isES ? "Documentos" : "Documents",
     financeReady: isES ? "Listo para Finanzas" : "Finance Ready",
@@ -231,23 +232,23 @@ export default function DocumentsPage() {
       : "Upload the first document for this load using the upload panel.",
     uploaded: isES ? "Subido" : "Uploaded",
     open: isES ? "Abrir" : "Open",
-    aiReview: isES ? "Revisión IA" : "AI Review",
+    aiReview: isES ? "Revisar documento" : "Review Document",
     delete: isES ? "Eliminar" : "Delete",
 
     aiDocumentReview: isES
-      ? "Revisión de documento con IA"
-      : "AI Document Review",
+      ? "Revisión manual del documento"
+      : "Manual Document Review",
     close: isES ? "Cerrar" : "Close",
     aiReviewing: isES
-      ? "La IA está revisando el documento"
-      : "AI is reviewing the document",
+      ? "Preparando la revisión del documento"
+      : "Preparing document review",
     aiReviewDescription: isES
-      ? "Comprobando información de carga, tipo de documento, disponibilidad del archivo y preparación para Finanzas."
-      : "Checking load information, document type, file availability and Finance readiness.",
+      ? "Comprueba el archivo original y los datos de la carga. La decisión de aprobar o rechazar corresponde a una persona."
+      : "Inspect the original file and load details. A person makes the approval or rejection decision.",
     pass: isES ? "APROBADO" : "PASS",
     fail: isES ? "FALLÓ" : "FAIL",
     review: isES ? "REVISAR" : "REVIEW",
-    invoiceReady: isES ? "Listo para factura" : "Invoice Ready",
+    invoiceReady: isES ? "Requisitos para revisar" : "Review Preconditions",
     loadInformation: isES ? "Información de carga" : "Load Information",
     loadNumber: isES ? "Número de carga" : "Load Number",
     broker: isES ? "Broker" : "Broker",
@@ -256,15 +257,15 @@ export default function DocumentsPage() {
     loadAmount: isES ? "Monto de carga" : "Load Amount",
 
     intelligence: isES
-      ? "Inteligencia del documento"
-      : "Document Intelligence",
+      ? "Datos adicionales del documento"
+      : "Additional Document Details",
     bolNumber: isES ? "Número del documento BOL" : "BOL Document Number",
     pickupNumber: isES ? "Número PU del pickup" : "PU Pickup Number",
     podNumber: isES ? "Número del documento POD" : "POD Document Number",
-    aiSummary: isES ? "Resultado de la IA" : "AI Summary",
-    aiIssues: isES ? "Discrepancias detectadas" : "Detected Discrepancies",
-    validationPassed: isES ? "Validación automática aprobada" : "Automatic Validation Passed",
-    validationFailed: isES ? "Validación automática con discrepancias" : "Automatic Validation Found Issues",
+    aiSummary: isES ? "Notas de revisión" : "Review Notes",
+    aiIssues: isES ? "Observaciones" : "Observations",
+    validationPassed: isES ? "Validación completada" : "Validation Completed",
+    validationFailed: isES ? "Se requiere revisión adicional" : "Additional Review Required",
     documentDate: isES ? "Fecha del documento" : "Document Date",
     documentAmount: isES ? "Monto del documento" : "Document Amount",
     amountDifference: isES
@@ -282,8 +283,8 @@ export default function DocumentsPage() {
       ? "Preparación para Finanzas"
       : "Finance Readiness",
     financeReadinessDescription: isES
-      ? "La revisión de IA no es una aprobación de Finanzas. Finanzas debe aprobar cada BOL y POD requerido antes de que la carga esté lista para facturación."
-      : "AI review is not Finance approval. Finance must approve each required BOL and POD before the load is ready for invoicing.",
+      ? "La revisión manual de un documento no sustituye el proceso de Finanzas. Cada BOL y POD requerido debe estar aprobado antes de que la carga esté lista para facturación."
+      : "Manual document review does not replace the Finance process. Every required BOL and POD must be approved before the load is ready for invoicing.",
     readyForFinance: isES
       ? "LISTO PARA FINANZAS"
       : "READY FOR FINANCE",
@@ -294,8 +295,8 @@ export default function DocumentsPage() {
     declining: isES ? "Rechazando..." : "Declining...",
     approve: isES ? "Aprobar documento" : "Approve Document",
     approving: isES
-      ? "Registrando en Finanzas..."
-      : "Registering in Finance...",
+      ? "Aprobando documento..."
+      : "Approving document...",
     unableReview: isES
       ? "No se pudo generar el resultado de revisión."
       : "Unable to generate the review result.",
@@ -401,12 +402,7 @@ export default function DocumentsPage() {
     : [];
 
   const reviewedCount = useMemo(
-    () =>
-      documents.filter(
-        (document) =>
-          document.status === "reviewed" ||
-          document.status === "approved"
-      ).length,
+    () => documents.filter((document) => document.status === "approved").length,
     [documents]
   );
 
@@ -495,56 +491,42 @@ export default function DocumentsPage() {
   }, [loadStops, reviewingDocument]);
 
  
-const financeReady = useMemo(() => {
-  if (!selectedLoad) return false;
+const isLoadFinanceReady = (loadId: string | null | undefined) => {
+    if (!loadId) return false;
 
-  const normalizeStopType = (value: string) =>
-    value.trim().toLowerCase().replace(/[\s-]+/g, "_");
+    const normalizeStopType = (value: string) =>
+      value.trim().toLowerCase().replace(/[\s-]+/g, "_");
 
-  const stops = loadStops.filter(
-    (stop) => stop.load_id === selectedLoad.id
-  );
+    const stops = loadStops.filter((stop) => stop.load_id === loadId);
 
-  const pickupStops = stops.filter((stop) =>
-    ["pickup", "pick_up"].includes(
-      normalizeStopType(stop.stop_type)
-    )
-  );
-
-  const deliveryStops = stops.filter((stop) =>
-    ["delivery", "dropoff", "drop_off"].includes(
-      normalizeStopType(stop.stop_type)
-    )
-  );
-
-  if (pickupStops.length === 0 || deliveryStops.length === 0) {
-    return false;
-  }
-
-  const hasReviewedDocument = (
-    type: "BOL" | "POD",
-    stopId: string
-  ) =>
-    documents.some((documentRow) =>
-      documentRow.load_id === selectedLoad.id &&
-      documentRow.load_stop_id === stopId &&
-      documentRow.document_type.trim().toUpperCase() === type &&
-      (documentRow.status ?? "").trim().toLowerCase() === "approved"
+    const pickupStops = stops.filter((stop) =>
+      ["pickup", "pick_up"].includes(normalizeStopType(stop.stop_type))
     );
 
-  const allBOLsReviewed = pickupStops.every((stop) =>
-    hasReviewedDocument("BOL", stop.id)
-  );
+    const deliveryStops = stops.filter((stop) =>
+      ["delivery", "dropoff", "drop_off"].includes(normalizeStopType(stop.stop_type))
+    );
 
-  const allPODsReviewed = deliveryStops.every((stop) =>
-    hasReviewedDocument("POD", stop.id)
-  );
+    if (pickupStops.length === 0 || deliveryStops.length === 0) return false;
 
-  return (
-  allBOLsReviewed &&
-  allPODsReviewed
-);
-}, [selectedLoad, loadStops, documents]);
+    const hasApprovedDocumentForStop = (type: "BOL" | "POD", stopId: string) =>
+      documents.some((documentRow) =>
+        documentRow.load_id === loadId &&
+        documentRow.load_stop_id === stopId &&
+        documentRow.document_type.trim().toUpperCase() === type &&
+        (documentRow.status ?? "").trim().toLowerCase() === "approved"
+      );
+
+    return (
+      pickupStops.every((stop) => hasApprovedDocumentForStop("BOL", stop.id)) &&
+      deliveryStops.every((stop) => hasApprovedDocumentForStop("POD", stop.id))
+    );
+  };
+
+  const financeReady = useMemo(
+    () => isLoadFinanceReady(selectedLoad?.id),
+    [selectedLoad, loadStops, documents]
+  );
 
   useEffect(() => {
     if (!eligibleStops.some((stop) => stop.id === selectedLoadStopId)) {
@@ -857,15 +839,9 @@ if (insertError || !insertedDocument?.id) {
       }
 
       setMessage(text.uploadedSuccess);
-
-      if (
-        selectedDocumentType === "BOL" ||
-        selectedDocumentType === "POD"
-      ) {
-        await startAIReview(newDocument);
-      } else {
-        await loadDocuments(selectedLoad.id);
-      }
+      // AI is intentionally dormant. Uploading a file never triggers automated review.
+      // La IA permanece desactivada. Subir un archivo nunca inicia una revisión automática.
+      await loadDocuments(selectedLoad.id);
     } catch (error) {
       setErrorMessage(
         error instanceof Error
@@ -960,8 +936,15 @@ if (insertError || !insertedDocument?.id) {
         "delivered",
       ].includes(load.status ?? "");
 
-    const invoiceReady =
-      hasLoad && hasDocumentType && hasFile;
+    const needsStopAssociation = ["BOL", "POD"].includes(
+      doc.document_type.trim().toUpperCase()
+    );
+    const hasAssociatedStop = !needsStopAssociation || !!doc.load_stop_id;
+    const reviewPreconditions =
+      hasLoad && hasDocumentType && hasFile && hasAssociatedStop;
+    // Finance readiness belongs to the whole load, not to this single document.
+    // La preparación para Finanzas corresponde a toda la carga, no a un solo documento.
+    const loadFinanceReady = isLoadFinanceReady(load?.id);
 
     const loadAmount = load?.rate ?? null;
 
@@ -1028,7 +1011,8 @@ if (insertError || !insertedDocument?.id) {
       documentType: hasDocumentType,
       file: hasFile,
       loadStatus: loadStatusOk,
-      invoiceReady,
+      reviewPreconditions,
+      financeReady: loadFinanceReady,
       bolNumber: null,
       pickupNumber: null,
       podNumber: null,
@@ -1063,97 +1047,16 @@ if (insertError || !insertedDocument?.id) {
     };
   }
 
- async function startAIReview(documentRow: Document) {
+  function openDocumentReview(documentRow: Document) {
     setReviewingDocument(documentRow);
     setReviewStopId(documentRow.load_stop_id ?? "");
-    setReviewResult(null);
     setErrorMessage("");
     setMessage("");
-    setReviewing(true);
-
-    const load = loads.find((item) => item.id === documentRow.load_id) ?? null;
-
-    try {
-      if (documentRow.document_type === "BOL" || documentRow.document_type === "POD") {
-        const response = await fetch("/api/documents-ai", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ documentId: documentRow.id }),
-        }); 
-
-        const payload: unknown = await response.json().catch(() => null);
-        const resultPayload = payload && typeof payload === "object"
-          ? payload as Record<string, unknown>
-          : {};
-
-        if (!response.ok) {
-          throw new Error(
-            typeof resultPayload.error === "string"
-              ? resultPayload.error
-              : text.unableReview
-          );
-        }
-
-        const analysis = resultPayload.analysis && typeof resultPayload.analysis === "object"
-          ? resultPayload.analysis as Record<string, unknown>
-          : {};
-        const asString = (value: unknown): string | null =>
-          typeof value === "string" && value.trim() ? value.trim() : null;
-        const issues = Array.isArray(analysis.issues)
-          ? analysis.issues.filter((item): item is string => typeof item === "string")
-          : [];
-        const validationPassed = resultPayload.validationPassed === true;
-        const base = buildIntelligence(load, documentRow);
-        const aiChecks = [
-          typeof analysis.documentTypeMatches === "boolean"
-            ? `${isES ? "Tipo de documento" : "Document type"}: ${analysis.documentTypeMatches ? text.pass : text.fail}`
-            : null,
-          typeof analysis.documentReadable === "boolean"
-            ? `${isES ? "Legibilidad" : "Readability"}: ${analysis.documentReadable ? text.pass : text.fail}`
-            : null,
-          typeof analysis.stopMatches === "boolean"
-            ? `${isES ? "Parada asociada" : "Associated stop"}: ${analysis.stopMatches ? text.pass : text.fail}`
-            : null,
-          ...issues,
-        ].filter((item): item is string => Boolean(item));
-
-        const mappedResult: ReviewResult = {
-          ...base,
-          documentType: analysis.documentTypeMatches === true,
-          file: analysis.documentReadable === true,
-          invoiceReady: validationPassed,
-          bolNumber: asString(analysis.bolNumber),
-          pickupNumber: asString(analysis.pickupNumber),
-          podNumber: asString(analysis.podNumber),
-          validationPassed,
-          summary: asString(analysis.summary) ?? (typeof resultPayload.message === "string" ? resultPayload.message : null),
-          issues,
-          documentDate: asString(analysis.documentDate),
-          commodity: asString(analysis.commodity),
-          pieces: asString(analysis.pieces),
-          weight: asString(analysis.weight),
-          checks: aiChecks.length ? aiChecks : [typeof resultPayload.message === "string" ? resultPayload.message : text.unableReview],
-        };
-
-        const newStatus = typeof resultPayload.status === "string"
-          ? resultPayload.status
-          : validationPassed ? "reviewed" : "rejected";
-        setDocuments((current) => current.map((item) =>
-          item.id === documentRow.id ? { ...item, status: newStatus } : item
-        ));
-        setReviewResult(mappedResult);
-        return;
-      }
-
-      // Other document types are informational and never block BOL/POD operations.
-      const result = buildIntelligence(load, documentRow);
-      setReviewResult(result);
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : text.unableReview);
-      setReviewResult(null);
-    } finally {
-      setReviewing(false);
-    }
+    setReviewResult(buildIntelligence(
+      loads.find((item) => item.id === documentRow.load_id) ?? null,
+      documentRow
+    ));
+    setReviewing(false);
   }
 
   async function saveStopAssociationAndReview() {
@@ -1191,10 +1094,13 @@ if (insertError || !insertedDocument?.id) {
         row.id === updatedDocument.id ? updatedDocument : row
       ));
       setReviewingDocument(updatedDocument);
-      setMessage("");
-      setReviewResult(null);
-
-      await startAIReview(updatedDocument);
+      setReviewResult(buildIntelligence(
+        loads.find((item) => item.id === updatedDocument.load_id) ?? null,
+        updatedDocument
+      ));
+      setMessage(isES ? "Parada asociada guardada." : "Associated stop saved.");
+      // No AI request is made here; a person remains responsible for approval.
+      // Aquí no se llama a la IA; la aprobación sigue siendo responsabilidad humana.
       if (selectedLoadId) await loadDocuments(selectedLoadId);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : text.unableReview);
@@ -1382,7 +1288,7 @@ if (insertError || !insertedDocument?.id) {
 
           <ActionButton
             variant="primary"
-            onClick={() => startAIReview(row)}
+            onClick={() => openDocumentReview(row)}
           >
             {text.aiReview}
           </ActionButton>
@@ -2233,10 +2139,10 @@ if (insertError || !insertedDocument?.id) {
                     },
                     {
                       label: text.invoiceReady,
-                      value: reviewResult.invoiceReady
+                      value: reviewResult.reviewPreconditions
                         ? text.yes
                         : text.review,
-                      ok: reviewResult.invoiceReady,
+                      ok: reviewResult.reviewPreconditions,
                     },
                   ].map((item) => (
                     <div
@@ -2343,83 +2249,16 @@ if (insertError || !insertedDocument?.id) {
                     </div>
                   </SectionCard>
 
-                  <SectionCard
-                    title={text.intelligence}
-                  >
-                    <div
-                      style={{
-                        display: "grid",
-                        gridTemplateColumns:
-                          "repeat(2, minmax(0, 1fr))",
-                        gap: "16px",
-                        fontSize: "12px",
-                      }}
-                    >
-                      {[
-                        [
-                          text.bolNumber,
-                          reviewResult.bolNumber,
-                        ],
-                        [
-                          text.pickupNumber,
-                          reviewResult.pickupNumber,
-                        ],
-                        [
-                          text.podNumber,
-                          reviewResult.podNumber,
-                        ],
-                        [
-                          text.documentDate,
-                          reviewResult.documentDate,
-                        ],
-                        [
-                          text.documentAmount,
-                          reviewResult.documentAmount !== null
-                            ? formatMoney(
-                                reviewResult.documentAmount
-                              )
-                            : text.notExtracted,
-                        ],
-                        [
-                          text.amountDifference,
-                          reviewResult.amountDifference !== null
-                            ? formatMoney(
-                                reviewResult.amountDifference
-                              )
-                            : text.notCalculated,
-                        ],
-                        [
-                          text.commodity,
-                          reviewResult.commodity,
-                        ],
-                        [text.weight, reviewResult.weight],
-                        [
-                          text.equipment,
-                          reviewResult.equipment,
-                        ],
-                        [text.hazmat, reviewResult.hazmat],
-                      ].map(([label, value]) => (
-                        <div key={String(label)}>
-                          <div
-                            style={{
-                              color: "#94a3b8",
-                              fontSize: "10px",
-                            }}
-                          >
-                            {label}
-                          </div>
-
-                          <div
-                            style={{
-                              marginTop: "4px",
-                              fontWeight: 700,
-                              color: "#334155",
-                            }}
-                          >
-                            {value ?? text.notExtracted}
-                          </div>
-                        </div>
-                      ))}
+                  <SectionCard title={isES ? "Revisión humana" : "Human Review"}>
+                    <p style={{ margin: 0, fontSize: "12px", lineHeight: 1.65, color: "#475569" }}>
+                      {isES
+                        ? "Abre el archivo original, compara la información con la carga y la parada asociada, y usa Aprobar documento o Rechazar documento para registrar tu decisión. Los indicadores de esta pantalla no sustituyen la inspección humana."
+                        : "Open the original file, compare its information with the load and associated stop, then use Approve Document or Decline Document to record your decision. The indicators on this screen do not replace human inspection."}
+                    </p>
+                    <div style={{ marginTop: "12px" }}>
+                      <ActionButton variant="secondary" onClick={() => openDocument(reviewingDocument)}>
+                        {isES ? "Abrir archivo original" : "Open Original File"}
+                      </ActionButton>
                     </div>
                   </SectionCard>
                 </div>
@@ -2490,12 +2329,12 @@ if (insertError || !insertedDocument?.id) {
                   style={{
                     marginTop: "16px",
                     border: `1px solid ${
-                      reviewResult.invoiceReady
+                      reviewResult.financeReady
                         ? "#bbf7d0"
                         : "#fde68a"
                     }`,
                     borderRadius: "12px",
-                    background: reviewResult.invoiceReady
+                    background: reviewResult.financeReady
                       ? "#f0fdf4"
                       : "#fffbeb",
                     padding: "16px",
@@ -2540,7 +2379,7 @@ if (insertError || !insertedDocument?.id) {
                     <div
                       style={{
                         borderRadius: "8px",
-                        background: reviewResult.invoiceReady
+                        background: reviewResult.financeReady
                           ? "#059669"
                           : "#f59e0b",
                         color: "#ffffff",
@@ -2550,7 +2389,7 @@ if (insertError || !insertedDocument?.id) {
                         whiteSpace: "nowrap",
                       }}
                     >
-                      {reviewResult.invoiceReady
+                      {reviewResult.financeReady
                         ? text.readyForFinance
                         : text.reviewRequired}
                     </div>
@@ -2584,7 +2423,7 @@ if (insertError || !insertedDocument?.id) {
                     disabled={
                       approving ||
                       declining ||
-                      !reviewResult.invoiceReady
+                      !reviewResult.reviewPreconditions
                     }
                     style={{
                       border: "none",
@@ -2597,13 +2436,13 @@ if (insertError || !insertedDocument?.id) {
                       cursor:
                         approving ||
                         declining ||
-                        !reviewResult.invoiceReady
+                        !reviewResult.reviewPreconditions
                           ? "not-allowed"
                           : "pointer",
                       opacity:
                         approving ||
                         declining ||
-                        !reviewResult.invoiceReady
+                        !reviewResult.reviewPreconditions
                           ? 0.5
                           : 1,
                     }}

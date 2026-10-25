@@ -1,4 +1,3 @@
-
 import { GoogleGenAI } from "@google/genai";
 import { createClient } from "@supabase/supabase-js";
 import { createServerClient } from "@supabase/ssr";
@@ -58,6 +57,25 @@ function cleanJsonObject(
 }
 
 export async function POST(request: NextRequest) {
+  // AI stays disabled unless an administrator explicitly enables it later.
+  // This guard blocks both authenticated user requests and internal webhook calls.
+  if (process.env.DOCUMENTS_AI_ENABLED !== "true") {
+    return NextResponse.json(
+      {
+        success: false,
+        disabled: true,
+        error:
+          "AI document review is disabled. Use human review instead. / La revisión de documentos con IA está desactivada. Utiliza la revisión humana.",
+      },
+      {
+        status: 503,
+        headers: {
+          "Cache-Control": "no-store",
+        },
+      }
+    );
+  }
+
   try {
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
     const publishableKey =
@@ -281,11 +299,11 @@ export async function POST(request: NextRequest) {
 
     // Drivers may validate only documents belonging to their own assigned load.
     if (userId && userRole === "driver") {
-      if (!load.driver_id || !document.driver_id) {
+      if (!load.driver_id) {
         return NextResponse.json(
           {
             error:
-              "The document has no assigned driver / El documento no tiene un conductor asignado.",
+              "The load has no assigned driver / La carga no tiene un conductor asignado.",
           },
           { status: 403 }
         );
@@ -304,7 +322,8 @@ export async function POST(request: NextRequest) {
       if (
         driverError ||
         !driver ||
-        document.driver_id !== driver.id
+        (document.driver_id != null &&
+          document.driver_id !== driver.id)
       ) {
         return NextResponse.json(
           {
@@ -704,7 +723,8 @@ Write summary and issues in both English and Spanish.
       validationPassed,
       status: newStatus,
       analysis,
-      approved: false,
+      // Compatibility field: true only when the validation checks passed.
+      approved: validationPassed,
       message: validationPassed
         ? "Automatic BOL/POD validation passed / La validación automática de BOL/POD fue satisfactoria."
         : "Automatic validation found a mismatch; correct this BOL/POD / La validación automática encontró una discrepancia; corrige este BOL/POD.",

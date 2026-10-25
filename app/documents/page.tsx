@@ -282,8 +282,8 @@ export default function DocumentsPage() {
       ? "Preparación para Finanzas"
       : "Finance Readiness",
     financeReadinessDescription: isES
-      ? "Aprobar este documento lo marca como revisado. Finanzas utilizará el documento revisado al comprobar si la carga está lista para facturación."
-      : "Approving this document marks it as reviewed. Finance will use the reviewed document when checking invoice readiness for this load.",
+      ? "La revisión de IA no es una aprobación de Finanzas. Finanzas debe aprobar cada BOL y POD requerido antes de que la carga esté lista para facturación."
+      : "AI review is not Finance approval. Finance must approve each required BOL and POD before the load is ready for invoicing.",
     readyForFinance: isES
       ? "LISTO PARA FINANZAS"
       : "READY FOR FINANCE",
@@ -529,9 +529,7 @@ const financeReady = useMemo(() => {
       documentRow.load_id === selectedLoad.id &&
       documentRow.load_stop_id === stopId &&
       documentRow.document_type.trim().toUpperCase() === type &&
-      ["reviewed", "approved"].includes(
-        (documentRow.status ?? "").trim().toLowerCase()
-      )
+      (documentRow.status ?? "").trim().toLowerCase() === "approved"
     );
 
   const allBOLsReviewed = pickupStops.every((stop) =>
@@ -798,25 +796,54 @@ const { data, error } = await supabase
         throw new Error(uploadError.message);
       }
 
-      const { error: insertError } = await supabase
-        .from("documents")
-        .insert({
-          company_id: selectedLoad.company_id,
-          load_id: selectedLoad.id,
-          load_stop_id: requiredStopType ? selectedLoadStopId : null,
-          document_type: selectedDocumentType,
-          file_name: selectedFile.name,
-          storage_path: storagePath,
-          status: "uploaded",
-        });
+      
+const { data: insertedDocument, error: insertError } = await supabase
+  .from("documents")
+  .insert({
+    company_id: selectedLoad.company_id,
+    load_id: selectedLoad.id,
+    load_stop_id: requiredStopType ? selectedLoadStopId : null,
+    document_type: selectedDocumentType,
+    file_name: selectedFile.name,
+    storage_path: storagePath,
+    status: "uploaded",
+  })
+  .select("id")
+  .single();
 
-      if (insertError) {
-        await supabase.storage
-          .from("load-documents")
-          .remove([storagePath]);
+if (insertError || !insertedDocument?.id) {
+  await supabase.storage
+    .from("load-documents")
+    .remove([storagePath]);
 
-        throw new Error(insertError.message);
-      }
+  throw new Error(
+    insertError?.message ??
+      (isES
+        ? "No se pudo guardar el documento."
+        : "Unable to save the document.")
+  );
+}
+
+
+      const newDocument: Document = {
+        id: insertedDocument.id,
+        load_id: selectedLoad.id,
+        load_stop_id: requiredStopType
+          ? selectedLoadStopId
+          : null,
+        document_type: selectedDocumentType,
+        file_name: selectedFile.name,
+        storage_path: storagePath,
+        status: "uploaded",
+        uploaded_at: new Date().toISOString(),
+      };
+
+      setDocuments((current) => [
+        newDocument,
+        ...current.filter(
+          (document) => document.id !== newDocument.id
+        ),
+      ]);
 
       setSelectedFile(null);
       setSelectedLoadStopId("");
@@ -831,7 +858,14 @@ const { data, error } = await supabase
 
       setMessage(text.uploadedSuccess);
 
-      await loadDocuments(selectedLoad.id);
+      if (
+        selectedDocumentType === "BOL" ||
+        selectedDocumentType === "POD"
+      ) {
+        await startAIReview(newDocument);
+      } else {
+        await loadDocuments(selectedLoad.id);
+      }
     } catch (error) {
       setErrorMessage(
         error instanceof Error
@@ -1029,7 +1063,7 @@ const { data, error } = await supabase
     };
   }
 
-  async function startAIReview(documentRow: Document) {
+ async function startAIReview(documentRow: Document) {
     setReviewingDocument(documentRow);
     setReviewStopId(documentRow.load_stop_id ?? "");
     setReviewResult(null);
@@ -1045,7 +1079,7 @@ const { data, error } = await supabase
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ documentId: documentRow.id }),
-        });
+        }); 
 
         const payload: unknown = await response.json().catch(() => null);
         const resultPayload = payload && typeof payload === "object"
@@ -1180,7 +1214,7 @@ const { data, error } = await supabase
       const { error: documentError } = await supabase
         .from("documents")
         .update({
-          status: "reviewed",
+          status: "approved",
         })
         .eq("id", reviewingDocument.id);
 
@@ -1199,7 +1233,7 @@ const { data, error } = await supabase
           documentRow.id === reviewingDocument.id
             ? {
                 ...documentRow,
-                status: "reviewed",
+                status: "approved",
               }
             : documentRow
         )
@@ -2523,7 +2557,6 @@ const { data, error } = await supabase
                   </div>
                 </div>
 
-                {reviewingDocument.document_type !== "BOL" && reviewingDocument.document_type !== "POD" && (
                 <div
                   style={{
                     display: "flex",
@@ -2580,7 +2613,6 @@ const { data, error } = await supabase
                       : text.approve}
                   </button>
                 </div>
-                )}
               </div>
             ) : (
               <div

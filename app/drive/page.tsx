@@ -3276,17 +3276,24 @@ if (
         return;
       }
 
-      const { error: documentError } = await supabase.from("documents").insert({
-        load_id: selectedLoad.id,
-        driver_id: selectedDriver.id,
-        document_type: normalizedDocumentType,
-        load_stop_id: loadStopId,
-        file_name: selectedFile.name,
-        storage_path: storagePath,
-        status: "uploaded",
-      });
+      const {
+        data: insertedDocument,
+        error: documentError,
+      } = await supabase
+        .from("documents")
+        .insert({
+          load_id: selectedLoad.id,
+          driver_id: selectedDriver.id,
+          document_type: normalizedDocumentType,
+          load_stop_id: loadStopId,
+          file_name: selectedFile.name,
+          storage_path: storagePath,
+          status: "uploaded",
+        })
+        .select("id")
+        .single();
 
-      if (documentError) {
+      if (documentError || !insertedDocument) {
         console.error("DOCUMENT DATABASE INSERT ERROR:", documentError);
 
         const { error: cleanupError } = await supabase.storage
@@ -3299,15 +3306,69 @@ if (
 
         showMessage(
           isES
-            ? `Error al registrar el documento: ${documentError.message}`
-            : `Document registration failed: ${documentError.message}`
+            ? `Error al registrar el documento: ${documentError?.message || "Supabase no devolvió el documento."}`
+            : `Document registration failed: ${documentError?.message || "Supabase returned no document."}`
         );
         return;
       }
 
+      // Automatically validate BOL/POD after the file and document record are saved.
+      // Other document types are uploaded normally and are not sent to operational AI review.
+      let uploadResultMessage = text.documentUploadSuccess;
+
+      if (
+        normalizedDocumentType === "BOL" ||
+        normalizedDocumentType === "POD"
+      ) {
+        try {
+          const validationResponse = await fetch("/api/documents-ai", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              documentId: insertedDocument.id,
+            }),
+          });
+
+          const validationResult: {
+            success?: boolean;
+            validationPassed?: boolean;
+            status?: string;
+            message?: string;
+            error?: string;
+          } | null = await validationResponse.json().catch(() => null);
+
+          if (
+            validationResponse.ok &&
+            validationResult?.success === true &&
+            typeof validationResult.message === "string"
+          ) {
+            uploadResultMessage = validationResult.message;
+          } else {
+            console.error("AUTOMATIC BOL/POD VALIDATION FAILED:", {
+              httpStatus: validationResponse.status,
+              result: validationResult,
+            });
+
+            uploadResultMessage =
+              validationResult?.error ||
+              (isES
+                ? "El documento se guardó, pero no se pudo completar la validación automática. Puedes volver a intentarlo desde Documentos."
+                : "The document was saved, but automatic validation could not be completed. You can retry from Documents.");
+          }
+        } catch (validationError) {
+          console.error("AUTOMATIC BOL/POD VALIDATION REQUEST ERROR:", validationError);
+
+          uploadResultMessage = isES
+            ? "El documento se guardó, pero no se pudo conectar con la validación automática. Puedes volver a intentarlo desde Documentos."
+            : "The document was saved, but automatic validation could not be reached. You can retry from Documents.";
+        }
+      }
+
       await loadDocuments(selectedLoad.id);
       closeDocumentModal();
-      showMessage(text.documentUploadSuccess);
+      showMessage(uploadResultMessage);
     } catch (error) {
       console.error("DOCUMENT UPLOAD ERROR:", error);
       showMessage(text.unexpectedUploadError);

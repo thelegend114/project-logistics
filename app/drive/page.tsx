@@ -1990,8 +1990,37 @@ async function startDrive(): Promise<boolean> {
     return false;
   }
 
-  // START DRIVE solo cambia el estado operativo del conductor y activa el GPS.
-  // No debe crear un evento HOS ni cambiar el estado de servicio automáticamente.
+  // START DRIVE también registra el estado HOS "Driving".
+  // En una sesión driver autenticada, setHosStatus guarda el evento en Supabase.
+  // Para roles de administración, conserva el comportamiento de vista previa local.
+  // No se crean eventos HOS por detectar una llegada GPS.
+  const hosAlreadyDriving = latestStatusNormalized === "driving";
+  const hosActivated = hosAlreadyDriving
+    ? true
+    : await setHosStatus("Driving");
+
+  if (!hosActivated) {
+    // Evitar dejar el estado operativo en driving si el evento HOS no se pudo activar.
+    const { error: rollbackError } = await supabase
+      .from("drivers")
+      .update({ status: driverWorkStatus })
+      .eq("id", driverId);
+
+    if (rollbackError) {
+      console.error("START DRIVE STATUS ROLLBACK FAILED:", rollbackError);
+    } else {
+      setDriverWorkStatus(driverWorkStatus);
+      setDrivers((current) =>
+        current.map((driver) =>
+          driver.id === driverId
+            ? { ...driver, status: driverWorkStatus }
+            : driver
+        )
+      );
+    }
+
+    return false;
+  }
 
   setDrivers((current) =>
     current.map((driver) =>

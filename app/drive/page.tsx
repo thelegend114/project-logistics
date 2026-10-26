@@ -474,6 +474,11 @@ export default function DriverPage() {
   };
 
   const [authReady, setAuthReady] = useState(false);
+  const [isMobileDevice, setIsMobileDevice] = useState(false);
+
+  useEffect(() => {
+    setIsMobileDevice(isMobileBrowser());
+  }, []);
 
   const [gpsTracking, setGpsTracking] = useState(false);
   const [gpsStatus, setGpsStatus] = useState(text.gpsNotActive);
@@ -743,7 +748,18 @@ async function loadDocuments(loadId: string) {
 
 function isMobileBrowser(): boolean {
   if (typeof navigator === "undefined") return false;
-  return /Android|iPhone|iPad|iPod|Mobile|Windows Phone/i.test(navigator.userAgent);
+
+  const mobileUserAgent = /Android|iPhone|iPad|iPod|Mobile|Windows Phone/i.test(
+    navigator.userAgent
+  );
+
+  // Detecta también teléfonos/tabletas que solicitan la versión de escritorio.
+  const touchDevice =
+    typeof window !== "undefined" &&
+    window.matchMedia("(pointer: coarse)").matches &&
+    Math.min(window.screen.width, window.screen.height) < 900;
+
+  return mobileUserAgent || touchDevice;
 }
 
 async function setHosStatus(status: string): Promise<boolean> {
@@ -796,6 +812,21 @@ async function setHosStatus(status: string): Promise<boolean> {
 
   await loadDriverHos(selectedDriver.id);
   return true;
+}
+
+function handleManualHosControl(status: string): void {
+  // Los botones manuales HOS son controles de escritorio solamente.
+  // Se comprueba también al hacer clic, no solo al ocultarlos visualmente.
+  if (isMobileBrowser()) {
+    showMessage(
+      isES
+        ? "Los botones manuales de HOS solo están disponibles en una computadora."
+        : "Manual HOS buttons are available on desktop computers only."
+    );
+    return;
+  }
+
+  void setHosStatus(status);
 }
  
 async function updateDriverWorkStatus(nextStatus: "off_duty" | "hold" | "available"): Promise<boolean> {
@@ -1281,36 +1312,15 @@ console.log(
           receivedAt: new Date().toISOString(),
         });
 
-        // Realtime is only a fallback when this page is not receiving browser GPS.
-        // Do not overwrite live accuracy, speed, or heading with database fields
-        // that are not stored in gps_events.
-        if (gpsWatchId.current === null) {
-          setLastLocation((current) => {
-            const latitude = Number(gpsEvent.latitude);
-            const longitude = Number(gpsEvent.longitude);
-            if (
-              !Number.isFinite(latitude) ||
-              !Number.isFinite(longitude) ||
-              Math.abs(latitude) > 90 ||
-              Math.abs(longitude) > 180
-            ) {
-              return current;
-            }
+        setLastLocation({
+          lat: gpsEvent.latitude,
+          lng: gpsEvent.longitude,
+          accuracy: 0,
+          speed: null,
+          heading: null,
+        });
 
-            return {
-              lat: latitude,
-              lng: longitude,
-              accuracy: 0,
-              speed: null,
-              heading: null,
-            };
-          });
-          setLastGpsReceivedAt(Date.now());
-        } else {
-          console.log(
-            "GPS REALTIME IGNORED: live browser GPS owns the map location"
-          );
-        }
+        setLastGpsReceivedAt(Date.now());
       }
     );
 
@@ -1869,8 +1879,6 @@ async function startDrive(): Promise<boolean> {
   const loadId = selectedLoad.id;
   const driverId = selectedDriver.id;
   const loadNumber = selectedLoad.load_number || "";
-  const previousDriverStatus = selectedDriver.status;
-  const previousCurrentLoadId = selectedDriver.current_load_id ?? null;
   const currentStatus = normalizeLoadStatus(selectedLoad.status);
 
   // START DRIVE puede comenzar una carga asignada o continuar
@@ -1982,56 +1990,8 @@ async function startDrive(): Promise<boolean> {
     return false;
   }
 
-  // Registrar HOS antes de iniciar el GPS.
-  const hosSaved = await setHosStatus("Driving");
-
-  if (!hosSaved) {
-    console.error("START DRIVE HOS FAILED");
-
-    const { error: rollbackError } = await supabase
-      .from("drivers")
-      .update({
-        status: previousDriverStatus,
-        current_load_id: previousCurrentLoadId,
-      })
-      .eq("id", driverId)
-      .eq("status", "driving");
-
-    if (rollbackError) {
-      console.error("START DRIVE ROLLBACK FAILED:", rollbackError);
-
-      showMessage(
-        isES
-          ? "Falló HOS y no se pudo restaurar el conductor. Verifica Supabase antes de continuar."
-          : "HOS failed and the driver could not be restored. Verify Supabase before continuing."
-      );
-      return false;
-    }
-
-    setDrivers((current) =>
-      current.map((driver) =>
-        driver.id === driverId
-          ? {
-              ...driver,
-              status: previousDriverStatus,
-              current_load_id: previousCurrentLoadId,
-            }
-          : driver
-      )
-    );
-
-   setDriverWorkStatus(
-  (previousDriverStatus ?? "available") as DriverWorkStatus
-);
-
-    showMessage(
-      isES
-        ? "No se guardó HOS. Se restauró el estado anterior del conductor y no se inició el GPS."
-        : "HOS was not saved. The driver's previous status was restored and GPS was not started."
-    );
-
-    return false;
-  }
+  // START DRIVE solo cambia el estado operativo del conductor y activa el GPS.
+  // No debe crear un evento HOS ni cambiar el estado de servicio automáticamente.
 
   setDrivers((current) =>
     current.map((driver) =>
@@ -2172,23 +2132,7 @@ async function startDrive(): Promise<boolean> {
 
     const refreshNavigation = async () => {
       const nextStop = await getCurrentSequenceStop(loadId);
-      setNavigationStop((current) => {
-        if (current === null || nextStop === null) {
-          return current === nextStop ? current : nextStop;
-        }
-
-        const sameStop =
-          current.id === nextStop.id &&
-          current.stop_order === nextStop.stop_order &&
-          current.stop_type === nextStop.stop_type &&
-          current.latitude === nextStop.latitude &&
-          current.longitude === nextStop.longitude &&
-          current.address === nextStop.address &&
-          current.city === nextStop.city &&
-          current.state === nextStop.state;
-
-        return sameStop ? current : nextStop;
-      });
+      setNavigationStop(nextStop);
     };
 
     // Función compartida para validar POD y BOL.
@@ -2517,40 +2461,8 @@ async function startDrive(): Promise<boolean> {
         return false;
       }
 
-      const hosSaved = await setHosStatus("Driving");
-
-      if (!hosSaved) {
-        console.error("MANUAL START TRIP: HOS SAVE FAILED");
-
-        const { error: driverRollbackError } = await supabase
-          .from("drivers")
-          .update({
-            status: driverRecord.status,
-            current_load_id: driverRecord.current_load_id,
-          })
-          .eq("id", driverId);
-
-        const { error: loadRollbackError } = await supabase
-          .from("loads")
-          .update({ status: originalLoadStatus })
-          .eq("id", loadId)
-          .eq("status", "in_transit");
-
-        if (driverRollbackError) {
-          console.error("START TRIP DRIVER ROLLBACK FAILED:", driverRollbackError);
-        }
-
-        if (loadRollbackError) {
-          console.error("START TRIP LOAD ROLLBACK FAILED:", loadRollbackError);
-        }
-
-        showMessage(
-          isES
-            ? "No se guardó HOS. Se intentó restaurar los estados anteriores."
-            : "HOS was not saved. The previous states were restored where possible."
-        );
-        return false;
-      }
+      // START TRIP actualiza el flujo operativo de la carga; no modifica HOS.
+      // El estado HOS solo cambia desde los controles manuales autorizados.
 
       refreshLoadInUI(updatedLoad as typeof selectedLoad);
 
@@ -3123,10 +3035,7 @@ async function startDrive(): Promise<boolean> {
           heading: position.coords.heading,
         };
 
-        // La posición del navegador es la fuente principal del mapa en este dispositivo.
-        // Browser geolocation is the primary live map source on this device.
         setLastLocation(location);
-        setLastGpsReceivedAt(Date.now());
 
         const gpsSaved = await saveGpsEvent(location, driverId, loadId);
 
@@ -3147,8 +3056,15 @@ async function startDrive(): Promise<boolean> {
           return;
         }
 
-        // La parada activa se actualiza en el flujo operativo, no en cada lectura GPS.
-        // The active stop is refreshed by the operational flow, not every GPS reading.
+        try {
+          // La llegada operativa se procesa desde TruckMap mediante onArrival.
+          if (gpsWatchId.current === null) return;
+
+          const nextStop = await getCurrentSequenceStop(loadId);
+          setNavigationStop(nextStop);
+        } catch (sequenceError) {
+          console.error("SEQUENCE ENGINE GPS ERROR:", sequenceError);
+        }
       },
       (error) => {
         console.error("GPS ERROR CODE:", error.code);
@@ -4298,37 +4214,45 @@ value={
             <p className="mt-1 text-sm text-slate-500">{text.hosSubtitle}</p>
           </div>
 
-          <div className="mt-5 grid grid-cols-2 gap-2">
-            {[
-              { value: "Off Duty", label: text.offDuty },
-              { value: "Sleeper", label: text.sleeper },
-              { value: "Driving", label: text.driving },
-              { value: "On Duty", label: text.onDuty },
-            ].map((status) => {
-              const isActive =
-                latestStatusNormalized ===
-                status.value.toLowerCase().replace(/[\s-]+/g, "_");
+          {isMobileDevice ? (
+            <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-900">
+              {isES
+                ? "Los botones manuales de HOS están desactivados en el celular. Puedes consultar aquí el historial y los relojes HOS."
+                : "Manual HOS buttons are disabled on mobile. You can still view HOS history and clocks here."}
+            </div>
+          ) : (
+            <div className="mt-5 hidden grid-cols-2 gap-2 md:grid">
+              {[
+                { value: "Off Duty", label: text.offDuty },
+                { value: "Sleeper", label: text.sleeper },
+                { value: "Driving", label: text.driving },
+                { value: "On Duty", label: text.onDuty },
+              ].map((status) => {
+                const isActive =
+                  latestStatusNormalized ===
+                  status.value.toLowerCase().replace(/[\s-]+/g, "_");
 
-              return (
-                <button
-                  key={status.value}
-                  type="button"
-                  disabled={!selectedDriver || isActive}
-                  onClick={() => {
-                    if (isActive) return;
-                    void setHosStatus(status.value);
-                  }}
-                  className={`rounded-xl border px-3 py-3 text-center text-sm font-bold transition disabled:cursor-not-allowed disabled:opacity-60 ${
-                    isActive
-                      ? "border-slate-900 bg-slate-900 text-white"
-                      : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
-                  }`}
-                >
-                  {status.label}
-                </button>
-              );
-            })}
-          </div>
+                return (
+                  <button
+                    key={status.value}
+                    type="button"
+                    disabled={!selectedDriver || isActive}
+                    onClick={() => {
+                      if (isActive) return;
+                      handleManualHosControl(status.value);
+                    }}
+                    className={`rounded-xl border px-3 py-3 text-center text-sm font-bold transition disabled:cursor-not-allowed disabled:opacity-60 ${
+                      isActive
+                        ? "border-slate-900 bg-slate-900 text-white"
+                        : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+                    }`}
+                  >
+                    {status.label}
+                  </button>
+                );
+              })}
+            </div>
+          )}
 
           <div className="mt-6">
             <div className="mb-3 flex items-center justify-between">

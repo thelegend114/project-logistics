@@ -185,45 +185,27 @@ function describeManeuver(
 }
 
 function createTruckIcon(heading: number) {
-  const rotation = ((heading % 360) + 360) % 360;
+  // The map pane rotates by -heading; counter-rotate this arrow so it always
+  // points to the top of the screen while the road map rotates underneath it.
+  const counterRotation = ((heading % 360) + 360) % 360;
 
   return L.divIcon({
-    className: "tractor-trailer-map-icon",
+    className: "navigation-arrow-marker",
     html: `
       <div style="
-        width:36px;height:52px;
-        transform:rotate(${rotation}deg);
-        transform-origin:center;
-        filter:drop-shadow(0 2px 3px #64748b);
+        width:42px;height:42px;display:flex;align-items:center;justify-content:center;
+        transform:rotate(${counterRotation}deg);transform-origin:center;
+        filter:drop-shadow(0 2px 3px rgba(15,23,42,.55));
       ">
-        <svg viewBox="0 0 40 58" width="36" height="52"
+        <svg viewBox="0 0 48 48" width="42" height="42" aria-hidden="true"
           xmlns="http://www.w3.org/2000/svg">
-          <path d="M20 1 L25 8 L20 6 L15 8 Z"
-            fill="#06b6d4" stroke="white" stroke-width="1"/>
-          <path d="M11 10 Q11 7 15 7 H25 Q29 7 29 10
-            L31 19 V24 H9 V19 Z"
-            fill="#2563eb" stroke="#172554" stroke-width="1.5"/>
-          <path d="M13 11 Q13 9 16 9 H24 Q27 9 27 11
-            L28 16 H12 Z"
-            fill="#a5f3fc" stroke="#0f172a" stroke-width="1.2"/>
-          <rect x="5" y="15" width="5" height="9" rx="1.5" fill="#111827"/>
-          <rect x="30" y="15" width="5" height="9" rx="1.5" fill="#111827"/>
-          <rect x="17" y="23" width="6" height="5" rx="1" fill="#475569"/>
-          <rect x="8" y="27" width="24" height="27" rx="3"
-            fill="#e2e8f0" stroke="#334155" stroke-width="1.5"/>
-          <rect x="11" y="30" width="18" height="21" rx="1.5"
-            fill="#f8fafc" stroke="#94a3b8"/>
-          <path d="M13 34 H27 M13 38 H27 M13 42 H27 M13 46 H27"
-            stroke="#cbd5e1" stroke-width="1"/>
-          <rect x="4" y="39" width="5" height="9" rx="1.5" fill="#111827"/>
-          <rect x="31" y="39" width="5" height="9" rx="1.5" fill="#111827"/>
-          <rect x="10" y="52" width="4" height="2.5" fill="#ef4444"/>
-          <rect x="26" y="52" width="4" height="2.5" fill="#ef4444"/>
+          <path d="M24 2 L43 42 L24 33 L5 42 Z" fill="#0891b2" stroke="#ffffff" stroke-width="3" stroke-linejoin="round"/>
+          <path d="M24 10 L24 31" stroke="#ffffff" stroke-width="3" stroke-linecap="round"/>
         </svg>
       </div>
     `,
-    iconSize: [36, 52],
-    iconAnchor: [18, 26],
+    iconSize: [42, 42],
+    iconAnchor: [21, 21],
   });
 }
 
@@ -257,6 +239,45 @@ function getDistanceFromRoute(
   return minimumDistance;
 }
 
+function getRouteBearing(position: L.LatLng, route: L.Polyline | null): number | null {
+  if (!route) return null;
+  const points = route.getLatLngs() as L.LatLng[];
+  if (points.length < 2) return null;
+
+  let closestIndex = 0;
+  let closestDistance = Infinity;
+  for (let i = 0; i < points.length; i++) {
+    const distance = position.distanceTo(points[i]);
+    if (distance < closestDistance) {
+      closestDistance = distance;
+      closestIndex = i;
+    }
+  }
+
+  const next = points[Math.min(closestIndex + 1, points.length - 1)];
+  if (next === points[closestIndex]) return null;
+  const toRad = Math.PI / 180;
+  const lat1 = position.lat * toRad;
+  const lat2 = next.lat * toRad;
+  const deltaLng = (next.lng - position.lng) * toRad;
+  const y = Math.sin(deltaLng) * Math.cos(lat2);
+  const x = Math.cos(lat1) * Math.sin(lat2) -
+    Math.sin(lat1) * Math.cos(lat2) * Math.cos(deltaLng);
+  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+}
+
+function applyMapBearing(map: L.Map, heading: number) {
+  const mapPane = map.getPane("mapPane");
+  if (!mapPane) return;
+  const size = map.getSize();
+  // Give the pane a viewport-sized rotation origin. Leaflet still owns its
+  // translate3d transform; CSS's independent rotate property does not replace it.
+  mapPane.style.width = `${size.x}px`;
+  mapPane.style.height = `${size.y}px`;
+  mapPane.style.transformOrigin = "50% 50%";
+  mapPane.style.rotate = `${-heading}deg`;
+}
+
 function isValidCoordinate(
   lat: number | null | undefined,
   lng: number | null | undefined
@@ -283,6 +304,9 @@ export default function TruckMap({
   const truckMarkerRef = useRef<L.Marker | null>(null);
   const destinationMarkerRef = useRef<L.Marker | null>(null);
   const routeRef = useRef<L.Polyline | null>(null);
+  const tileLayerRef = useRef<L.TileLayer | null>(null);
+  const tileErrorCountRef = useRef(0);
+  const fallbackTilesActiveRef = useRef(false);
 
   const headingRef = useRef(0);
   const lastRouteOriginRef = useRef<L.LatLng | null>(null);
@@ -350,19 +374,55 @@ export default function TruckMap({
     const map = L.map(containerRef.current).setView([39.5, -98.35], 4);
     mapRef.current = map;
 
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-      attribution:
-        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-      maxZoom: 19,
-    }).addTo(map);
+    const osmTiles = L.tileLayer(
+      "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+      {
+        attribution:
+          '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+        maxZoom: 19,
+        crossOrigin: true,
+      }
+    );
+    tileLayerRef.current = osmTiles;
+    osmTiles.addTo(map);
+    osmTiles.on("tileerror", () => {
+      tileErrorCountRef.current += 1;
+      // If the primary tile server is unavailable, switch once to a second
+      // public tile source instead of leaving the user with a blank map.
+      if (tileErrorCountRef.current >= 3 && !fallbackTilesActiveRef.current) {
+        fallbackTilesActiveRef.current = true;
+        osmTiles.remove();
+        const fallback = L.tileLayer(
+          "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+          {
+            attribution:
+              '&copy; OpenStreetMap contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+            subdomains: "abcd",
+            maxZoom: 20,
+          }
+        );
+        tileLayerRef.current = fallback;
+        fallback.addTo(map);
+      }
+    });
 
-    const observer = new ResizeObserver(() => map.invalidateSize());
-    observer.observe(containerRef.current);
+    const refreshMapSize = () => {
+      map.invalidateSize({ pan: false });
+      applyMapBearing(map, headingRef.current);
+    };
+    const observer = typeof ResizeObserver !== "undefined"
+      ? new ResizeObserver(refreshMapSize)
+      : null;
+    observer?.observe(containerRef.current);
+    window.addEventListener("resize", refreshMapSize);
+    requestAnimationFrame(refreshMapSize);
 
     return () => {
       routeRequestRef.current++;
       routeInFlightRef.current = false;
-      observer.disconnect();
+      observer?.disconnect();
+      window.removeEventListener("resize", refreshMapSize);
+      tileLayerRef.current = null;
       map.remove();
       mapRef.current = null;
       truckMarkerRef.current = null;
@@ -387,9 +447,13 @@ export default function TruckMap({
       heading <= 360
     ) {
       headingRef.current = heading;
+    } else {
+      const routeBearing = getRouteBearing(L.latLng(lat, lng), routeRef.current);
+      if (routeBearing !== null) headingRef.current = routeBearing;
     }
 
     const position = L.latLng(lat, lng);
+    applyMapBearing(map, headingRef.current);
     const icon = createTruckIcon(headingRef.current);
 
     if (!truckMarkerRef.current) {
@@ -527,9 +591,10 @@ export default function TruckMap({
       }
     }
 
-    // Keep the truck visible without continuously changing the zoom.
-    if (!map.getBounds().pad(-0.15).contains(position)) {
-      map.panTo(position, { animate: true, duration: 0.4 });
+    // Navigation mode keeps the live vehicle centered; zoom is not changed.
+    const center = map.getCenter();
+    if (center.distanceTo(position) > 8) {
+      map.panTo(position, { animate: false });
     }
   }, [lastLocation, destination, isES]);
 
@@ -770,6 +835,12 @@ export default function TruckMap({
 
         routeRef.current?.remove();
         routeRef.current = newRoute;
+        const routeBearing = getRouteBearing(origin, newRoute);
+        if (routeBearing !== null && !Number.isFinite(lastLocation?.heading ?? NaN)) {
+          headingRef.current = routeBearing;
+          applyMapBearing(map, headingRef.current);
+          truckMarkerRef.current?.setIcon(createTruckIcon(headingRef.current));
+        }
         stepsRef.current = newSteps;
         currentStepIndexRef.current = 0;
         offRouteRef.current = false;
@@ -826,15 +897,15 @@ export default function TruckMap({
     <div
       className={`relative w-full overflow-hidden ${
         fullScreen
-          ? "h-full rounded-none border-0 shadow-none"
-          : "rounded-xl border border-slate-700 shadow-lg"
+          ? "h-full min-h-0 rounded-none border-0 shadow-none"
+          : "h-[450px] rounded-xl border border-slate-700 shadow-lg"
       }`}
-      style={fullScreen ? { height: "100%", minHeight: 0 } : undefined}
+      style={fullScreen ? { height: "100%", minHeight: 0 } : { height: 450 }}
     >
       {destination && (
         <div
-          className="absolute left-3 right-3 top-3 z-[1000] rounded-xl bg-white p-3 shadow-lg"
-          style={{ pointerEvents: "none" }}
+          className="absolute left-3 right-3 top-3 z-[1000] rounded-xl border border-white/60 p-3 shadow-lg backdrop-blur-sm"
+          style={{ pointerEvents: "none", background: "rgba(255,255,255,0.72)" }}
         >
           <div className="flex items-start gap-3">
             <div
@@ -847,17 +918,17 @@ export default function TruckMap({
             </div>
 
             <div className="min-w-0 flex-1">
-              <div className="text-base font-bold text-slate-900">
+              <div className="text-base font-bold text-black">
                 {navigation.instruction}
               </div>
 
               {navigation.roadName && !navigation.isArrived && (
-                <div className="mt-0.5 text-sm text-slate-600">
+                <div className="mt-0.5 text-sm text-black">
                   {navigation.roadName}
                 </div>
               )}
 
-              <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-slate-600">
+              <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-black">
                 {!navigation.isArrived && (
                   <>
                     <span>
@@ -912,7 +983,7 @@ export default function TruckMap({
                 </div>
               )}
 
-              <div className="mt-2 text-[11px] text-slate-500">
+              <div className="mt-2 text-[11px] text-black">
                 {isES
                   ? "ETA aproximado; puede variar según las condiciones de la vía."
                   : "Estimated ETA; actual travel time may vary with road conditions."}

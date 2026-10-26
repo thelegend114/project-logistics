@@ -1713,43 +1713,106 @@ useEffect(() => {
 
         let driverLoadList = (driverLoadData || []) as Load[];
 
+        // IMPORTANTE: primero identificamos la primera carga asignada por pickup_date.
+        // No buscamos "la primera bloqueada", porque eso podría desbloquear una carga posterior.
+        // Las cargas entregadas/canceladas no participan en esta selección.
         const firstAssignedLoad = driverLoadList.find(
-          (load) => load.status === "assigned" && !load.pickup_unlocked
+          (load) => normalizeLoadStatus(load.status) === "assigned"
         );
 
-        if (firstAssignedLoad) {
+        console.log("DRIVE INITIAL LOAD ORDER:",
+          driverLoadList.map((load) => ({
+            id: load.id,
+            load_number: load.load_number,
+            status: load.status,
+            pickup_date: load.pickup_date,
+            pickup_unlocked: load.pickup_unlocked,
+          }))
+        );
+        console.log("DRIVE FIRST ASSIGNED LOAD:", firstAssignedLoad);
+
+        if (firstAssignedLoad && !firstAssignedLoad.pickup_unlocked) {
           const { data: unlockedData, error: unlockErr } = await supabase
             .from("loads")
             .update({ pickup_unlocked: true })
             .eq("id", firstAssignedLoad.id)
+            .eq("driver_id", driver.id)
+            .eq("status", "assigned")
+            .eq("pickup_unlocked", false)
             .select(LOAD_SELECT)
             .maybeSingle();
 
-          if (!unlockErr && unlockedData) {
+          if (unlockErr) {
+            console.error("DRIVE INITIAL LOAD UNLOCK FAILED:", {
+              loadId: firstAssignedLoad.id,
+              loadNumber: firstAssignedLoad.load_number,
+              error: unlockErr,
+            });
+            showMessage(
+              isES
+                ? `No se pudo desbloquear la primera carga (${firstAssignedLoad.load_number || firstAssignedLoad.id}): ${unlockErr.message}`
+                : `Could not unlock the first load (${firstAssignedLoad.load_number || firstAssignedLoad.id}): ${unlockErr.message}`
+            );
+          } else if (unlockedData) {
             driverLoadList = driverLoadList.map((load) =>
               load.id === unlockedData.id ? (unlockedData as Load) : load
             );
+            console.log("DRIVE FIRST LOAD UNLOCKED:", unlockedData);
+          } else {
+            // La actualización no devolvió fila: volver a consultar el estado real de Supabase.
+            const { data: refreshedLoads, error: refreshError } = await supabase
+              .from("loads")
+              .select(LOAD_SELECT)
+              .eq("driver_id", driver.id)
+              .order("pickup_date", { ascending: true, nullsFirst: true });
+
+            if (refreshError) {
+              console.error("DRIVE LOAD REFRESH AFTER UNLOCK FAILED:", refreshError);
+            } else {
+              driverLoadList = (refreshedLoads || []) as Load[];
+              const refreshedFirstAssigned = driverLoadList.find(
+                (load) => normalizeLoadStatus(load.status) === "assigned"
+              );
+              if (!refreshedFirstAssigned?.pickup_unlocked) {
+                showMessage(
+                  isES
+                    ? "La primera carga sigue bloqueada en Supabase. Revisa los permisos de actualización de loads."
+                    : "The first load is still locked in Supabase. Check the loads update permissions."
+                );
+              }
+            }
           }
         }
 
         setLoads(driverLoadList);
 
-        if (driver.current_load_id) {
-          const savedCurrent = driverLoadList.find(
-            (load) => String(load.id) === String(driver.current_load_id)
-          );
+        const savedCurrent = driver.current_load_id
+          ? driverLoadList.find(
+              (load) => String(load.id) === String(driver.current_load_id)
+            )
+          : null;
 
-          if (savedCurrent) {
-            setSelectedLoadId(savedCurrent.id);
-          }
-        } else {
-          const active = driverLoadList.find((load) => {
-            const status = normalizeLoadStatus(load.status);
-            return status === "at_pickup" || status === "in_transit" || status === "at_delivery";
-          });
+        // Una carga realmente en progreso conserva prioridad. Si no hay una activa,
+        // mostrar la primera carga assigned por fecha, no una carga futura bloqueada
+        // solo porque su id quedó guardado en drivers.current_load_id.
+        const activeCurrent = savedCurrent &&
+          ["in_progress", "at_pickup", "in_transit", "at_delivery"].includes(
+            normalizeLoadStatus(savedCurrent.status)
+          )
+          ? savedCurrent
+          : driverLoadList.find((load) =>
+              ["in_progress", "at_pickup", "in_transit", "at_delivery"].includes(
+                normalizeLoadStatus(load.status)
+              )
+            );
 
-          setSelectedLoadId(active?.id || "");
-        }
+        const firstAssignedForDisplay = driverLoadList.find(
+          (load) => normalizeLoadStatus(load.status) === "assigned"
+        );
+
+        setSelectedLoadId(
+          activeCurrent?.id || firstAssignedForDisplay?.id || savedCurrent?.id || ""
+        );
 
         const normalizedDriverStatus = String(driver.status || "off_duty")
           .toLowerCase()

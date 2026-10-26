@@ -380,6 +380,7 @@ export default function TruckMap({
         attribution:
           '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
         maxZoom: 19,
+        keepBuffer: 5,
         crossOrigin: true,
       }
     );
@@ -399,6 +400,7 @@ export default function TruckMap({
               '&copy; OpenStreetMap contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
             subdomains: "abcd",
             maxZoom: 20,
+            keepBuffer: 5,
           }
         );
         tileLayerRef.current = fallback;
@@ -432,6 +434,26 @@ export default function TruckMap({
     };
   }, []);
 
+  // Recalculate Leaflet's viewport when Drive switches between embedded and fullscreen.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    const frame = window.requestAnimationFrame(() => {
+      map.invalidateSize({ pan: false });
+      applyMapBearing(map, headingRef.current);
+      if (lastLocation && isValidCoordinate(lastLocation.lat, lastLocation.lng)) {
+        map.setView(
+          [lastLocation.lat, lastLocation.lng],
+          Math.max(map.getZoom(), 15),
+          { animate: false }
+        );
+      }
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [fullScreen, lastLocation]);
+
   // Update truck position, arrival state, and distance to the next maneuver.
   useEffect(() => {
     const map = mapRef.current;
@@ -462,11 +484,16 @@ export default function TruckMap({
         zIndexOffset: 1000,
         title: isES ? "Ubicación del camión" : "Truck location",
       }).addTo(map);
-      map.setView(position, 15);
     } else {
       truckMarkerRef.current.setLatLng(position);
       truckMarkerRef.current.setIcon(icon);
     }
+
+    // Seguir el GPS en ambos tamaños de pantalla. El camión queda centrado;
+    // el mapa y la ruta se desplazan debajo de la flecha fija hacia arriba.
+    const followZoom = Math.max(map.getZoom(), 15);
+    map.setView(position, followZoom, { animate: false });
+    applyMapBearing(map, headingRef.current);
 
     if (
       destination &&
@@ -624,7 +651,16 @@ export default function TruckMap({
       lastRerouteTimeRef.current = 0;
       offRouteRef.current = false;
       lastArrivalStopRef.current = null;
-      setNavigation(initialNavigation(isES));
+
+      setNavigation({
+        ...initialNavigation(isES),
+        instruction: !destination
+          ? (isES ? "Esperando la próxima parada..." : "Waiting for the next stop...")
+          : (isES
+              ? "La parada no tiene coordenadas GPS válidas. Revisa la dirección en Loads."
+              : "The stop has no valid GPS coordinates. Check the address in Loads."),
+        routeError: Boolean(destination),
+      });
       return;
     }
 
@@ -716,6 +752,12 @@ export default function TruckMap({
     const previousOrigin = lastRouteOriginRef.current;
     const destinationChanged =
       lastRouteDestinationRef.current !== destinationKey;
+    if (destinationChanged) {
+      routeRef.current?.remove();
+      routeRef.current = null;
+      stepsRef.current = [];
+      currentStepIndexRef.current = 0;
+    }
     const routeMissing = !routeRef.current;
     const originMoved =
       !previousOrigin ||
@@ -862,10 +904,8 @@ export default function TruckMap({
         });
 
         if (destinationChanged || routeMissing) {
-          map.fitBounds(newRoute.getBounds(), {
-            padding: [40, 40],
-            maxZoom: 15,
-          });
+          map.setView(origin, Math.max(map.getZoom(), 15), { animate: false });
+          applyMapBearing(map, headingRef.current);
         }
       } catch (error) {
         if (requestId !== routeRequestRef.current) return;
@@ -902,7 +942,7 @@ export default function TruckMap({
       }`}
       style={fullScreen ? { height: "100%", minHeight: 0 } : { height: 450 }}
     >
-      {destination && (
+      {
         <div
           className="absolute left-3 right-3 top-3 z-[1000] rounded-xl border border-white/60 p-3 shadow-lg backdrop-blur-sm"
           style={{ pointerEvents: "none", background: "rgba(255,255,255,0.72)" }}
@@ -968,10 +1008,14 @@ export default function TruckMap({
               )}
 
               {navigation.routeError && (
-                <div className="mt-2 text-sm font-semibold text-amber-700">
-                  {isES
-                    ? "El tiempo estimado no está disponible. Comprueba la conexión."
-                    : "ETA unavailable. Check the connection."}
+                <div className="mt-2 text-sm font-semibold text-amber-800">
+                  {destination && isValidCoordinate(destination.latitude, destination.longitude)
+                    ? (isES
+                        ? "No se pudo obtener la ruta por carretera. Comprueba la conexión y las coordenadas de la parada."
+                        : "Road routing failed. Check the connection and stop coordinates.")
+                    : (isES
+                        ? "La navegación necesita una parada seleccionada con coordenadas válidas."
+                        : "Navigation needs a selected stop with valid coordinates.")}
                 </div>
               )}
 
@@ -991,7 +1035,7 @@ export default function TruckMap({
             </div>
           </div>
         </div>
-      )}
+      }
 
       <div
         ref={containerRef}

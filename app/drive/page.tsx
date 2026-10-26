@@ -449,12 +449,6 @@ export default function DriverPage() {
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [loads, setLoads] = useState<Load[]>([]);
   const [hosEvents, setHosEvents] = useState<HOS[]>([]);
-  // Vista previa HOS exclusiva del navegador de escritorio; nunca se guarda en Supabase.
-  const [hosPreview, setHosPreview] = useState<{
-    driverId: string;
-    event_type: string;
-    event_time: string;
-  } | null>(null);
   const [documents, setDocuments] = useState<LoadDocument[]>([]);
   const [previousLoadDocuments, setPreviousLoadDocuments] = useState<LoadDocument[]>([]);
 
@@ -768,23 +762,8 @@ async function setHosStatus(status: string): Promise<boolean> {
     return false;
   }
 
-  // Solo una sesión autenticada con rol driver puede guardar HOS real.
-  // Admin/owner/dispatcher y otros roles solo cambian una vista previa local,
-  // independientemente de si están usando computadora o teléfono.
-  if (userRole.trim().toLowerCase() !== "driver") {
-    setHosPreview({
-      driverId: selectedDriver.id,
-      event_type: status,
-      event_time: new Date().toISOString(),
-    });
-    showMessage(
-      isES
-        ? "HOS de prueba cambiado solo en esta computadora; no se guardó en el historial real."
-        : "Test HOS changed only on this computer; it was not saved to the real history."
-    );
-    return true;
-  }
-
+  // Guardar el evento en Supabase para que computadora y celular compartan el estado.
+  const eventTime = new Date().toISOString();
   const location = lastLocation
     ? JSON.stringify({
         latitude: lastLocation.lat,
@@ -796,16 +775,17 @@ async function setHosStatus(status: string): Promise<boolean> {
   const { error } = await supabase.from("hos_events").insert({
     driver_id: selectedDriver.id,
     event_type: status,
-    event_time: new Date().toISOString(),
+    event_time: eventTime,
     location,
     source: "Project Driver",
   });
 
   if (error) {
+    console.error("HOS EVENT INSERT ERROR:", error);
     showMessage(
       isES
-        ? `No se pudo guardar el evento HOS: ${error.message}`
-        : `Could not save HOS event: ${error.message}`
+        ? `No se pudo guardar el evento HOS en Supabase: ${error.message}`
+        : `Could not save the HOS event to Supabase: ${error.message}`
     );
     return false;
   }
@@ -1321,6 +1301,20 @@ console.log(
         });
 
         setLastGpsReceivedAt(Date.now());
+
+        // La computadora recibe la ubicación del teléfono por Realtime. También
+        // debe cargar la próxima parada de esa misma carga para mostrar la ruta,
+        // no solamente la flecha del vehículo.
+        const realtimeLoadId = String(gpsEvent.load_id ?? "").trim();
+        if (realtimeLoadId) {
+          void getCurrentSequenceStop(realtimeLoadId)
+            .then((nextStop) => {
+              if (isActive) setNavigationStop(nextStop);
+            })
+            .catch((sequenceError) => {
+              console.error("REALTIME GPS NAVIGATION STOP ERROR:", sequenceError);
+            });
+        }
       }
     );
 
@@ -3129,6 +3123,15 @@ async function startDrive(): Promise<boolean> {
 
         setLastLocation(location);
 
+        // Iniciar navegación desde la primera ubicación aunque el registro histórico de GPS falle.
+        void getCurrentSequenceStop(loadId)
+          .then((nextStop) => {
+            if (gpsWatchId.current !== null) setNavigationStop(nextStop);
+          })
+          .catch((sequenceError) => {
+            console.error("SEQUENCE ENGINE GPS ERROR:", sequenceError);
+          });
+
         const gpsSaved = await saveGpsEvent(location, driverId, loadId);
 
         console.log("GPS SAVE RESULT:", {
@@ -3148,15 +3151,7 @@ async function startDrive(): Promise<boolean> {
           return;
         }
 
-        try {
-          // La llegada operativa se procesa desde TruckMap mediante onArrival.
-          if (gpsWatchId.current === null) return;
-
-          const nextStop = await getCurrentSequenceStop(loadId);
-          setNavigationStop(nextStop);
-        } catch (sequenceError) {
-          console.error("SEQUENCE ENGINE GPS ERROR:", sequenceError);
-        }
+        // La navegación ya se solicita; no depende del guardado de gps_events.
       },
       (error) => {
         console.error("GPS ERROR CODE:", error.code);
@@ -3471,12 +3466,7 @@ if (
   // Mantiene la referencia siempre al día para el reconectado por visibilitychange.
   startGpsRef.current = startGpsTracking;
 
-  const activeLocalHosPreview =
-    userRole.trim().toLowerCase() !== "driver" &&
-    hosPreview?.driverId === selectedDriverId
-      ? hosPreview
-      : null;
-  const latestHosEvent = activeLocalHosPreview || hosEvents[0] || null;
+  const latestHosEvent = hosEvents[0] || null;
   const latestHosTimestamp = latestHosEvent?.event_time
     ? new Date(latestHosEvent.event_time).getTime()
     : null;
@@ -4306,45 +4296,46 @@ value={
             <p className="mt-1 text-sm text-slate-500">{text.hosSubtitle}</p>
           </div>
 
-          {isMobileDevice ? (
-            <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-900">
+          {isMobileDevice && (
+            <p className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm font-medium text-slate-700">
               {isES
-                ? "Los botones manuales de HOS están desactivados en el celular. Puedes consultar aquí el historial y los relojes HOS."
-                : "Manual HOS buttons are disabled on mobile. You can still view HOS history and clocks here."}
-            </div>
-          ) : (
-            <div className="mt-5 hidden grid-cols-2 gap-2 md:grid">
-              {[
-                { value: "Off Duty", label: text.offDuty },
-                { value: "Sleeper", label: text.sleeper },
-                { value: "Driving", label: text.driving },
-                { value: "On Duty", label: text.onDuty },
-              ].map((status) => {
-                const isActive =
-                  latestStatusNormalized ===
-                  status.value.toLowerCase().replace(/[\s-]+/g, "_");
-
-                return (
-                  <button
-                    key={status.value}
-                    type="button"
-                    disabled={!selectedDriver || isActive}
-                    onClick={() => {
-                      if (isActive) return;
-                      handleManualHosControl(status.value);
-                    }}
-                    className={`rounded-xl border px-3 py-3 text-center text-sm font-bold transition disabled:cursor-not-allowed disabled:opacity-60 ${
-                      isActive
-                        ? "border-slate-900 bg-slate-900 text-white"
-                        : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
-                    }`}
-                  >
-                    {status.label}
-                  </button>
-                );
-              })}
-            </div>
+                ? "Los botones HOS se muestran deshabilitados en el celular. El estado activo se marca en negro."
+                : "HOS buttons are shown disabled on mobile. The active status is marked in black."}
+            </p>
           )}
+
+          <div className="mt-5 grid grid-cols-2 gap-2">
+            {[
+              { value: "Off Duty", label: text.offDuty },
+              { value: "Sleeper", label: text.sleeper },
+              { value: "Driving", label: text.driving },
+              { value: "On Duty", label: text.onDuty },
+            ].map((status) => {
+              const isActive =
+                latestStatusNormalized ===
+                status.value.toLowerCase().replace(/[\s-]+/g, "_");
+
+              return (
+                <button
+                  key={status.value}
+                  type="button"
+                  disabled={isMobileDevice || !selectedDriver || isActive}
+                  aria-pressed={isActive}
+                  onClick={() => {
+                    if (isMobileDevice || isActive) return;
+                    handleManualHosControl(status.value);
+                  }}
+                  className={`rounded-xl border px-3 py-3 text-center text-sm font-bold transition disabled:cursor-not-allowed ${
+                    isActive
+                      ? "border-black bg-black text-white disabled:opacity-100"
+                      : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-60"
+                  }`}
+                >
+                  {status.label}
+                </button>
+              );
+            })}
+          </div>
 
           <div className="mt-6">
             <div className="mb-3 flex items-center justify-between">

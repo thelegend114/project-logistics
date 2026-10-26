@@ -1,10 +1,7 @@
-
-
 "use client";
 
 import { useEffect, useRef, useState } from "react";
 import L from "leaflet";
-import "@tomickigrzegorz/leaflet-rotate";
 import "leaflet/dist/leaflet.css";
 
 interface NavigationStop {
@@ -52,14 +49,13 @@ interface RouteState {
 
 const OFF_ROUTE_METERS = 70;
 const ARRIVAL_RADIUS_METERS = 161;
+const ARRIVAL_RESET_RADIUS_METERS = 200;
 const ARRIVAL_TO_MANEUVER_METERS = 45;
 const ROUTE_REFRESH_DISTANCE_METERS = 100;
 const ROUTE_REFRESH_INTERVAL_MS = 30_000;
 const REROUTE_COOLDOWN_MS = 12_000;
 const MIN_REROUTE_MOVEMENT_METERS = 15;
 const ROUTE_RETRY_INTERVAL_MS = 15_000;
-const ARRIVAL_RETRY_MS = 20_000;
-const ARRIVAL_MAX_ATTEMPTS = 3;
 
 function initialNavigation(isES: boolean): RouteState {
   return {
@@ -91,7 +87,6 @@ function formatDuration(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return "--";
 
   const minutes = Math.max(0, Math.round(seconds / 60));
-
   if (minutes < 60) return `${minutes} min`;
 
   const hours = Math.floor(minutes / 60);
@@ -159,13 +154,9 @@ function describeManeuver(
   } else if (type === "fork") {
     instruction =
       directions[modifier] ??
-      (isES
-        ? "Continúa por la bifurcación"
-        : "Continue through the fork");
+      (isES ? "Continúa por la bifurcación" : "Continue through the fork");
   } else if (type === "on ramp") {
-    instruction = isES
-      ? "Toma la rampa de acceso"
-      : "Take the entrance ramp";
+    instruction = isES ? "Toma la rampa de acceso" : "Take the entrance ramp";
   } else if (type === "off ramp") {
     instruction = isES ? "Toma la salida" : "Take the exit ramp";
   } else if (type === "end of road") {
@@ -187,9 +178,7 @@ function describeManeuver(
   }
 
   if (roadName) {
-    instruction += isES
-      ? ` hacia ${roadName}`
-      : ` onto ${roadName}`;
+    instruction += isES ? ` hacia ${roadName}` : ` onto ${roadName}`;
   }
 
   return instruction;
@@ -202,8 +191,7 @@ function createTruckIcon(heading: number) {
     className: "tractor-trailer-map-icon",
     html: `
       <div style="
-        width:36px;
-        height:52px;
+        width:36px;height:52px;
         transform:rotate(${rotation}deg);
         transform-origin:center;
         filter:drop-shadow(0 2px 3px #64748b);
@@ -239,13 +227,13 @@ function createTruckIcon(heading: number) {
   });
 }
 
+/** Calculates minimum distance to route segments, not only their vertices. */
 function getDistanceFromRoute(
   position: L.LatLng,
   route: L.Polyline,
   map: L.Map
 ): number {
   const points = route.getLatLngs() as L.LatLng[];
-
   if (points.length < 2) return Infinity;
 
   const projectedPosition = map.latLngToLayerPoint(position);
@@ -254,17 +242,16 @@ function getDistanceFromRoute(
   for (let i = 0; i < points.length - 1; i++) {
     const start = map.latLngToLayerPoint(points[i]);
     const end = map.latLngToLayerPoint(points[i + 1]);
-
     const closest = L.LineUtil.closestPointOnSegment(
       projectedPosition,
       start,
       end
     );
-
     const closestLatLng = map.layerPointToLatLng(closest);
-    const distance = position.distanceTo(closestLatLng);
-
-    minimumDistance = Math.min(minimumDistance, distance);
+    minimumDistance = Math.min(
+      minimumDistance,
+      position.distanceTo(closestLatLng)
+    );
   }
 
   return minimumDistance;
@@ -273,14 +260,14 @@ function getDistanceFromRoute(
 function isValidCoordinate(
   lat: number | null | undefined,
   lng: number | null | undefined
-): boolean {
+): lat is number {
   return (
     lat != null &&
     lng != null &&
-    Number.isFinite(Number(lat)) &&
-    Number.isFinite(Number(lng)) &&
-    Math.abs(Number(lat)) <= 90 &&
-    Math.abs(Number(lng)) <= 180
+    Number.isFinite(lat) &&
+    Number.isFinite(lng) &&
+    Math.abs(lat) <= 90 &&
+    Math.abs(lng) <= 180
   );
 }
 
@@ -291,19 +278,8 @@ export default function TruckMap({
   fullScreen = false,
   onArrival,
 }: TruckMapProps) {
-
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
-  const arrivalNotifiedRef = useRef<{
-    id: string;
-    attempts: number;
-    at: number;
-  } | null>(null);
-
-  // Siempre apunta al onArrival más reciente de la página (evita cierres viejos).
-  const onArrivalRef = useRef<TruckMapProps["onArrival"]>(onArrival);
-  onArrivalRef.current = onArrival;
-
   const truckMarkerRef = useRef<L.Marker | null>(null);
   const destinationMarkerRef = useRef<L.Marker | null>(null);
   const routeRef = useRef<L.Polyline | null>(null);
@@ -314,10 +290,13 @@ export default function TruckMap({
   const lastSuccessfulRouteTimeRef = useRef(0);
   const lastRouteAttemptTimeRef = useRef(0);
   const routeRequestRef = useRef(0);
+  const routeInFlightRef = useRef(false);
+  const onArrivalRef = useRef(onArrival);
+  const lastArrivalStopRef = useRef<string | null>(null);
+  onArrivalRef.current = onArrival;
 
   const lastRerouteTimeRef = useRef(0);
   const lastReroutePositionRef = useRef<L.LatLng | null>(null);
-
   const stepsRef = useRef<NavigationStep[]>([]);
   const currentStepIndexRef = useRef(0);
   const offRouteRef = useRef(false);
@@ -328,7 +307,7 @@ export default function TruckMap({
     initialNavigation(isES)
   );
 
-  // Anunciar instrucciones nuevas sin repetirlas continuamente.
+  // Speak new instructions without repeating the same instruction continuously.
   useEffect(() => {
     if (!destination || !navigation.instruction.trim()) return;
     if (navigation.isCalculating || navigation.routeError) return;
@@ -347,18 +326,12 @@ export default function TruckMap({
 
     const speechKey =
       `${destination.id}:${isES ? "es" : "en"}:${navigation.instruction}`;
-
     if (lastSpokenInstructionRef.current === speechKey) return;
 
     lastSpokenInstructionRef.current = speechKey;
-
-    const utterance = new SpeechSynthesisUtterance(
-      navigation.instruction
-    );
-
+    const utterance = new SpeechSynthesisUtterance(navigation.instruction);
     utterance.lang = isES ? "es-US" : "en-US";
     utterance.rate = 0.95;
-
     window.speechSynthesis.speak(utterance);
   }, [
     navigation.instruction,
@@ -368,45 +341,29 @@ export default function TruckMap({
     isES,
   ]);
 
-  // Inicializar Leaflet una sola vez.
+  // Initialize Leaflet once.
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
 
-   const initialPosition: L.LatLngExpression = lastLocation
-  ? [lastLocation.lat, lastLocation.lng]
-  : [25.77154, -80.38205];
+    // Start with a neutral continental-US view; never imply a hard-coded truck location.
+    // A valid live GPS position or the active stop will center the map when available.
+    const map = L.map(containerRef.current).setView([39.5, -98.35], 4);
+    mapRef.current = map;
 
-const map = L.map(containerRef.current, {
-  zoomControl: false,
-  attributionControl: true,
-  rotate: true,
-  bearing: 0,
-  touchRotate: false,
-  shiftKeyRotate: false,
-  dragRotate: false,
-}).setView(initialPosition, 16);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution:
+        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+      maxZoom: 19,
+    }).addTo(map);
 
-mapRef.current = map;
-
-    
-L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-  attribution:
-    '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-  maxZoom: 19,
-}).addTo(map);
-
-
-    const observer = new ResizeObserver(() => {
-      map.invalidateSize();
-    });
-
+    const observer = new ResizeObserver(() => map.invalidateSize());
     observer.observe(containerRef.current);
 
     return () => {
       routeRequestRef.current++;
+      routeInFlightRef.current = false;
       observer.disconnect();
       map.remove();
-
       mapRef.current = null;
       truckMarkerRef.current = null;
       destinationMarkerRef.current = null;
@@ -415,220 +372,183 @@ L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
     };
   }, []);
 
-  // Actualizar la posición del camión y comprobar la llegada.
- 
-useEffect(() => {
-  const map = mapRef.current;
+  // Update truck position, arrival state, and distance to the next maneuver.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !lastLocation) return;
 
-  if (
-    !map ||
-    !lastLocation ||
-    !isValidCoordinate(lastLocation.lat, lastLocation.lng)
-  ) {
-    return;
-  }
+    const { lat, lng, heading } = lastLocation;
+    if (!isValidCoordinate(lat, lng)) return;
 
-  const { lat, lng, heading } = lastLocation;
-
-  if (
-    typeof heading === "number" &&
-    Number.isFinite(heading) &&
-    heading >= 0 &&
-    heading <= 360
-  ) {
-    headingRef.current = heading;
-
-    if (typeof map.setHeading === "function") {
-      map.setHeading(heading);
+    if (
+      typeof heading === "number" &&
+      Number.isFinite(heading) &&
+      heading >= 0 &&
+      heading <= 360
+    ) {
+      headingRef.current = heading;
     }
-  }
 
-  const position = L.latLng(lat, lng);
-  const icon = createTruckIcon(0);
+    const position = L.latLng(lat, lng);
+    const icon = createTruckIcon(headingRef.current);
 
-  if (!truckMarkerRef.current) {
-    truckMarkerRef.current = L.marker(position, {
-      icon,
-      zIndexOffset: 1000,
-      title: isES ? "Ubicación del camión" : "Truck location",
-    }).addTo(map);
-  } else {
-    truckMarkerRef.current.setLatLng(position);
-    truckMarkerRef.current.setIcon(icon);
-  }
-
-  // Detectar llegada y notificar al flujo operativo.
-  if (
-    destination &&
-    isValidCoordinate(destination.latitude, destination.longitude)
-  ) {
-    const destinationPosition = L.latLng(
-      Number(destination.latitude),
-      Number(destination.longitude)
-    );
-
-    const distanceToDestination =
-      position.distanceTo(destinationPosition);
-
-    if (distanceToDestination <= ARRIVAL_RADIUS_METERS) {
-      // CORREGIDO: antes solo hacía "return" y nunca avisaba a la página,
-      // por eso las paradas no pasaban a at_pickup / at_delivery.
-      const now = Date.now();
-      const notified = arrivalNotifiedRef.current;
-
-      let canNotify = true;
-      let attempts = 1;
-
-      if (notified && notified.id === destination.id) {
-        attempts = notified.attempts + 1;
-        canNotify =
-          notified.attempts < ARRIVAL_MAX_ATTEMPTS &&
-          now - notified.at >= ARRIVAL_RETRY_MS;
-      }
-
-      if (canNotify) {
-        arrivalNotifiedRef.current = {
-          id: destination.id,
-          attempts,
-          at: now,
-        };
-
-        console.log("TRUCKMAP ARRIVAL NOTIFIED:", {
-          stopId: destination.id,
-          stopOrder: destination.stop_order,
-          distanceMeters: Math.round(distanceToDestination),
-          attempt: attempts,
-          hasHandler: Boolean(onArrivalRef.current),
-        });
-
-        onArrivalRef.current?.(destination);
-      }
-
-      return;
-    }
-  }
-
-  // Actualizar la siguiente maniobra.
-  const steps = stepsRef.current;
-  let stepIndex = currentStepIndexRef.current;
-
-  while (stepIndex < steps.length - 1) {
-    const distance = position.distanceTo(
-      steps[stepIndex].location
-    );
-
-    if (distance <= ARRIVAL_TO_MANEUVER_METERS) {
-      stepIndex++;
+    if (!truckMarkerRef.current) {
+      truckMarkerRef.current = L.marker(position, {
+        icon,
+        zIndexOffset: 1000,
+        title: isES ? "Ubicación del camión" : "Truck location",
+      }).addTo(map);
+      map.setView(position, 15);
     } else {
-      break;
+      truckMarkerRef.current.setLatLng(position);
+      truckMarkerRef.current.setIcon(icon);
     }
-  }
 
-  currentStepIndexRef.current = stepIndex;
+    if (
+      destination &&
+      isValidCoordinate(destination.latitude, destination.longitude)
+    ) {
+      const destinationPosition = L.latLng(
+        Number(destination.latitude),
+        Number(destination.longitude)
+      );
+      const distanceToDestination = position.distanceTo(destinationPosition);
 
-  const currentStep = steps[stepIndex];
-
-  if (currentStep) {
-    const distanceToManeuver = position.distanceTo(
-      currentStep.location
-    );
-
-    setNavigation((previous) => {
-      if (previous.isArrived) return previous;
-
-      return {
-        ...previous,
-        instruction: currentStep.instruction,
-        roadName: currentStep.roadName,
-        distanceToManeuver,
-      };
-    });
-  }
-
-  // Detectar desviaciones comparando con la ruta.
-  const route = routeRef.current;
-
-  if (route) {
-    const distanceFromRoute = getDistanceFromRoute(
-      position,
-      route,
-      map
-    );
-
-    const isOffRoute =
-      distanceFromRoute > OFF_ROUTE_METERS;
-
-    offRouteRef.current = isOffRoute;
-
-    setNavigation((previous) => ({
-      ...previous,
-      isOffRoute: previous.isArrived ? false : isOffRoute,
-    }));
-
-    if (isOffRoute) {
-      const now = Date.now();
-      const previousReroutePosition =
-        lastReroutePositionRef.current;
-
-      const movedEnough =
-        !previousReroutePosition ||
-        previousReroutePosition.distanceTo(position) >=
-          MIN_REROUTE_MOVEMENT_METERS;
-
-      const cooldownPassed =
-        now - lastRerouteTimeRef.current >=
-          REROUTE_COOLDOWN_MS;
-
-      if (movedEnough && cooldownPassed) {
-        lastRerouteTimeRef.current = now;
-        lastReroutePositionRef.current = position;
-        lastRouteOriginRef.current = null;
-
+      if (distanceToDestination <= ARRIVAL_RADIUS_METERS) {
         setNavigation((previous) => ({
           ...previous,
           instruction: isES
-            ? "Desvío detectado. Recalculando ruta..."
-            : "Detour detected. Recalculating route...",
-          isCalculating: true,
+            ? "Has llegado a la parada"
+            : "You have arrived at the stop",
+          roadName: destination.address ?? "",
+          distanceToManeuver: distanceToDestination,
+          routeDistance: 0,
+          routeDuration: 0,
+          isOffRoute: false,
+          isArrived: true,
+          isCalculating: false,
           routeError: false,
         }));
 
-        setRerouteVersion((version) => version + 1);
+        if (lastArrivalStopRef.current !== destination.id) {
+          lastArrivalStopRef.current = destination.id;
+          onArrivalRef.current?.(destination);
+        }
+      } else {
+        if (distanceToDestination > ARRIVAL_RESET_RADIUS_METERS) {
+          lastArrivalStopRef.current = null;
+        }
+        setNavigation((previous) =>
+          previous.isArrived
+            ? { ...previous, isArrived: false }
+            : previous
+        );
       }
     }
-  }
 
-  // Mantener el camión visible sin cambiar el zoom continuamente.
-  if (!map.getBounds().pad(-0.15).contains(position)) {
-    map.panTo(position, {
-      animate: true,
-      duration: 0.4,
-    });
-  }
-}, [lastLocation, destination, isES]);
+    const steps = stepsRef.current;
+    let stepIndex = currentStepIndexRef.current;
 
+    while (stepIndex < steps.length - 1) {
+      const distance = position.distanceTo(steps[stepIndex].location);
+      if (distance <= ARRIVAL_TO_MANEUVER_METERS) {
+        stepIndex++;
+      } else {
+        break;
+      }
+    }
 
-  // Calcular y actualizar la ruta.
+    currentStepIndexRef.current = stepIndex;
+    const currentStep = steps[stepIndex];
+
+    if (currentStep) {
+      const distanceToManeuver = position.distanceTo(currentStep.location);
+      // Keep the displayed distance and ETA as the remaining route, rather
+      // than leaving the original full-trip values on screen.
+      const remainingSteps = steps.slice(stepIndex);
+      const remainingDistance = remainingSteps.reduce(
+        (total, step) => total + step.distance,
+        0
+      );
+      const remainingDuration = remainingSteps.reduce(
+        (total, step) => total + step.duration,
+        0
+      );
+
+      setNavigation((previous) => {
+        if (previous.isArrived) return previous;
+        return {
+          ...previous,
+          instruction: currentStep.instruction,
+          roadName: currentStep.roadName,
+          distanceToManeuver,
+          routeDistance: remainingDistance,
+          routeDuration: remainingDuration,
+        };
+      });
+    }
+
+    const route = routeRef.current;
+    if (route) {
+      const distanceFromRoute = getDistanceFromRoute(position, route, map);
+      const isOffRoute = distanceFromRoute > OFF_ROUTE_METERS;
+      offRouteRef.current = isOffRoute;
+
+      setNavigation((previous) => ({
+        ...previous,
+        isOffRoute: previous.isArrived ? false : isOffRoute,
+      }));
+
+      if (isOffRoute) {
+        const now = Date.now();
+        const previousReroutePosition = lastReroutePositionRef.current;
+        const movedEnough =
+          !previousReroutePosition ||
+          previousReroutePosition.distanceTo(position) >=
+            MIN_REROUTE_MOVEMENT_METERS;
+        const cooldownPassed =
+          now - lastRerouteTimeRef.current >= REROUTE_COOLDOWN_MS;
+
+        if (movedEnough && cooldownPassed) {
+          lastRerouteTimeRef.current = now;
+          lastReroutePositionRef.current = position;
+          lastRouteOriginRef.current = null;
+
+          setNavigation((previous) => ({
+            ...previous,
+            instruction: isES
+              ? "Desvío detectado. Recalculando ruta..."
+              : "Detour detected. Recalculating route...",
+            isCalculating: true,
+            routeError: false,
+          }));
+          setRerouteVersion((version) => version + 1);
+        }
+      }
+    }
+
+    // Keep the truck visible without continuously changing the zoom.
+    if (!map.getBounds().pad(-0.15).contains(position)) {
+      map.panTo(position, { animate: true, duration: 0.4 });
+    }
+  }, [lastLocation, destination, isES]);
+
+  // Calculate and refresh the road route.
   useEffect(() => {
     const map = mapRef.current;
-
     if (!map) return;
 
     if (
       !destination ||
-      !isValidCoordinate(
-        destination.latitude,
-        destination.longitude
-      )
+      !isValidCoordinate(destination.latitude, destination.longitude)
     ) {
       routeRequestRef.current++;
+      routeInFlightRef.current = false;
 
       destinationMarkerRef.current?.remove();
       destinationMarkerRef.current = null;
-
       routeRef.current?.remove();
       routeRef.current = null;
-
       stepsRef.current = [];
       currentStepIndexRef.current = 0;
       lastRouteOriginRef.current = null;
@@ -638,8 +558,7 @@ useEffect(() => {
       lastReroutePositionRef.current = null;
       lastRerouteTimeRef.current = 0;
       offRouteRef.current = false;
-      arrivalNotifiedRef.current = null;
-
+      lastArrivalStopRef.current = null;
       setNavigation(initialNavigation(isES));
       return;
     }
@@ -648,7 +567,6 @@ useEffect(() => {
       Number(destination.latitude),
       Number(destination.longitude)
     );
-
     const destinationKey = [
       destination.id,
       destination.latitude,
@@ -656,49 +574,38 @@ useEffect(() => {
     ].join(":");
 
     if (!destinationMarkerRef.current) {
-      destinationMarkerRef.current = L.marker(
-        destinationPosition,
-        {
-          icon: L.divIcon({
-            className: "navigation-destination-icon",
-            html: `
-              <div style="
-                width:22px;
-                height:22px;
-                border-radius:50%;
-                background:#dc2626;
-                border:4px solid white;
-                box-shadow:0 2px 6px #64748b;
-              "></div>
-            `,
-            iconSize: [22, 22],
-            iconAnchor: [11, 11],
-          }),
-          title: isES ? "Próxima parada" : "Next stop",
-        }
-      ).addTo(map);
+      destinationMarkerRef.current = L.marker(destinationPosition, {
+        icon: L.divIcon({
+          className: "navigation-destination-icon",
+          html: `
+            <div style="
+              width:22px;
+              height:22px;
+              border-radius:50%;
+              background:#dc2626;
+              border:4px solid white;
+              box-shadow:0 2px 6px #64748b;
+            "></div>
+          `,
+          iconSize: [22, 22],
+          iconAnchor: [11, 11],
+        }),
+        title: isES ? "Próxima parada" : "Next stop",
+      }).addTo(map);
     } else {
-      destinationMarkerRef.current.setLatLng(
-        destinationPosition
-      );
+      destinationMarkerRef.current.setLatLng(destinationPosition);
     }
 
     const popupContent = document.createElement("div");
     const popupTitle = document.createElement("strong");
-
-    popupTitle.textContent = isES
-      ? "Próxima parada"
-      : "Next stop";
-
+    popupTitle.textContent = isES ? "Próxima parada" : "Next stop";
     popupContent.appendChild(popupTitle);
 
     const popupDetails = document.createElement("div");
-
     popupDetails.textContent =
       `${isES ? "Parada" : "Stop"} ${destination.stop_order}: ` +
       `${destination.stop_type} · ${destination.address ?? ""} · ` +
       `${destination.city ?? ""} ${destination.state ?? ""}`;
-
     popupContent.appendChild(popupDetails);
     destinationMarkerRef.current.bindPopup(popupContent);
 
@@ -706,6 +613,9 @@ useEffect(() => {
       !lastLocation ||
       !isValidCoordinate(lastLocation.lat, lastLocation.lng)
     ) {
+      if (!truckMarkerRef.current) {
+        map.setView(destinationPosition, 14);
+      }
       setNavigation((previous) => ({
         ...previous,
         instruction: isES
@@ -713,19 +623,13 @@ useEffect(() => {
           : "Waiting for GPS location...",
         isCalculating: false,
       }));
-
       return;
     }
 
-    const origin = L.latLng(
-      lastLocation.lat,
-      lastLocation.lng
-    );
+    const origin = L.latLng(lastLocation.lat, lastLocation.lng);
+    const distanceToDestination = origin.distanceTo(destinationPosition);
 
-    const distanceToDestination =
-      origin.distanceTo(destinationPosition);
-
-    // Llegada visual: no modifica el estado operativo de la parada.
+    // Map arrival does not complete or modify the stop in Supabase.
     if (distanceToDestination <= ARRIVAL_RADIUS_METERS) {
       setNavigation((previous) => ({
         ...previous,
@@ -741,26 +645,19 @@ useEffect(() => {
         isCalculating: false,
         routeError: false,
       }));
-
       return;
     }
 
     const previousOrigin = lastRouteOriginRef.current;
-
     const destinationChanged =
       lastRouteDestinationRef.current !== destinationKey;
-
     const routeMissing = !routeRef.current;
-
     const originMoved =
       !previousOrigin ||
-      previousOrigin.distanceTo(origin) >=
-        ROUTE_REFRESH_DISTANCE_METERS;
-
+      previousOrigin.distanceTo(origin) >= ROUTE_REFRESH_DISTANCE_METERS;
     const refreshDue =
       Date.now() - lastSuccessfulRouteTimeRef.current >=
       ROUTE_REFRESH_INTERVAL_MS;
-
     const rerouteRequested = previousOrigin === null;
 
     const needsRoute =
@@ -774,26 +671,26 @@ useEffect(() => {
 
     const now = Date.now();
 
-    // Evitar demasiadas solicitudes al servicio de rutas público.
+    // Don't launch overlapping requests for every GPS update. A changed
+    // destination may start a new request immediately; otherwise respect cooldown.
+    if (!destinationChanged && routeInFlightRef.current) return;
     if (
       !destinationChanged &&
-      !routeMissing &&
-      now - lastRouteAttemptTimeRef.current <
-        ROUTE_RETRY_INTERVAL_MS
+      lastRouteAttemptTimeRef.current > 0 &&
+      now - lastRouteAttemptTimeRef.current < ROUTE_RETRY_INTERVAL_MS
     ) {
       return;
     }
 
     const requestId = ++routeRequestRef.current;
+    routeInFlightRef.current = true;
     lastRouteAttemptTimeRef.current = now;
 
     setNavigation((previous) => ({
       ...previous,
       isCalculating: true,
       routeError: false,
-      instruction: isES
-        ? "Calculando ruta..."
-        : "Calculating route...",
+      instruction: isES ? "Calculando ruta..." : "Calculating route...",
     }));
 
     const fetchRoute = async () => {
@@ -813,49 +710,29 @@ useEffect(() => {
         }
 
         const result = await response.json();
-
-        // Ignorar respuestas antiguas si ya se solicitó otra ruta.
         if (requestId !== routeRequestRef.current) return;
 
         if (result.code !== "Ok" || !result.routes?.length) {
-          throw new Error(
-            "No se encontró una ruta por carretera."
-          );
+          throw new Error("No se encontró una ruta por carretera.");
         }
 
         const routeResult = result.routes[0];
         const coordinates = routeResult.geometry?.coordinates;
-
         if (!coordinates || coordinates.length < 2) {
-          throw new Error(
-            "La ruta no contiene suficientes coordenadas."
-          );
+          throw new Error("La ruta no contiene suficientes coordenadas.");
         }
 
-        const latLngs: L.LatLngExpression[] =
-          coordinates.map((point: [number, number]) => [
-            point[1],
-            point[0],
-          ]);
-
+        const latLngs: L.LatLngExpression[] = coordinates.map(
+          (point: [number, number]) => [point[1], point[0]]
+        );
         const newSteps: NavigationStep[] = [];
 
         for (const leg of routeResult.legs ?? []) {
           for (const step of leg.steps ?? []) {
-            const maneuverLocation =
-              step.maneuver?.location;
+            const maneuverLocation = step.maneuver?.location;
+            if (!maneuverLocation || maneuverLocation.length < 2) continue;
 
-            if (
-              !maneuverLocation ||
-              maneuverLocation.length < 2
-            ) {
-              continue;
-            }
-
-            const roadName = String(
-              step.name ?? ""
-            ).trim();
-
+            const roadName = String(step.name ?? "").trim();
             newSteps.push({
               instruction: describeManeuver(
                 step.maneuver ?? {},
@@ -893,12 +770,9 @@ useEffect(() => {
 
         routeRef.current?.remove();
         routeRef.current = newRoute;
-
         stepsRef.current = newSteps;
         currentStepIndexRef.current = 0;
         offRouteRef.current = false;
-
-        // Guardar origen y hora solo después de una ruta válida.
         lastRouteOriginRef.current = origin;
         lastRouteDestinationRef.current = destinationKey;
         lastSuccessfulRouteTimeRef.current = Date.now();
@@ -907,9 +781,7 @@ useEffect(() => {
         setNavigation({
           instruction: newSteps[0].instruction,
           roadName: newSteps[0].roadName,
-          distanceToManeuver: origin.distanceTo(
-            newSteps[0].location
-          ),
+          distanceToManeuver: origin.distanceTo(newSteps[0].location),
           routeDistance: Number(routeResult.distance ?? 0),
           routeDuration: Number(routeResult.duration ?? 0),
           isOffRoute: false,
@@ -928,8 +800,6 @@ useEffect(() => {
         if (requestId !== routeRequestRef.current) return;
 
         console.error("TRUCK MAP ROUTE ERROR:", error);
-
-        // No presentar un ETA anterior como si fuera actual.
         lastRouteOriginRef.current = null;
 
         setNavigation((previous) => ({
@@ -942,6 +812,10 @@ useEffect(() => {
           isCalculating: false,
           routeError: true,
         }));
+      } finally {
+        if (requestId === routeRequestRef.current) {
+          routeInFlightRef.current = false;
+        }
       }
     };
 
@@ -950,11 +824,12 @@ useEffect(() => {
 
   return (
     <div
-      className={
+      className={`relative w-full overflow-hidden ${
         fullScreen
-          ? "relative h-full min-h-0 w-full overflow-hidden bg-slate-200"
-          : "relative w-full overflow-hidden rounded-xl border border-slate-700 shadow-lg"
-      }
+          ? "h-full rounded-none border-0 shadow-none"
+          : "rounded-xl border border-slate-700 shadow-lg"
+      }`}
+      style={fullScreen ? { height: "100%", minHeight: 0 } : undefined}
     >
       {destination && (
         <div
@@ -964,9 +839,7 @@ useEffect(() => {
           <div className="flex items-start gap-3">
             <div
               className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-white ${
-                navigation.isArrived
-                  ? "bg-emerald-600"
-                  : "bg-blue-600"
+                navigation.isArrived ? "bg-emerald-600" : "bg-blue-600"
               }`}
               style={{ fontSize: 22 }}
             >
@@ -978,56 +851,30 @@ useEffect(() => {
                 {navigation.instruction}
               </div>
 
-             
-<div className="mt-2 rounded-lg border border-blue-100 bg-blue-50 p-3">
-  <div className="text-xs font-bold uppercase tracking-wide text-blue-700">
-    {isES ? "Destino de la parada" : "Stop destination"}
-  </div>
-  <div className="mt-1 break-words text-sm font-semibold text-slate-900">
-    {[
-      destination?.address?.trim(),
-      destination?.city?.trim(),
-      destination?.state?.trim(),
-    ].filter(Boolean).join(", ") ||
-      (isES ? "Dirección no disponible" : "Address unavailable")}
-  </div>
-  {navigation.roadName && !navigation.isArrived && (
-    <div className="mt-2 text-sm text-slate-600">
-      {navigation.roadName}
-    </div>
-  )}
-</div>
-
+              {navigation.roadName && !navigation.isArrived && (
+                <div className="mt-0.5 text-sm text-slate-600">
+                  {navigation.roadName}
+                </div>
+              )}
 
               <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-slate-600">
                 {!navigation.isArrived && (
                   <>
                     <span>
                       {isES ? "Maniobra:" : "Maneuver:"}{" "}
-                      {formatDistance(
-                        navigation.distanceToManeuver
-                      )}
+                      {formatDistance(navigation.distanceToManeuver)}
                     </span>
-
                     <span>
                       {isES ? "Ruta:" : "Route:"}{" "}
                       {navigation.routeError
                         ? "--"
-                        : formatDistance(
-                            navigation.routeDistance
-                          )}
+                        : formatDistance(navigation.routeDistance)}
                     </span>
-
                     <span>
-                      {isES
-                        ? "Tiempo estimado:"
-                        : "Estimated time:"}{" "}
-                      {navigation.routeError ||
-                      navigation.isCalculating
+                      {isES ? "Tiempo estimado:" : "Estimated time:"}{" "}
+                      {navigation.routeError || navigation.isCalculating
                         ? "--"
-                        : formatDuration(
-                            navigation.routeDuration
-                          )}
+                        : formatDuration(navigation.routeDuration)}
                     </span>
                   </>
                 )}
@@ -1041,14 +888,13 @@ useEffect(() => {
                 </div>
               )}
 
-              {navigation.isOffRoute &&
-                !navigation.isArrived && (
-                  <div className="mt-2 text-sm font-bold text-red-600">
-                    {isES
-                      ? "Desvío detectado. Recalculando ruta..."
-                      : "Off route. Recalculating route..."}
-                  </div>
-                )}
+              {navigation.isOffRoute && !navigation.isArrived && (
+                <div className="mt-2 text-sm font-bold text-red-600">
+                  {isES
+                    ? "Desvío detectado. Recalculando ruta..."
+                    : "Off route. Recalculating route..."}
+                </div>
+              )}
 
               {navigation.routeError && (
                 <div className="mt-2 text-sm font-semibold text-amber-700">
@@ -1078,11 +924,10 @@ useEffect(() => {
 
       <div
         ref={containerRef}
-        className={fullScreen ? "z-10 h-full w-full" : "z-10 h-[450px] w-full"}
-        role="application"
-        aria-label={isES ? "Mapa de navegación del camión" : "Truck navigation map"}
+        className={`z-10 w-full ${fullScreen ? "h-full" : "h-[450px]"}`}
         style={{
           height: fullScreen ? "100%" : 450,
+          minHeight: fullScreen ? 0 : 450,
           width: "100%",
           background: "#e2e8f0",
         }}

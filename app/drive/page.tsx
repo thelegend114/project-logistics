@@ -1281,15 +1281,36 @@ console.log(
           receivedAt: new Date().toISOString(),
         });
 
-        setLastLocation({
-          lat: gpsEvent.latitude,
-          lng: gpsEvent.longitude,
-          accuracy: 0,
-          speed: null,
-          heading: null,
-        });
+        // Realtime is only a fallback when this page is not receiving browser GPS.
+        // Do not overwrite live accuracy, speed, or heading with database fields
+        // that are not stored in gps_events.
+        if (gpsWatchId.current === null) {
+          setLastLocation((current) => {
+            const latitude = Number(gpsEvent.latitude);
+            const longitude = Number(gpsEvent.longitude);
+            if (
+              !Number.isFinite(latitude) ||
+              !Number.isFinite(longitude) ||
+              Math.abs(latitude) > 90 ||
+              Math.abs(longitude) > 180
+            ) {
+              return current;
+            }
 
-        setLastGpsReceivedAt(Date.now());
+            return {
+              lat: latitude,
+              lng: longitude,
+              accuracy: 0,
+              speed: null,
+              heading: null,
+            };
+          });
+          setLastGpsReceivedAt(Date.now());
+        } else {
+          console.log(
+            "GPS REALTIME IGNORED: live browser GPS owns the map location"
+          );
+        }
       }
     );
 
@@ -2151,7 +2172,23 @@ async function startDrive(): Promise<boolean> {
 
     const refreshNavigation = async () => {
       const nextStop = await getCurrentSequenceStop(loadId);
-      setNavigationStop(nextStop);
+      setNavigationStop((current) => {
+        if (current === null || nextStop === null) {
+          return current === nextStop ? current : nextStop;
+        }
+
+        const sameStop =
+          current.id === nextStop.id &&
+          current.stop_order === nextStop.stop_order &&
+          current.stop_type === nextStop.stop_type &&
+          current.latitude === nextStop.latitude &&
+          current.longitude === nextStop.longitude &&
+          current.address === nextStop.address &&
+          current.city === nextStop.city &&
+          current.state === nextStop.state;
+
+        return sameStop ? current : nextStop;
+      });
     };
 
     // Función compartida para validar POD y BOL.
@@ -3086,7 +3123,10 @@ async function startDrive(): Promise<boolean> {
           heading: position.coords.heading,
         };
 
+        // La posición del navegador es la fuente principal del mapa en este dispositivo.
+        // Browser geolocation is the primary live map source on this device.
         setLastLocation(location);
+        setLastGpsReceivedAt(Date.now());
 
         const gpsSaved = await saveGpsEvent(location, driverId, loadId);
 
@@ -3107,15 +3147,8 @@ async function startDrive(): Promise<boolean> {
           return;
         }
 
-        try {
-          // La llegada operativa se procesa desde TruckMap mediante onArrival.
-          if (gpsWatchId.current === null) return;
-
-          const nextStop = await getCurrentSequenceStop(loadId);
-          setNavigationStop(nextStop);
-        } catch (sequenceError) {
-          console.error("SEQUENCE ENGINE GPS ERROR:", sequenceError);
-        }
+        // La parada activa se actualiza en el flujo operativo, no en cada lectura GPS.
+        // The active stop is refreshed by the operational flow, not every GPS reading.
       },
       (error) => {
         console.error("GPS ERROR CODE:", error.code);

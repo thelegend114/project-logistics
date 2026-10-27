@@ -890,6 +890,22 @@ async function updateDriverWorkStatus(nextStatus: "off_duty" | "hold" | "availab
     stopGpsTracking();
   }
 
+  // Personal Time y Hold también deben cerrar el intervalo HOS anterior.
+  // Hold se registra como evento operativo propio para no clasificarlo falsamente
+  // como Off Duty; ambos eventos detienen los relojes operativos en esta pantalla.
+  if (nextStatus === "off_duty" || nextStatus === "hold") {
+    const hosEventSaved = await setHosStatus(
+      nextStatus === "off_duty" ? "Off Duty" : "Hold"
+    );
+
+    if (!hosEventSaved) {
+      console.error("WORK STATUS SAVED BUT HOS EVENT FAILED:", {
+        driverId: driverProfile.id,
+        nextStatus,
+      });
+    }
+  }
+
   if (nextStatus === "available") {
     const { data: assignedLoads, error: assignedLoadsError } =
       await supabase
@@ -3498,8 +3514,14 @@ if (
       ? Math.max(0, clockNow - latestHosTimestamp)
       : 0;
 
+  const hosClockIsRunning =
+    latestStatusNormalized === "driving" ||
+    latestStatusNormalized === "on_duty";
+
   const shiftElapsedMs =
-    latestHosTimestamp !== null && Number.isFinite(latestHosTimestamp)
+    hosClockIsRunning &&
+    latestHosTimestamp !== null &&
+    Number.isFinite(latestHosTimestamp)
       ? Math.max(0, clockNow - latestHosTimestamp)
       : 0;
 
@@ -3577,6 +3599,8 @@ if (
         return text.driving;
       case "on duty":
         return text.onDuty;
+      case "hold":
+        return isES ? "En pausa (Hold)" : "On Hold";
       default:
         return status;
     }

@@ -266,10 +266,13 @@ function getRouteBearing(position: L.LatLng, route: L.Polyline | null): number |
   return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
 }
 
-function applyMapBearing(_map: L.Map, _heading: number) {
-  // Keep Leaflet's map pane untouched. Rotating/resizing the pane can displace
-  // or clip raster tiles, leaving a gray map even when tile requests succeed.
-  // The truck heading remains represented by the navigation marker/arrow.
+function applyMapBearing(map: L.Map, heading: number) {
+  // Keep Leaflet's map pane under Leaflet's own transform management.
+  // Rotating/resizing this pane directly can displace or clip tiles on mobile,
+  // leaving a blank map. Keep the road map stable until a rotation plugin that
+  // handles Leaflet's projection, panning, and tile bounds is integrated.
+  void map;
+  void heading;
 }
 
 function isValidCoordinate(
@@ -365,10 +368,6 @@ export default function TruckMap({
 
     // Start with a neutral continental-US view; never imply a hard-coded truck location.
     // A valid live GPS position or the active stop will center the map when available.
-    // Reset tile recovery state whenever Leaflet is initialized (including React Strict Mode remounts).
-    tileErrorCountRef.current = 0;
-    fallbackTilesActiveRef.current = false;
-
     const map = L.map(containerRef.current).setView([39.5, -98.35], 4);
     mapRef.current = map;
 
@@ -382,14 +381,14 @@ export default function TruckMap({
         crossOrigin: true,
       }
     );
+    tileLayerRef.current = osmTiles;
 
-    let baseTilesLoaded = false;
-    let fallbackTimer: number | null = null;
-
+    // Register tile listeners BEFORE adding the layer so early mobile tile
+    // failures cannot be missed. If OSM fails, switch to CARTO once.
     const activateFallbackTiles = () => {
       if (fallbackTilesActiveRef.current || !mapRef.current) return;
       fallbackTilesActiveRef.current = true;
-      console.warn("TRUCK MAP: switching base layer from OpenStreetMap to CARTO.");
+      console.warn("TRUCK MAP: OpenStreetMap tiles failed; switching to CARTO.");
       if (map.hasLayer(osmTiles)) map.removeLayer(osmTiles);
 
       const fallback = L.tileLayer(
@@ -403,6 +402,7 @@ export default function TruckMap({
           crossOrigin: true,
         }
       );
+
       fallback.on("tileerror", (event) => {
         console.error("TRUCK MAP: CARTO tile failed to load.", event);
       });
@@ -414,7 +414,6 @@ export default function TruckMap({
       window.setTimeout(() => map.invalidateSize({ pan: false }), 150);
     };
 
-    // Attach listeners BEFORE addTo(): some browsers emit tile events immediately.
     osmTiles.on("tileerror", (event) => {
       tileErrorCountRef.current += 1;
       console.error(
@@ -424,29 +423,54 @@ export default function TruckMap({
       if (tileErrorCountRef.current >= 3) activateFallbackTiles();
     });
     osmTiles.on("load", () => {
-      baseTilesLoaded = true;
-      tileErrorCountRef.current = 0;
-      if (fallbackTimer !== null) window.clearTimeout(fallbackTimer);
       console.info("TRUCK MAP: OpenStreetMap base map tiles loaded.");
+      tileErrorCountRef.current = 0;
     });
-
-    tileLayerRef.current = osmTiles;
     osmTiles.addTo(map);
 
-    // Recover when mobile browsers stall tile requests without emitting tileerror.
-    fallbackTimer = window.setTimeout(() => {
-      if (!baseTilesLoaded && !fallbackTilesActiveRef.current) {
+    // Safety net for mobile browsers where tile requests stall without firing
+    // tileerror; switch providers if no base tiles have loaded after 8 seconds.
+    const tileFallbackTimer = window.setTimeout(() => {
+      if (!fallbackTilesActiveRef.current && tileErrorCountRef.current > 0) {
         activateFallbackTiles();
       }
     }, 8000);
 
+    // Avoid repeatedly invalidating Leaflet during rapid mobile layout/GPS updates.
+    let previousWidth = 0;
+    let previousHeight = 0;
+    let resizeFrame = 0;
+
     const refreshMapSize = () => {
-      map.invalidateSize({ pan: false });
-      applyMapBearing(map, headingRef.current);
+      const container = containerRef.current;
+      if (!container || !mapRef.current) return;
+
+      const width = container.clientWidth;
+      const height = container.clientHeight;
+
+      // Ignore hidden containers and dimensions that have not changed.
+      if (width <= 0 || height <= 0) return;
+      if (width === previousWidth && height === previousHeight) return;
+
+      previousWidth = width;
+      previousHeight = height;
+
+      if (resizeFrame) window.cancelAnimationFrame(resizeFrame);
+      resizeFrame = window.requestAnimationFrame(() => {
+        resizeFrame = 0;
+        if (!mapRef.current || !containerRef.current) return;
+        map.invalidateSize({
+          pan: false,
+          animate: false,
+          debounceMoveend: true,
+        });
+      });
     };
-    const observer = typeof ResizeObserver !== "undefined"
-      ? new ResizeObserver(refreshMapSize)
-      : null;
+
+    const observer =
+      typeof ResizeObserver !== "undefined"
+        ? new ResizeObserver(refreshMapSize)
+        : null;
     observer?.observe(containerRef.current);
     window.addEventListener("resize", refreshMapSize);
     requestAnimationFrame(refreshMapSize);
@@ -456,7 +480,8 @@ export default function TruckMap({
       routeInFlightRef.current = false;
       observer?.disconnect();
       window.removeEventListener("resize", refreshMapSize);
-      if (fallbackTimer !== null) window.clearTimeout(fallbackTimer);
+      if (resizeFrame) window.cancelAnimationFrame(resizeFrame);
+      window.clearTimeout(tileFallbackTimer);
       tileLayerRef.current = null;
       map.remove();
       mapRef.current = null;
@@ -467,20 +492,19 @@ export default function TruckMap({
     };
   }, []);
 
-  // Recalculate Leaflet after Drive switches between embedded and fullscreen.
-  // A single animation frame can run before the fixed/absolute layout has its
-  // final dimensions; Leaflet then leaves blank gray areas until tiles redraw.
+  // Recalculate the viewport only when Drive changes between embedded and fullscreen.
+  // GPS position updates are handled by the dedicated location effect below.
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
 
-    let secondFrame = 0;
-    const refreshViewport = () => {
-      if (!mapRef.current || mapRef.current !== map) return;
-
-      map.invalidateSize({ pan: false, animate: false });
-      tileLayerRef.current?.redraw();
-      applyMapBearing(map, headingRef.current);
+    const frame = window.requestAnimationFrame(() => {
+      if (!mapRef.current) return;
+      map.invalidateSize({
+        pan: false,
+        animate: false,
+        debounceMoveend: true,
+      });
 
       if (lastLocation && isValidCoordinate(lastLocation.lat, lastLocation.lng)) {
         map.setView(
@@ -489,25 +513,10 @@ export default function TruckMap({
           { animate: false }
         );
       }
-    };
-
-    const firstFrame = window.requestAnimationFrame(() => {
-      refreshViewport();
-      secondFrame = window.requestAnimationFrame(refreshViewport);
     });
 
-    // The fullscreen container is fixed and its map wrapper is absolutely
-    // positioned. Refresh after the browser completes that layout transition.
-    const shortDelay = window.setTimeout(refreshViewport, 120);
-    const settleDelay = window.setTimeout(refreshViewport, 350);
-
-    return () => {
-      window.cancelAnimationFrame(firstFrame);
-      if (secondFrame) window.cancelAnimationFrame(secondFrame);
-      window.clearTimeout(shortDelay);
-      window.clearTimeout(settleDelay);
-    };
-  }, [fullScreen, lastLocation]);
+    return () => window.cancelAnimationFrame(frame);
+  }, [fullScreen]);
 
   // Update truck position, arrival state, and distance to the next maneuver.
   useEffect(() => {
@@ -925,9 +934,11 @@ export default function TruckMap({
         }
 
         const newRoute = L.polyline(latLngs, {
-          color: "#2563eb",
-          weight: 6,
-          opacity: 0.9,
+          color: "#075bff",
+          weight: 7,
+          opacity: 1,
+          lineCap: "round",
+          lineJoin: "round",
         }).addTo(map);
 
         routeRef.current?.remove();
@@ -999,24 +1010,26 @@ export default function TruckMap({
     >
       {
         <div
-          className="absolute left-3 right-3 top-3 z-[1000] p-1"
-          style={{ pointerEvents: "none", background: "transparent", border: "none", boxShadow: "none", backdropFilter: "none" }}
+          className="absolute left-3 right-3 top-3 z-[1000] rounded-xl border border-white/60 p-3 shadow-lg backdrop-blur-sm"
+          style={{ pointerEvents: "none", background: "rgba(255,255,255,0.72)" }}
         >
           <div className="flex items-start gap-3">
             <div
-              className="flex h-11 w-11 shrink-0 items-center justify-center bg-transparent font-bold text-black"
-              style={{ fontSize: 28, textShadow: "0 1px 2px white" }}
+              className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-white ${
+                navigation.isArrived ? "bg-emerald-600" : "bg-blue-600"
+              }`}
+              style={{ fontSize: 22 }}
             >
               {navigation.isArrived ? "✓" : "↗"}
             </div>
 
             <div className="min-w-0 flex-1">
-              <div className="text-base font-bold text-black" style={{ textShadow: "0 1px 2px white" }}>
+              <div className="text-base font-bold text-black">
                 {navigation.instruction}
               </div>
 
               {navigation.roadName && !navigation.isArrived && (
-                <div className="mt-0.5 text-sm font-semibold text-black" style={{ textShadow: "0 1px 2px white" }}>
+                <div className="mt-0.5 text-sm text-black">
                   {navigation.roadName}
                 </div>
               )}
@@ -1080,7 +1093,7 @@ export default function TruckMap({
                 </div>
               )}
 
-              <div className="mt-2 text-[11px] font-medium text-black" style={{ textShadow: "0 1px 2px white" }}>
+              <div className="mt-2 text-[11px] text-black">
                 {isES
                   ? "ETA aproximado; puede variar según las condiciones de la vía."
                   : "Estimated ETA; actual travel time may vary with road conditions."}
@@ -1090,17 +1103,13 @@ export default function TruckMap({
         </div>
       }
 
-            <div
+      <div
         ref={containerRef}
-        className="leaflet-map-host"
+        className={`z-10 w-full ${fullScreen ? "h-full" : "h-[450px]"}`}
         style={{
-          position: "absolute",
-          inset: 0,
+          height: fullScreen ? "100%" : 450,
+          minHeight: fullScreen ? 0 : 450,
           width: "100%",
-          height: "100%",
-          minWidth: 0,
-          minHeight: 0,
-          overflow: "hidden",
           background: "#e2e8f0",
         }}
       />

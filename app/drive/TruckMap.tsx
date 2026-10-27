@@ -1,4 +1,3 @@
-
 "use client";
 
 import { useEffect, useRef, useState } from "react";
@@ -267,13 +266,10 @@ function getRouteBearing(position: L.LatLng, route: L.Polyline | null): number |
   return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
 }
 
-function applyMapBearing(map: L.Map, heading: number) {
-  // Keep Leaflet's map pane under Leaflet's own transform management.
-  // Rotating/resizing this pane directly can displace or clip tiles on mobile,
-  // leaving a blank map. Keep the road map stable until a rotation plugin that
-  // handles Leaflet's projection, panning, and tile bounds is integrated.
-  void map;
-  void heading;
+function applyMapBearing(_map: L.Map, _heading: number) {
+  // Keep Leaflet's map pane untouched. Rotating/resizing the pane can displace
+  // or clip raster tiles, leaving a gray map even when tile requests succeed.
+  // The truck heading remains represented by the navigation marker/arrow.
 }
 
 function isValidCoordinate(
@@ -383,59 +379,31 @@ export default function TruckMap({
       }
     );
     tileLayerRef.current = osmTiles;
-
-    // Register tile listeners BEFORE adding the layer so early mobile tile
-    // failures cannot be missed. If OSM fails, switch to CARTO once.
-    const activateFallbackTiles = () => {
-      if (fallbackTilesActiveRef.current || !mapRef.current) return;
-      fallbackTilesActiveRef.current = true;
-      console.warn("TRUCK MAP: OpenStreetMap tiles failed; switching to CARTO.");
-      if (map.hasLayer(osmTiles)) map.removeLayer(osmTiles);
-
-      const fallback = L.tileLayer(
-        "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
-        {
-          attribution:
-            '&copy; OpenStreetMap contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
-          subdomains: "abcd",
-          maxZoom: 20,
-          keepBuffer: 5,
-          crossOrigin: true,
-        }
-      );
-
-      fallback.on("tileerror", (event) => {
-        console.error("TRUCK MAP: CARTO tile failed to load.", event);
-      });
-      fallback.on("load", () => {
-        console.info("TRUCK MAP: CARTO base map tiles loaded.");
-      });
-      tileLayerRef.current = fallback;
-      fallback.addTo(map);
-      window.setTimeout(() => map.invalidateSize({ pan: false }), 150);
-    };
-
-    osmTiles.on("tileerror", (event) => {
-      tileErrorCountRef.current += 1;
-      console.error(
-        `TRUCK MAP: OpenStreetMap tile error (${tileErrorCountRef.current}).`,
-        event
-      );
-      if (tileErrorCountRef.current >= 3) activateFallbackTiles();
-    });
-    osmTiles.on("load", () => {
-      console.info("TRUCK MAP: OpenStreetMap base map tiles loaded.");
-      tileErrorCountRef.current = 0;
-    });
     osmTiles.addTo(map);
-
-    // Safety net for mobile browsers where tile requests stall without firing
-    // tileerror; switch providers if no base tiles have loaded after 8 seconds.
-    const tileFallbackTimer = window.setTimeout(() => {
-      if (!fallbackTilesActiveRef.current && tileErrorCountRef.current > 0) {
-        activateFallbackTiles();
+    osmTiles.on("tileerror", () => {
+      tileErrorCountRef.current += 1;
+      // If the primary tile server is unavailable, switch once to a second
+      // public tile source instead of leaving the user with a blank map.
+      if (tileErrorCountRef.current >= 3 && !fallbackTilesActiveRef.current) {
+        fallbackTilesActiveRef.current = true;
+        osmTiles.remove();
+        const fallback = L.tileLayer(
+          "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+          {
+            attribution:
+              '&copy; OpenStreetMap contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+            subdomains: "abcd",
+            maxZoom: 20,
+            keepBuffer: 5,
+          }
+        );
+        tileLayerRef.current = fallback;
+        fallback.on("tileerror", (event) => {
+          console.error("TRUCK MAP TILE ERROR (CARTO fallback):", event);
+        });
+        fallback.addTo(map);
       }
-    }, 8000);
+    });
 
     const refreshMapSize = () => {
       map.invalidateSize({ pan: false });
@@ -453,7 +421,6 @@ export default function TruckMap({
       routeInFlightRef.current = false;
       observer?.disconnect();
       window.removeEventListener("resize", refreshMapSize);
-      window.clearTimeout(tileFallbackTimer);
       tileLayerRef.current = null;
       map.remove();
       mapRef.current = null;
@@ -900,11 +867,9 @@ export default function TruckMap({
         }
 
         const newRoute = L.polyline(latLngs, {
-          color: "#075bff",
-          weight: 7,
-          opacity: 1,
-          lineCap: "round",
-          lineJoin: "round",
+          color: "#2563eb",
+          weight: 6,
+          opacity: 0.9,
         }).addTo(map);
 
         routeRef.current?.remove();
@@ -976,26 +941,24 @@ export default function TruckMap({
     >
       {
         <div
-          className="absolute left-3 right-3 top-3 z-[1000] rounded-xl border border-white/60 p-3 shadow-lg backdrop-blur-sm"
-          style={{ pointerEvents: "none", background: "rgba(255,255,255,0.72)" }}
+          className="absolute left-3 right-3 top-3 z-[1000] p-1"
+          style={{ pointerEvents: "none", background: "transparent", border: "none", boxShadow: "none", backdropFilter: "none" }}
         >
           <div className="flex items-start gap-3">
             <div
-              className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-white ${
-                navigation.isArrived ? "bg-emerald-600" : "bg-blue-600"
-              }`}
-              style={{ fontSize: 22 }}
+              className="flex h-11 w-11 shrink-0 items-center justify-center bg-transparent font-bold text-black"
+              style={{ fontSize: 28, textShadow: "0 1px 2px white" }}
             >
               {navigation.isArrived ? "✓" : "↗"}
             </div>
 
             <div className="min-w-0 flex-1">
-              <div className="text-base font-bold text-black">
+              <div className="text-base font-bold text-black" style={{ textShadow: "0 1px 2px white" }}>
                 {navigation.instruction}
               </div>
 
               {navigation.roadName && !navigation.isArrived && (
-                <div className="mt-0.5 text-sm text-black">
+                <div className="mt-0.5 text-sm font-semibold text-black" style={{ textShadow: "0 1px 2px white" }}>
                   {navigation.roadName}
                 </div>
               )}
@@ -1059,7 +1022,7 @@ export default function TruckMap({
                 </div>
               )}
 
-              <div className="mt-2 text-[11px] text-black">
+              <div className="mt-2 text-[11px] font-medium text-black" style={{ textShadow: "0 1px 2px white" }}>
                 {isES
                   ? "ETA aproximado; puede variar según las condiciones de la vía."
                   : "Estimated ETA; actual travel time may vary with road conditions."}

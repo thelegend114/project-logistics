@@ -2796,9 +2796,9 @@ async function startDrive(): Promise<boolean> {
         .eq("driver_id", driverId)
         .neq("id", loadId)
         .in("status", ["assigned", "pending"])
-        .order("scheduled_pickup_at", {
+        .order("pickup_date", {
           ascending: true,
-          nullsFirst: false,
+          nullsFirst: true,
         })
         .limit(20);
 
@@ -2825,7 +2825,10 @@ async function startDrive(): Promise<boolean> {
       if (nextAssignedLoad) {
         const { data: activatedLoad, error: activateLoadError } = await supabase
           .from("loads")
-          .update({ status: "in_progress" })
+          .update({
+            status: "in_progress",
+            pickup_unlocked: true,
+          })
           .eq("id", nextAssignedLoad.id)
           .eq("driver_id", driverId)
           .in("status", ["assigned", "pending"])
@@ -2878,7 +2881,17 @@ async function startDrive(): Promise<boolean> {
           return true;
         }
 
-        refreshLoadInUI(updatedLoad as typeof selectedLoad);
+        setLoads((current) =>
+          current.map((load) => {
+            if (load.id === updatedLoad.id) {
+              return updatedLoad as Load;
+            }
+            if (load.id === activatedLoad.id) {
+              return activatedLoad as Load;
+            }
+            return load;
+          })
+        );
 
         setDrivers((current) =>
           current.map((driver) =>

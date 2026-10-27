@@ -365,6 +365,10 @@ export default function TruckMap({
 
     // Start with a neutral continental-US view; never imply a hard-coded truck location.
     // A valid live GPS position or the active stop will center the map when available.
+    // Reset tile recovery state whenever Leaflet is initialized (including React Strict Mode remounts).
+    tileErrorCountRef.current = 0;
+    fallbackTilesActiveRef.current = false;
+
     const map = L.map(containerRef.current).setView([39.5, -98.35], 4);
     mapRef.current = map;
 
@@ -378,32 +382,63 @@ export default function TruckMap({
         crossOrigin: true,
       }
     );
+
+    let baseTilesLoaded = false;
+    let fallbackTimer: number | null = null;
+
+    const activateFallbackTiles = () => {
+      if (fallbackTilesActiveRef.current || !mapRef.current) return;
+      fallbackTilesActiveRef.current = true;
+      console.warn("TRUCK MAP: switching base layer from OpenStreetMap to CARTO.");
+      if (map.hasLayer(osmTiles)) map.removeLayer(osmTiles);
+
+      const fallback = L.tileLayer(
+        "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+        {
+          attribution:
+            '&copy; OpenStreetMap contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+          subdomains: "abcd",
+          maxZoom: 20,
+          keepBuffer: 5,
+          crossOrigin: true,
+        }
+      );
+      fallback.on("tileerror", (event) => {
+        console.error("TRUCK MAP: CARTO tile failed to load.", event);
+      });
+      fallback.on("load", () => {
+        console.info("TRUCK MAP: CARTO base map tiles loaded.");
+      });
+      tileLayerRef.current = fallback;
+      fallback.addTo(map);
+      window.setTimeout(() => map.invalidateSize({ pan: false }), 150);
+    };
+
+    // Attach listeners BEFORE addTo(): some browsers emit tile events immediately.
+    osmTiles.on("tileerror", (event) => {
+      tileErrorCountRef.current += 1;
+      console.error(
+        `TRUCK MAP: OpenStreetMap tile error (${tileErrorCountRef.current}).`,
+        event
+      );
+      if (tileErrorCountRef.current >= 3) activateFallbackTiles();
+    });
+    osmTiles.on("load", () => {
+      baseTilesLoaded = true;
+      tileErrorCountRef.current = 0;
+      if (fallbackTimer !== null) window.clearTimeout(fallbackTimer);
+      console.info("TRUCK MAP: OpenStreetMap base map tiles loaded.");
+    });
+
     tileLayerRef.current = osmTiles;
     osmTiles.addTo(map);
-    osmTiles.on("tileerror", () => {
-      tileErrorCountRef.current += 1;
-      // If the primary tile server is unavailable, switch once to a second
-      // public tile source instead of leaving the user with a blank map.
-      if (tileErrorCountRef.current >= 3 && !fallbackTilesActiveRef.current) {
-        fallbackTilesActiveRef.current = true;
-        osmTiles.remove();
-        const fallback = L.tileLayer(
-          "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
-          {
-            attribution:
-              '&copy; OpenStreetMap contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
-            subdomains: "abcd",
-            maxZoom: 20,
-            keepBuffer: 5,
-          }
-        );
-        tileLayerRef.current = fallback;
-        fallback.on("tileerror", (event) => {
-          console.error("TRUCK MAP TILE ERROR (CARTO fallback):", event);
-        });
-        fallback.addTo(map);
+
+    // Recover when mobile browsers stall tile requests without emitting tileerror.
+    fallbackTimer = window.setTimeout(() => {
+      if (!baseTilesLoaded && !fallbackTilesActiveRef.current) {
+        activateFallbackTiles();
       }
-    });
+    }, 8000);
 
     const refreshMapSize = () => {
       map.invalidateSize({ pan: false });
@@ -421,6 +456,7 @@ export default function TruckMap({
       routeInFlightRef.current = false;
       observer?.disconnect();
       window.removeEventListener("resize", refreshMapSize);
+      if (fallbackTimer !== null) window.clearTimeout(fallbackTimer);
       tileLayerRef.current = null;
       map.remove();
       mapRef.current = null;
@@ -431,14 +467,21 @@ export default function TruckMap({
     };
   }, []);
 
-  // Recalculate Leaflet's viewport when Drive switches between embedded and fullscreen.
+  // Recalculate Leaflet after Drive switches between embedded and fullscreen.
+  // A single animation frame can run before the fixed/absolute layout has its
+  // final dimensions; Leaflet then leaves blank gray areas until tiles redraw.
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
 
-    const frame = window.requestAnimationFrame(() => {
-      map.invalidateSize({ pan: false });
+    let secondFrame = 0;
+    const refreshViewport = () => {
+      if (!mapRef.current || mapRef.current !== map) return;
+
+      map.invalidateSize({ pan: false, animate: false });
+      tileLayerRef.current?.redraw();
       applyMapBearing(map, headingRef.current);
+
       if (lastLocation && isValidCoordinate(lastLocation.lat, lastLocation.lng)) {
         map.setView(
           [lastLocation.lat, lastLocation.lng],
@@ -446,9 +489,24 @@ export default function TruckMap({
           { animate: false }
         );
       }
+    };
+
+    const firstFrame = window.requestAnimationFrame(() => {
+      refreshViewport();
+      secondFrame = window.requestAnimationFrame(refreshViewport);
     });
 
-    return () => window.cancelAnimationFrame(frame);
+    // The fullscreen container is fixed and its map wrapper is absolutely
+    // positioned. Refresh after the browser completes that layout transition.
+    const shortDelay = window.setTimeout(refreshViewport, 120);
+    const settleDelay = window.setTimeout(refreshViewport, 350);
+
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      if (secondFrame) window.cancelAnimationFrame(secondFrame);
+      window.clearTimeout(shortDelay);
+      window.clearTimeout(settleDelay);
+    };
   }, [fullScreen, lastLocation]);
 
   // Update truck position, arrival state, and distance to the next maneuver.
@@ -1032,13 +1090,17 @@ export default function TruckMap({
         </div>
       }
 
-      <div
+            <div
         ref={containerRef}
-        className={`z-10 w-full ${fullScreen ? "h-full" : "h-[450px]"}`}
+        className="leaflet-map-host"
         style={{
-          height: fullScreen ? "100%" : 450,
-          minHeight: fullScreen ? 0 : 450,
+          position: "absolute",
+          inset: 0,
           width: "100%",
+          height: "100%",
+          minWidth: 0,
+          minHeight: 0,
+          overflow: "hidden",
           background: "#e2e8f0",
         }}
       />

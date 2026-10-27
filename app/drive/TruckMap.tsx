@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
+import "@tomickigrzegorz/leaflet-rotate";
 
 interface NavigationStop {
   id: string;
@@ -184,23 +185,41 @@ function describeManeuver(
   return instruction;
 }
 
-function createTruckIcon(heading: number) {
-  // The map pane rotates by -heading; counter-rotate this arrow so it always
-  // points to the top of the screen while the road map rotates underneath it.
-  const counterRotation = ((heading % 360) + 360) % 360;
+function createTruckIcon(_heading: number) {
+  // Keep the truck arrow upright while the map rotates.
+  // Mantiene la flecha vertical mientras gira el mapa.
 
   return L.divIcon({
     className: "navigation-arrow-marker",
     html: `
       <div style="
-        width:42px;height:42px;display:flex;align-items:center;justify-content:center;
-        transform:rotate(${counterRotation}deg);transform-origin:center;
+        width:42px;
+        height:42px;
+        display:flex;
+        align-items:center;
+        justify-content:center;
         filter:drop-shadow(0 2px 3px rgba(15,23,42,.55));
       ">
-        <svg viewBox="0 0 48 48" width="42" height="42" aria-hidden="true"
-          xmlns="http://www.w3.org/2000/svg">
-          <path d="M24 2 L43 42 L24 33 L5 42 Z" fill="#0891b2" stroke="#ffffff" stroke-width="3" stroke-linejoin="round"/>
-          <path d="M24 10 L24 31" stroke="#ffffff" stroke-width="3" stroke-linecap="round"/>
+        <svg
+          viewBox="0 0 48 48"
+          width="42"
+          height="42"
+          aria-hidden="true"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <path
+            d="M24 2 L43 42 L24 33 L5 42 Z"
+            fill="#0891b2"
+            stroke="#ffffff"
+            stroke-width="3"
+            stroke-linejoin="round"
+          />
+          <path
+            d="M24 10 L24 31"
+            stroke="#ffffff"
+            stroke-width="3"
+            stroke-linecap="round"
+          />
         </svg>
       </div>
     `,
@@ -266,10 +285,13 @@ function getRouteBearing(position: L.LatLng, route: L.Polyline | null): number |
   return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
 }
 
-function applyMapBearing(_map: L.Map, _heading: number) {
-  // Keep Leaflet's map pane untouched. Rotating/resizing the pane can displace
-  // or clip raster tiles, leaving a gray map even when tile requests succeed.
-  // The truck heading remains represented by the navigation marker/arrow.
+function applyMapBearing(map: L.Map, heading: number) {
+  if (!Number.isFinite(heading)) return;
+
+  map.setHeading(heading, {
+    ease: 0.25,
+    deadzone: 1,
+  });
 }
 
 function isValidCoordinate(

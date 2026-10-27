@@ -1,3 +1,4 @@
+
 "use client";
 
 import { useEffect, useRef, useState } from "react";
@@ -267,15 +268,12 @@ function getRouteBearing(position: L.LatLng, route: L.Polyline | null): number |
 }
 
 function applyMapBearing(map: L.Map, heading: number) {
-  const mapPane = map.getPane("mapPane");
-  if (!mapPane) return;
-  const size = map.getSize();
-  // Give the pane a viewport-sized rotation origin. Leaflet still owns its
-  // translate3d transform; CSS's independent rotate property does not replace it.
-  mapPane.style.width = `${size.x}px`;
-  mapPane.style.height = `${size.y}px`;
-  mapPane.style.transformOrigin = "50% 50%";
-  mapPane.style.rotate = `${-heading}deg`;
+  // Keep Leaflet's map pane under Leaflet's own transform management.
+  // Rotating/resizing this pane directly can displace or clip tiles on mobile,
+  // leaving a blank map. Keep the road map stable until a rotation plugin that
+  // handles Leaflet's projection, panning, and tile bounds is integrated.
+  void map;
+  void heading;
 }
 
 function isValidCoordinate(
@@ -385,28 +383,59 @@ export default function TruckMap({
       }
     );
     tileLayerRef.current = osmTiles;
-    osmTiles.addTo(map);
-    osmTiles.on("tileerror", () => {
+
+    // Register tile listeners BEFORE adding the layer so early mobile tile
+    // failures cannot be missed. If OSM fails, switch to CARTO once.
+    const activateFallbackTiles = () => {
+      if (fallbackTilesActiveRef.current || !mapRef.current) return;
+      fallbackTilesActiveRef.current = true;
+      console.warn("TRUCK MAP: OpenStreetMap tiles failed; switching to CARTO.");
+      if (map.hasLayer(osmTiles)) map.removeLayer(osmTiles);
+
+      const fallback = L.tileLayer(
+        "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+        {
+          attribution:
+            '&copy; OpenStreetMap contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+          subdomains: "abcd",
+          maxZoom: 20,
+          keepBuffer: 5,
+          crossOrigin: true,
+        }
+      );
+
+      fallback.on("tileerror", (event) => {
+        console.error("TRUCK MAP: CARTO tile failed to load.", event);
+      });
+      fallback.on("load", () => {
+        console.info("TRUCK MAP: CARTO base map tiles loaded.");
+      });
+      tileLayerRef.current = fallback;
+      fallback.addTo(map);
+      window.setTimeout(() => map.invalidateSize({ pan: false }), 150);
+    };
+
+    osmTiles.on("tileerror", (event) => {
       tileErrorCountRef.current += 1;
-      // If the primary tile server is unavailable, switch once to a second
-      // public tile source instead of leaving the user with a blank map.
-      if (tileErrorCountRef.current >= 3 && !fallbackTilesActiveRef.current) {
-        fallbackTilesActiveRef.current = true;
-        osmTiles.remove();
-        const fallback = L.tileLayer(
-          "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
-          {
-            attribution:
-              '&copy; OpenStreetMap contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
-            subdomains: "abcd",
-            maxZoom: 20,
-            keepBuffer: 5,
-          }
-        );
-        tileLayerRef.current = fallback;
-        fallback.addTo(map);
-      }
+      console.error(
+        `TRUCK MAP: OpenStreetMap tile error (${tileErrorCountRef.current}).`,
+        event
+      );
+      if (tileErrorCountRef.current >= 3) activateFallbackTiles();
     });
+    osmTiles.on("load", () => {
+      console.info("TRUCK MAP: OpenStreetMap base map tiles loaded.");
+      tileErrorCountRef.current = 0;
+    });
+    osmTiles.addTo(map);
+
+    // Safety net for mobile browsers where tile requests stall without firing
+    // tileerror; switch providers if no base tiles have loaded after 8 seconds.
+    const tileFallbackTimer = window.setTimeout(() => {
+      if (!fallbackTilesActiveRef.current && tileErrorCountRef.current > 0) {
+        activateFallbackTiles();
+      }
+    }, 8000);
 
     const refreshMapSize = () => {
       map.invalidateSize({ pan: false });
@@ -424,6 +453,7 @@ export default function TruckMap({
       routeInFlightRef.current = false;
       observer?.disconnect();
       window.removeEventListener("resize", refreshMapSize);
+      window.clearTimeout(tileFallbackTimer);
       tileLayerRef.current = null;
       map.remove();
       mapRef.current = null;
@@ -870,9 +900,11 @@ export default function TruckMap({
         }
 
         const newRoute = L.polyline(latLngs, {
-          color: "#2563eb",
-          weight: 6,
-          opacity: 0.9,
+          color: "#075bff",
+          weight: 7,
+          opacity: 1,
+          lineCap: "round",
+          lineJoin: "round",
         }).addTo(map);
 
         routeRef.current?.remove();

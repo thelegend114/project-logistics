@@ -288,10 +288,20 @@ function getRouteBearing(position: L.LatLng, route: L.Polyline | null): number |
 function applyMapBearing(map: L.Map, heading: number) {
   if (!Number.isFinite(heading)) return;
 
-  map.setHeading(heading, {
-    ease: 0.25,
-    deadzone: 1,
-  });
+  try {
+    map.setHeading(heading, {
+      ease: 0.25,
+      deadzone: 0,
+    });
+
+    console.log("MAP ROTATION RESULT:", {
+      heading,
+      bearing: map.getBearing(),
+      headingUp: map.getHeadingUp(),
+    });
+  } catch (error) {
+    console.error("TRUCK MAP ROTATION ERROR:", error);
+  }
 }
 
 function isValidCoordinate(

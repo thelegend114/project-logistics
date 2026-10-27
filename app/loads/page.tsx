@@ -3,6 +3,8 @@
 import {
   FormEvent,
   MouseEvent,
+  type CSSProperties,
+  type ReactNode,
   useEffect,
   useMemo,
   useRef,
@@ -131,7 +133,7 @@ const statusStyles: Record<
   },
 };
 
-const inputStyle: React.CSSProperties = {
+const inputStyle: CSSProperties = {
   width: "100%",
   height: 42,
   padding: "0 12px",
@@ -144,7 +146,7 @@ const inputStyle: React.CSSProperties = {
   boxSizing: "border-box",
 };
 
-const labelStyle: React.CSSProperties = {
+const labelStyle: CSSProperties = {
   display: "block",
   marginBottom: 7,
   fontSize: 12,
@@ -919,7 +921,7 @@ async function loadData() {
       return;
     }
 
-    const orderedInputStops = sortStopsByOperationalSequence(stops);
+    const orderedInputStops: LoadStop[] = sortStopsByOperationalSequence<LoadStop>(stops);
     const firstStop = orderedInputStops[0];
     const lastStop = orderedInputStops[orderedInputStops.length - 1];
 
@@ -1050,30 +1052,25 @@ for (const stop of stops) {
       };
 
       if (editingLoadId) {
+        // Validate the latest stop state BEFORE changing the parent load.
+        // This prevents a stale edit form from updating a load whose stops are no longer pending.
+        const { data: currentRows, error: currentRowsError } =
+          await supabase
+            .from("load_stops")
+            .select("id, status, stop_order")
+            .eq("load_id", editingLoadId);
+
+        if (currentRowsError) throw new Error(currentRowsError.message);
+
+        if ((currentRows ?? []).some((row: any) => row.status && row.status !== "pending")) {
+          throw new Error(text.editBlocked);
+        }
+
         const { error: updateError } = await supabase
           .from("loads")
           .update(loadPayload)
           .eq("id", editingLoadId);
         if (updateError) throw new Error(updateError.message);
-
-     const { data: currentRows, error: currentRowsError } =
-  await supabase
-    .from("load_stops")
-    .select("id, status, stop_order")
-    .eq("load_id", editingLoadId);
-
-if (currentRowsError) {
-  throw new Error(currentRowsError.message);
-}
-
-if (
-  (currentRows ?? []).some(
-    (row: any) =>
-      row.status && row.status !== "pending"
-  )
-) {
-  throw new Error(text.editBlocked);
-}
         const retainedIds = new Set(stops.filter(stop => stop.stop_number && !stop.stop_number.startsWith("stop-")).map(stop => stop.stop_number));
         const removedIds = (currentRows ?? []).filter((row: any) => !retainedIds.has(String(row.id))).map((row: any) => row.id);
        if (removedIds.length) {
@@ -3662,7 +3659,7 @@ function Field({
   children,
 }: {
   label: string;
-  children: React.ReactNode;
+  children: ReactNode;
 }) {
   return (
     <div>
@@ -3675,7 +3672,7 @@ function Field({
   );
 }
 
-const thStyle: React.CSSProperties = {
+const thStyle: CSSProperties = {
   padding: "12px 14px",
   textAlign: "left",
   fontSize: 11,
@@ -3686,7 +3683,7 @@ const thStyle: React.CSSProperties = {
   whiteSpace: "nowrap",
 };
 
-const tdStyle: React.CSSProperties = {
+const tdStyle: CSSProperties = {
   padding: "14px",
   verticalAlign: "middle",
   fontSize: 12,

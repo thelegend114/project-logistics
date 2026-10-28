@@ -186,40 +186,19 @@ function describeManeuver(
 }
 
 function createTruckIcon(_heading: number) {
-  // Keep the truck arrow upright while the map rotates.
-  // Mantiene la flecha vertical mientras gira el mapa.
-
+  // The truck stays upright and screen-fixed; the rotation plugin rotates the map.
   return L.divIcon({
     className: "navigation-arrow-marker",
     html: `
       <div style="
-        width:42px;
-        height:42px;
-        display:flex;
-        align-items:center;
-        justify-content:center;
+        width:42px;height:42px;display:flex;align-items:center;justify-content:center;
+        transform:none;transform-origin:center;
         filter:drop-shadow(0 2px 3px rgba(15,23,42,.55));
       ">
-        <svg
-          viewBox="0 0 48 48"
-          width="42"
-          height="42"
-          aria-hidden="true"
-          xmlns="http://www.w3.org/2000/svg"
-        >
-          <path
-            d="M24 2 L43 42 L24 33 L5 42 Z"
-            fill="#0891b2"
-            stroke="#ffffff"
-            stroke-width="3"
-            stroke-linejoin="round"
-          />
-          <path
-            d="M24 10 L24 31"
-            stroke="#ffffff"
-            stroke-width="3"
-            stroke-linecap="round"
-          />
+        <svg viewBox="0 0 48 48" width="42" height="42" aria-hidden="true"
+          xmlns="http://www.w3.org/2000/svg">
+          <path d="M24 2 L43 42 L24 33 L5 42 Z" fill="#0891b2" stroke="#ffffff" stroke-width="3" stroke-linejoin="round"/>
+          <path d="M24 10 L24 31" stroke="#ffffff" stroke-width="3" stroke-linecap="round"/>
         </svg>
       </div>
     `,
@@ -286,22 +265,10 @@ function getRouteBearing(position: L.LatLng, route: L.Polyline | null): number |
 }
 
 function applyMapBearing(map: L.Map, heading: number) {
+  // Use the Leaflet rotation plugin; never rotate Leaflet's mapPane manually.
+  // Heading-up rotates the roads/route while the truck marker remains upright.
   if (!Number.isFinite(heading)) return;
-
-  try {
-    map.setHeading(heading, {
-      ease: 0.25,
-      deadzone: 0,
-    });
-
-    console.log("MAP ROTATION RESULT:", {
-      heading,
-      bearing: map.getBearing(),
-      headingUp: map.getHeadingUp(),
-    });
-  } catch (error) {
-    console.error("TRUCK MAP ROTATION ERROR:", error);
-  }
+  map.setHeading(heading, { ease: 0.25, deadzone: 1 });
 }
 
 function isValidCoordinate(
@@ -401,7 +368,17 @@ export default function TruckMap({
     tileErrorCountRef.current = 0;
     fallbackTilesActiveRef.current = false;
 
-    const map = L.map(containerRef.current).setView([39.5, -98.35], 4);
+    const map = L.map(containerRef.current, {
+      rotate: true,
+      bearing: 0,
+      dragRotate: false,
+      touchRotate: false,
+      shiftKeyRotate: false,
+      scrollWheelZoom: false,
+      zoomAnimation: false,
+      fadeAnimation: false,
+      markerZoomAnimation: false,
+    }).setView([39.5, -98.35], 4);
     mapRef.current = map;
 
     const osmTiles = L.tileLayer(
@@ -499,6 +476,7 @@ export default function TruckMap({
     };
   }, []);
 
+  // Recalculate Leaflet after Drive switches between embedded and fullscreen.
   // A single animation frame can run before the fixed/absolute layout has its
   // final dimensions; Leaflet then leaves blank gray areas until tiles redraw.
   useEffect(() => {
@@ -513,13 +491,6 @@ export default function TruckMap({
       tileLayerRef.current?.redraw();
       applyMapBearing(map, headingRef.current);
 
-      if (lastLocation && isValidCoordinate(lastLocation.lat, lastLocation.lng)) {
-        map.setView(
-          [lastLocation.lat, lastLocation.lng],
-          Math.max(map.getZoom(), 15),
-          { animate: false }
-        );
-      }
     };
 
     const firstFrame = window.requestAnimationFrame(() => {
@@ -538,7 +509,7 @@ export default function TruckMap({
       window.clearTimeout(shortDelay);
       window.clearTimeout(settleDelay);
     };
- }, [fullScreen]);
+  }, [fullScreen]);
 
   // Update truck position, arrival state, and distance to the next maneuver.
   useEffect(() => {
@@ -575,13 +546,13 @@ export default function TruckMap({
       truckMarkerRef.current.setIcon(icon);
     }
 
-    // Mantener el zoom actual y mover el mapa solamente cuando sea necesario.
-// No ejecutar setView en cada actualización GPS: puede provocar parpadeos.
-const center = map.getCenter();
-
-if (center.distanceTo(position) > 8) {
-  map.panTo(position, { animate: false });
-}
+    // Keep the same zoom; pan only as the GPS position changes. The plugin
+    // rotates the road map underneath the upright truck arrow.
+    applyMapBearing(map, headingRef.current);
+    const currentCenter = map.getCenter();
+    if (currentCenter.distanceTo(position) > 3) {
+      map.panTo(position, { animate: false, noMoveStart: true });
+    }
 
     if (
       destination &&
@@ -964,7 +935,6 @@ if (center.distanceTo(position) > 8) {
         if (routeBearing !== null && !Number.isFinite(lastLocation?.heading ?? NaN)) {
           headingRef.current = routeBearing;
           applyMapBearing(map, headingRef.current);
-          truckMarkerRef.current?.setIcon(createTruckIcon(headingRef.current));
         }
         stepsRef.current = newSteps;
         currentStepIndexRef.current = 0;
@@ -1039,17 +1009,28 @@ if (center.distanceTo(position) > 8) {
             </div>
 
             <div className="min-w-0 flex-1">
-              <div className="text-base font-bold text-black" style={{ textShadow: "0 1px 2px white" }}>
+              <div
+                className={`text-xl sm:text-2xl font-extrabold ${
+                  navigation.isArrived
+                    ? "text-red-600"
+                    : destination && lastLocation && isValidCoordinate(destination.latitude, destination.longitude) && isValidCoordinate(lastLocation.lat, lastLocation.lng) && L.latLng(lastLocation.lat, lastLocation.lng).distanceTo(L.latLng(Number(destination.latitude), Number(destination.longitude))) <= 800
+                      ? "text-yellow-600"
+                      : /left|right|turn|gira|izquierda|derecha|rampa|ramp|salida|exit|rotonda|roundabout|merge|incorp[oó]rate/i.test(navigation.instruction)
+                        ? "text-orange-600"
+                        : "text-emerald-700"
+                }`}
+                style={{ textShadow: "0 1px 2px white, 0 0 4px white" }}
+              >
                 {navigation.instruction}
               </div>
 
               {navigation.roadName && !navigation.isArrived && (
-                <div className="mt-0.5 text-sm font-semibold text-black" style={{ textShadow: "0 1px 2px white" }}>
+                <div className="mt-1 text-base sm:text-lg font-bold text-black" style={{ textShadow: "0 1px 2px white" }}>
                   {navigation.roadName}
                 </div>
               )}
 
-              <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs text-black">
+              <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-sm sm:text-base font-semibold text-black" style={{ textShadow: "0 1px 2px white" }}>
                 {!navigation.isArrived && (
                   <>
                     <span>
@@ -1072,8 +1053,17 @@ if (center.distanceTo(position) > 8) {
                 )}
               </div>
 
+              {!navigation.isArrived && !navigation.isCalculating && !navigation.routeError &&
+                navigation.distanceToManeuver >= 45 &&
+                navigation.distanceToManeuver <= 300 &&
+                /left|right|turn|gira|izquierda|derecha|rampa|ramp|salida|exit|rotonda|roundabout|merge|incorp[oó]rate/i.test(navigation.instruction) && (
+                  <div className="mt-2 text-base sm:text-lg font-extrabold text-orange-600" style={{ textShadow: "0 1px 2px white" }}>
+                    {isES ? "⚠ PREPÁRATE PARA LA MANIOBRA" : "⚠ PREPARE FOR THE MANEUVER"}
+                  </div>
+                )}
+
               {navigation.isCalculating && (
-                <div className="mt-2 text-sm font-semibold text-blue-700">
+                <div className="mt-2 text-base font-bold text-blue-700" style={{ textShadow: "0 1px 2px white" }}>
                   {isES
                     ? "Actualizando navegación..."
                     : "Updating navigation..."}
@@ -1081,7 +1071,7 @@ if (center.distanceTo(position) > 8) {
               )}
 
               {navigation.isOffRoute && !navigation.isArrived && (
-                <div className="mt-2 text-sm font-bold text-red-600">
+                <div className="mt-2 text-base font-extrabold text-red-600" style={{ textShadow: "0 1px 2px white" }}>
                   {isES
                     ? "Desvío detectado. Recalculando ruta..."
                     : "Off route. Recalculating route..."}
@@ -1101,14 +1091,14 @@ if (center.distanceTo(position) > 8) {
               )}
 
               {navigation.isArrived && (
-                <div className="mt-1 text-sm font-semibold text-emerald-700">
+                <div className="mt-1 text-base font-bold text-red-600" style={{ textShadow: "0 1px 2px white" }}>
                   {isES
                     ? "Proximidad al destino confirmada por GPS. Completa la parada mediante el flujo operativo."
                     : "GPS proximity to destination confirmed. Complete the stop through the operational workflow."}
                 </div>
               )}
 
-              <div className="mt-2 text-[11px] font-medium text-black" style={{ textShadow: "0 1px 2px white" }}>
+              <div className="mt-2 text-sm font-semibold text-black" style={{ textShadow: "0 1px 2px white" }}>
                 {isES
                   ? "ETA aproximado; puede variar según las condiciones de la vía."
                   : "Estimated ETA; actual travel time may vary with road conditions."}
@@ -1118,20 +1108,22 @@ if (center.distanceTo(position) > 8) {
         </div>
       }
 
-            <div
-        ref={containerRef}
-        className="leaflet-map-host"
-        style={{
-          position: "absolute",
-          inset: 0,
-          width: "100%",
-          height: "100%",
-          minWidth: 0,
-          minHeight: 0,
-          overflow: "hidden",
-          background: "#e2e8f0",
-        }}
-      />
+      <div
+  ref={containerRef}
+  className={`leaflet-map-host absolute inset-0 z-10 w-full overflow-hidden ${
+    fullScreen ? "h-full min-h-0" : "h-[450px]"
+  }`}
+  style={{
+    position: "absolute",
+    inset: 0,
+    width: "100%",
+    height: fullScreen ? "100%" : 450,
+    minWidth: 0,
+    minHeight: fullScreen ? 0 : 450,
+    overflow: "hidden",
+    background: "#e2e8f0",
+  }}
+/>
     </div>
   );
 }

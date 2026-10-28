@@ -890,7 +890,25 @@ async function updateDriverWorkStatus(nextStatus: "off_duty" | "hold" | "availab
     stopGpsTracking();
   }
 
+  // Personal Time y Hold también deben cerrar el intervalo HOS anterior.
+  // Hold se registra como evento operativo propio para no clasificarlo falsamente
+  // como Off Duty; ambos eventos detienen los relojes operativos en esta pantalla.
+  if (nextStatus === "off_duty" || nextStatus === "hold") {
+    const hosEventSaved = await setHosStatus(
+      nextStatus === "off_duty" ? "Off Duty" : "Hold"
+    );
+
+    if (!hosEventSaved) {
+      console.error("WORK STATUS SAVED BUT HOS EVENT FAILED:", {
+        driverId: driverProfile.id,
+        nextStatus,
+      });
+    }
+  }
+
   if (nextStatus === "available") {
+    // AVAILABLE es estado operativo de espera: no insertar ni modificar eventos HOS.
+    // Se conserva el último evento HOS guardado y solo se detiene el GPS.
     const { data: assignedLoads, error: assignedLoadsError } =
       await supabase
         .from("loads")
@@ -2451,9 +2469,13 @@ async function startDrive(): Promise<boolean> {
       refreshLoadInUI(updatedLoad as typeof selectedLoad);
       await refreshNavigation();
 
+      // AT PICKUP cambia HOS manualmente a On Duty; nunca depende del GPS.
+      const pickupHosSaved = await setHosStatus("On Duty");
+      if (!pickupHosSaved) return false;
+
       showMessage(
         isES
-          ? "Recogida confirmada. Pulsa DONE al terminar esta parada."
+          ? "Recogida confirmada. HOS: On Duty. Pulsa DONE al terminar esta parada."
           : "Pickup confirmed. Press DONE when this stop is complete."
       );
       return true;
@@ -2547,8 +2569,16 @@ async function startDrive(): Promise<boolean> {
         return false;
       }
 
-      // START TRIP actualiza el flujo operativo de la carga; no modifica HOS.
-      // El estado HOS solo cambia desde los controles manuales autorizados.
+      // START TRIP cambia HOS manualmente a Driving; no lo cambia el GPS.
+      const tripHosSaved = await setHosStatus("Driving");
+      if (!tripHosSaved) {
+        showMessage(
+          isES
+            ? "El viaje se inició, pero no se pudo guardar HOS. Verifica HOS antes de continuar."
+            : "The trip started, but HOS could not be saved. Verify HOS before continuing."
+        );
+        return false;
+      }
 
       refreshLoadInUI(updatedLoad as typeof selectedLoad);
 
@@ -2660,9 +2690,13 @@ async function startDrive(): Promise<boolean> {
       refreshLoadInUI(updatedLoad as typeof selectedLoad);
       await refreshNavigation();
 
+      // AT DELIVERY registra On Duty al confirmar manualmente la llegada.
+      const deliveryHosSaved = await setHosStatus("On Duty");
+      if (!deliveryHosSaved) return false;
+
       showMessage(
         isES
-          ? "Entrega confirmada. Pulsa DONE para completar esta parada."
+          ? "Entrega confirmada. HOS: On Duty. Pulsa DONE para completar esta parada."
           : "Delivery confirmed. Press DONE to complete this stop."
       );
       return true;
@@ -2787,6 +2821,16 @@ async function startDrive(): Promise<boolean> {
             : "Could not finalize the load."
         );
         return false;
+      }
+
+      // DONE mantiene HOS en On Duty después de completar la última parada.
+      const doneHosSaved = await setHosStatus("On Duty");
+      if (!doneHosSaved) {
+        showMessage(
+          isES
+            ? "La carga terminó, pero no se pudo guardar HOS como On Duty."
+            : "The load finished, but HOS could not be saved as On Duty."
+        );
       }
 
       // Buscar la siguiente carga asignada, por fecha programada.
@@ -3498,8 +3542,14 @@ if (
       ? Math.max(0, clockNow - latestHosTimestamp)
       : 0;
 
+  const hosClockIsRunning =
+    latestStatusNormalized === "driving" ||
+    latestStatusNormalized === "on_duty";
+
   const shiftElapsedMs =
-    latestHosTimestamp !== null && Number.isFinite(latestHosTimestamp)
+    hosClockIsRunning &&
+    latestHosTimestamp !== null &&
+    Number.isFinite(latestHosTimestamp)
       ? Math.max(0, clockNow - latestHosTimestamp)
       : 0;
 
@@ -3577,6 +3627,8 @@ if (
         return text.driving;
       case "on duty":
         return text.onDuty;
+      case "hold":
+        return isES ? "En pausa (Hold)" : "On Hold";
       default:
         return status;
     }

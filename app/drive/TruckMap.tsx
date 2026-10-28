@@ -442,12 +442,18 @@ export default function TruckMap({
     tileLayerRef.current = osmTiles;
     osmTiles.addTo(map);
 
-    // Recover when mobile browsers stall tile requests without emitting tileerror.
+    
+    // EN: Force a fallback check if the mobile map stays gray.
+    // ES: Forzar una comprobación de respaldo si el mapa móvil sigue gris.
     fallbackTimer = window.setTimeout(() => {
-      if (!baseTilesLoaded && !fallbackTilesActiveRef.current) {
+      if (!fallbackTilesActiveRef.current && mapRef.current === map) {
+        console.warn(
+          "TRUCK MAP: Mobile fallback check — switching to CARTO."
+        );
         activateFallbackTiles();
       }
-    }, 8000);
+    }, 10000);
+
 
     const refreshMapSize = () => {
       map.invalidateSize({ pan: false });

@@ -1114,22 +1114,20 @@ export default function TruckMap({
         </div>
       }
 
-      <div
-  ref={containerRef}
-  className={`leaflet-map-host absolute inset-0 z-10 w-full overflow-hidden ${
-    fullScreen ? "h-full min-h-0" : "h-[450px]"
-  }`}
-  style={{
-    position: "absolute",
-    inset: 0,
-    width: "100%",
-    height: fullScreen ? "100%" : 450,
-    minWidth: 0,
-    minHeight: fullScreen ? 0 : 450,
-    overflow: "hidden",
-    background: "#e2e8f0",
-  }}
-/>
+           <div
+        ref={containerRef}
+        className="leaflet-map-host"
+        style={{
+          position: "absolute",
+          inset: 0,
+          width: "100%",
+          height: "100%",
+          minWidth: 0,
+          minHeight: 0,
+          overflow: "hidden",
+          background: "#e2e8f0",
+        }}
+      />
     </div>
   );
 }

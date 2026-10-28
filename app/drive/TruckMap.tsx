@@ -1127,11 +1127,15 @@ export default function TruckMap({
 
       <div
         ref={containerRef}
-        className={`z-10 w-full ${fullScreen ? "h-full" : "h-[450px]"}`}
+        className="leaflet-map-host"
         style={{
-          height: fullScreen ? "100%" : 450,
-          minHeight: fullScreen ? 0 : 450,
+          position: "absolute",
+          inset: 0,
           width: "100%",
+          height: "100%",
+          minWidth: 0,
+          minHeight: 0,
+          overflow: "hidden",
           background: "#e2e8f0",
         }}
       />

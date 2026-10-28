@@ -80,11 +80,13 @@ type Load = {
   destination_state: string | null;
   status: string | null;
   rate: number | null;
+  created_at?: string | null;
 };
 
 type Document = {
   id: string;
   load_id: string | null;
+  load_stop_id: string | null;
   document_type: string | null;
   file_name: string | null;
   storage_path: string | null;
@@ -92,9 +94,21 @@ type Document = {
   uploaded_at: string | null;
 };
 
+type LoadStop = {
+  id: string;
+  load_id: string;
+  stop_order: number;
+  stop_type: string;
+  pickup_number: string | null;
+  address: string | null;
+  city: string | null;
+  state: string | null;
+};
+
 type LoadReadiness = {
   load: Load;
   documents: Document[];
+  pickupStops: LoadStop[];
   hasBOL: boolean;
   hasPOD: boolean;
   hasRateConfirmation: boolean;
@@ -138,6 +152,21 @@ const money = (value: number | null | undefined) =>
     maximumFractionDigits: 2,
   })}`;
 
+const formatPickupNumber = (value: string | null | undefined) => {
+  const pickupNumber = String(value ?? "").trim();
+  if (!pickupNumber) return "";
+  if (/^PU\s*/i.test(pickupNumber)) return pickupNumber.replace(/^PU\s*/i, "PU");
+  return `PU${pickupNumber}`;
+};
+
+const normalizeAddressKey = (value: string | null | undefined) =>
+  String(value ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+
+const CURRENT_PICKUP_ADDRESS_KEYS: Record<string, string> = {
+  PU99: "9950WFLAGLER",
+  PU222: "9565WFLAGLER",
+};
+
 const formatDate = (value: string | null | undefined) => {
   if (!value) return "—";
 
@@ -158,10 +187,12 @@ const normalize = (value: string | null | undefined) =>
 function isApprovedDocument(document: Document) {
   const status = normalize(document.status);
 
-  // A document that was only reviewed is not yet approved for invoicing.
+  // In the current Documents workflow, clicking "Approve Document"
+  // saves the status as "reviewed". Finance must honor that workflow.
   return [
     "approved",
     "document approved",
+    "reviewed",
   ].includes(status);
 }
 
@@ -528,87 +559,158 @@ export default function FinancePage() {
  
 
   async function loadDeliveredLoads(companyId: string) {
-    const { data: loadsData } = await supabase
+    // Resolve the newest real load IDs for PU99 and PU222 first. This prevents
+    // an older load with a reused PU label from entering the current workflow.
+    const { data: allLoadsData, error: allLoadsError } = await supabase
       .from("loads")
       .select(
-        "id, company_id, load_number, broker_name, origin_city, origin_state, destination_city, destination_state, status, rate"
+        "id, company_id, load_number, broker_name, origin_city, origin_state, destination_city, destination_state, status, rate, created_at"
       )
       .eq("company_id", companyId)
-      .ilike("status", "delivered")
-      .order("load_number", { ascending: true });
+      .order("created_at", { ascending: false });
 
-    const deliveredLoads = (loadsData || []) as Load[];
-console.log("[Finance] Company ID:", companyId);
-console.log("[Finance] Delivered loads found:", deliveredLoads);
+    if (allLoadsError) {
+      console.error("FINANCE CURRENT LOADS ERROR:", allLoadsError);
+      setReadiness([]);
+      return;
+    }
 
-    if (!deliveredLoads.length) {
+    const allLoads = (allLoadsData || []) as Load[];
+    if (allLoads.length === 0) {
+      setReadiness([]);
+      return;
+    }
+
+    const allLoadIds = allLoads.map((load) => load.id);
+    const { data: allStopsData, error: allStopsError } = await supabase
+      .from("load_stops")
+      .select("id, load_id, stop_order, stop_type, pickup_number, address, city, state")
+      .in("load_id", allLoadIds)
+      .order("stop_order", { ascending: true });
+
+    if (allStopsError) {
+      console.error("FINANCE CURRENT LOAD STOPS ERROR:", allStopsError);
+      setReadiness([]);
+      return;
+    }
+
+    const allStops = (allStopsData || []) as LoadStop[];
+    const currentLoads: Load[] = [];
+
+    // Match current loads by pickup label AND street address. PU99 at 9950 W
+    // Flagler is current; the already completed PU99/PU51 load remains history.
+    for (const [wantedLabel, wantedAddressKey] of Object.entries(CURRENT_PICKUP_ADDRESS_KEYS)) {
+      const candidates = allLoads.filter((load) =>
+        allStops.some((stop) => {
+          const stopType = normalize(stop.stop_type);
+          const label = formatPickupNumber(stop.pickup_number).trim().toUpperCase();
+          const addressKey = normalizeAddressKey(stop.address);
+          return stop.load_id === load.id &&
+            ["pickup", "pick up"].includes(stopType) &&
+            label === wantedLabel &&
+            addressKey.includes(wantedAddressKey);
+        })
+      );
+      candidates.sort((a, b) => {
+        const aTime = a.created_at ? new Date(a.created_at).getTime() : 0;
+        const bTime = b.created_at ? new Date(b.created_at).getTime() : 0;
+        return bTime - aTime;
+      });
+      if (candidates[0] && !currentLoads.some((load) => load.id === candidates[0].id)) {
+        currentLoads.push(candidates[0]);
+      }
+    }
+
+    // Finance readiness only concerns delivered current loads; invoice history
+    // and existing invoices remain untouched and are still loaded separately.
+    const deliveredLoads = currentLoads.filter(
+      (load) => normalize(load.status) === "delivered"
+    );
+
+    if (deliveredLoads.length === 0) {
       setReadiness([]);
       return;
     }
 
     const loadIds = deliveredLoads.map((load) => load.id);
+    const [
+      { data: documentsData, error: documentsError },
+      { data: stopsData, error: stopsError },
+      { data: invoicesData, error: invoicesError },
+    ] = await Promise.all([
+      supabase
+        .from("documents")
+        .select("id, load_id, load_stop_id, document_type, file_name, storage_path, status, uploaded_at")
+        .in("load_id", loadIds),
+      supabase
+        .from("load_stops")
+        .select("id, load_id, stop_order, stop_type, pickup_number, address, city, state")
+        .in("load_id", loadIds)
+        .order("stop_order", { ascending: true }),
+      supabase
+        .from("invoices")
+        .select("id, load_id, status")
+        .in("load_id", loadIds),
+    ]);
 
-    const { data: documentsData } = await supabase
-      .from("documents")
-      .select(
-        "id, load_id, document_type, file_name, storage_path, status, uploaded_at"
-      )
-      .in("load_id", loadIds);
+    if (documentsError || stopsError || invoicesError) {
+      console.error("FINANCE READINESS DATA ERROR:", {
+        documentsError,
+        stopsError,
+        invoicesError,
+      });
+      setReadiness([]);
+      return;
+    }
 
     const documents = (documentsData || []) as Document[];
-
-    const { data: invoicesData } = await supabase
-  .from("invoices")
-  .select("id, load_id, status")
-  .in("load_id", loadIds);
-
+    const loadStops = (stopsData || []) as LoadStop[];
     const existingInvoices = invoicesData || [];
 
-    const result = deliveredLoads
-  .filter((load) => {
-    return !existingInvoices.some(
-      (invoice) => invoice.load_id === load.id
-    );
-  })
-  .map((load) => {
-      const loadDocuments = documents.filter(
-        (document) => document.load_id === load.id
-      );
-       const hasInvoice = existingInvoices.some(
-         (invoice) => invoice.load_id === load.id
-      );
+    const normalizeStopType = (value: string | null | undefined) =>
+      String(value ?? "")
+        .trim()
+        .toLowerCase()
+        .replace(/[\s-]+/g, "_");
 
-      const hasBOL = loadDocuments.some(
-        (document) =>
-          documentTypeMatches(document, "bol") &&
-          isApprovedDocument(document)
-      );
+    const result: LoadReadiness[] = deliveredLoads
+      .filter((load) => !existingInvoices.some((invoice) => invoice.load_id === load.id))
+      .map((load) => {
+        const loadDocuments = documents.filter((document) => document.load_id === load.id);
+        const stops = loadStops.filter((stop) => stop.load_id === load.id);
 
-      const hasPOD = loadDocuments.some(
-        (document) =>
-          documentTypeMatches(document, "pod") &&
-          isApprovedDocument(document)
-      );
+        const pickupStops = stops.filter((stop) =>
+          ["pickup", "pick_up"].includes(normalizeStopType(stop.stop_type))
+        );
+        const deliveryStops = stops.filter((stop) =>
+          ["delivery", "dropoff", "drop_off"].includes(normalizeStopType(stop.stop_type))
+        );
 
-      const hasRateConfirmation = loadDocuments.some(
-        (document) =>
-          documentTypeMatches(document, "rate") &&
-          isApprovedDocument(document)
-      );
+        const hasApprovedDocumentForStop = (type: "bol" | "pod", stopId: string) =>
+          loadDocuments.some((document) =>
+            document.load_stop_id === stopId &&
+            documentTypeMatches(document, type) &&
+            isApprovedDocument(document)
+          );
 
-      return {
-        load,
-        documents: loadDocuments,
-        hasBOL,
-        hasPOD,
-        hasRateConfirmation,
-        ready:
-         hasBOL &&
-         hasPOD &&
-         hasRateConfirmation &&
-         !hasInvoice,
-      };
-    });
+        const hasBOL = pickupStops.length > 0 &&
+          pickupStops.every((stop) => hasApprovedDocumentForStop("bol", stop.id));
+        const hasPOD = deliveryStops.length > 0 &&
+          deliveryStops.every((stop) => hasApprovedDocumentForStop("pod", stop.id));
+        const hasRateConfirmation = loadDocuments.some((document) =>
+          documentTypeMatches(document, "rate") && isApprovedDocument(document)
+        );
+
+        return {
+          load,
+          documents: loadDocuments,
+          pickupStops,
+          hasBOL,
+          hasPOD,
+          hasRateConfirmation,
+          ready: hasBOL && hasPOD && hasRateConfirmation,
+        };
+      });
 
     setReadiness(result);
   }
@@ -779,11 +881,21 @@ const deductions = useMemo(
     [readiness]
   );
 
-  
-const filteredInvoices = useMemo(() => {
+  const filteredInvoices = useMemo(() => {
   const query = search.toLowerCase().trim();
 
   return invoices.filter((invoice) => {
+    const status = normalize(invoice.status);
+
+    const activeInvoice =
+      status !== "funded" &&
+      status !== "paid" &&
+      status !== "closed";
+
+    if (!activeInvoice) {
+      return false;
+    }
+
     if (!query) {
       return true;
     }
@@ -798,7 +910,6 @@ const filteredInvoices = useMemo(() => {
       .includes(query);
   });
 }, [invoices, search]);
-
 
   const filteredExpenses = useMemo(() => {
     const query = search.toLowerCase().trim();
@@ -1483,7 +1594,13 @@ const filteredInvoices = useMemo(() => {
                       fontSize: "14px",
                     }}
                   >
-                    {item.load.load_number || item.load.id}
+                    {item.pickupStops
+                      .map((stop) => formatPickupNumber(stop.pickup_number))
+                      .filter(Boolean)
+                      .join(" / ") || item.load.load_number || item.load.id}
+                  </div>
+                  <div style={{ color: "#64748b", fontSize: "11px", marginTop: "3px" }}>
+                    {isES ? "Referencia interna" : "Internal reference"}: {item.load.load_number || item.load.id.slice(0, 8)}
                   </div>
 
                   <div
@@ -1491,6 +1608,7 @@ const filteredInvoices = useMemo(() => {
                       color: "#64748b",
                       fontSize: "12px",
                       marginTop: "4px",
+                      lineHeight: 1.55,
                     }}
                   >
                     {item.load.broker_name || "—"} ·{" "}
@@ -1499,38 +1617,47 @@ const filteredInvoices = useMemo(() => {
                     {item.load.destination_city},{" "}
                     {item.load.destination_state}
                   </div>
+                  <div
+                    style={{
+                      color: "#334155",
+                      fontSize: "11px",
+                      fontWeight: 700,
+                      marginTop: "5px",
+                    }}
+                  >
+                    {isES ? "Recogidas" : "Pickups"}: {item.pickupStops
+                      .map((stop) => formatPickupNumber(stop.pickup_number) || `PU-${stop.stop_order}`)
+                      .join(" / ") || (isES ? "Sin etiquetas PU" : "No PU labels")}
+                  </div>
+                  {item.pickupStops.map((stop) => {
+                    const address = [stop.address, stop.city, stop.state].filter(Boolean).join(", ");
+                    return address ? (
+                      <div key={stop.id} style={{ color: "#64748b", fontSize: "11px", marginTop: "2px" }}>
+                        {formatPickupNumber(stop.pickup_number) || `PU-${stop.stop_order}`}: {address}
+                      </div>
+                    ) : null;
+                  })}
                 </div>
 
                 <div
                   style={{
                     display: "flex",
-                    gap: "6px",
+                    gap: "8px",
                     flexWrap: "wrap",
                   }}
                 >
-                  <StatusBadge
-                    status={
-                      item.hasBOL
-                        ? text.approved
-                        : text.missing
-                    }
-                  />
-
-                  <StatusBadge
-                    status={
-                      item.hasPOD
-                        ? text.approved
-                        : text.missing
-                    }
-                  />
-
-                  <StatusBadge
-                    status={
-                      item.hasRateConfirmation
-                        ? text.approved
-                        : text.missing
-                    }
-                  />
+                  <div style={{ display: "grid", gap: "4px", justifyItems: "start" }}>
+                    <span style={{ color: "#64748b", fontSize: "10px", fontWeight: 800 }}>{text.bol}</span>
+                    <StatusBadge status={item.hasBOL ? text.approved : text.missing} />
+                  </div>
+                  <div style={{ display: "grid", gap: "4px", justifyItems: "start" }}>
+                    <span style={{ color: "#64748b", fontSize: "10px", fontWeight: 800 }}>{text.pod}</span>
+                    <StatusBadge status={item.hasPOD ? text.approved : text.missing} />
+                  </div>
+                  <div style={{ display: "grid", gap: "4px", justifyItems: "start" }}>
+                    <span style={{ color: "#64748b", fontSize: "10px", fontWeight: 800 }}>{text.rateConfirmation}</span>
+                    <StatusBadge status={item.hasRateConfirmation ? text.approved : text.missing} />
+                  </div>
                 </div>
 
                 <ActionButton

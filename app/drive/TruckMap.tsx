@@ -442,28 +442,36 @@ export default function TruckMap({
     tileLayerRef.current = osmTiles;
     osmTiles.addTo(map);
 
-    
-    // EN: Force a fallback check if the mobile map stays gray.
-    // ES: Forzar una comprobación de respaldo si el mapa móvil sigue gris.
+    // Recover when mobile browsers stall tile requests without emitting tileerror.
     fallbackTimer = window.setTimeout(() => {
-      if (!fallbackTilesActiveRef.current && mapRef.current === map) {
-        console.warn(
-          "TRUCK MAP: Mobile fallback check — switching to CARTO."
-        );
+      if (!baseTilesLoaded && !fallbackTilesActiveRef.current) {
         activateFallbackTiles();
       }
-    }, 10000);
-
+    }, 8000);
 
     const refreshMapSize = () => {
-      map.invalidateSize({ pan: false });
+      if (!mapRef.current || mapRef.current !== map) return;
+      map.invalidateSize({ pan: false, animate: false });
+      tileLayerRef.current?.redraw();
       applyMapBearing(map, headingRef.current);
+    };
+
+    const refreshAfterBrowserRestore = () => {
+      if (document.visibilityState === "hidden") return;
+      window.requestAnimationFrame(() => {
+        refreshMapSize();
+        window.setTimeout(refreshMapSize, 180);
+        window.setTimeout(refreshMapSize, 420);
+      });
     };
     const observer = typeof ResizeObserver !== "undefined"
       ? new ResizeObserver(refreshMapSize)
       : null;
     observer?.observe(containerRef.current);
     window.addEventListener("resize", refreshMapSize);
+    window.addEventListener("orientationchange", refreshAfterBrowserRestore);
+    window.addEventListener("pageshow", refreshAfterBrowserRestore);
+    document.addEventListener("visibilitychange", refreshAfterBrowserRestore);
     requestAnimationFrame(refreshMapSize);
 
     return () => {
@@ -471,6 +479,9 @@ export default function TruckMap({
       routeInFlightRef.current = false;
       observer?.disconnect();
       window.removeEventListener("resize", refreshMapSize);
+      window.removeEventListener("orientationchange", refreshAfterBrowserRestore);
+      window.removeEventListener("pageshow", refreshAfterBrowserRestore);
+      document.removeEventListener("visibilitychange", refreshAfterBrowserRestore);
       if (fallbackTimer !== null) window.clearTimeout(fallbackTimer);
       tileLayerRef.current = null;
       map.remove();
@@ -1114,17 +1125,13 @@ export default function TruckMap({
         </div>
       }
 
-           <div
+      <div
         ref={containerRef}
-        className="leaflet-map-host"
+        className={`z-10 w-full ${fullScreen ? "h-full" : "h-[450px]"}`}
         style={{
-          position: "absolute",
-          inset: 0,
+          height: fullScreen ? "100%" : 450,
+          minHeight: fullScreen ? 0 : 450,
           width: "100%",
-          height: "100%",
-          minWidth: 0,
-          minHeight: 0,
-          overflow: "hidden",
           background: "#e2e8f0",
         }}
       />

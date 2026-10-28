@@ -23,6 +23,7 @@ type Load = {
   destination_state: string | null;
   status: string | null;
   rate: number | null;
+  created_at?: string | null;
 };
 
 type Document = {
@@ -127,6 +128,15 @@ function formatPickupNumber(value: string | null | undefined) {
   return `PU${pickupNumber}`;
 }
 
+function normalizeAddressKey(value: string | null | undefined) {
+  return String(value ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+const CURRENT_PICKUP_ADDRESS_KEYS: Record<string, string> = {
+  PU99: "9950WFLAGLER",
+  PU222: "9565WFLAGLER",
+};
+
 export default function DocumentsPage() {
   const { language } = useLanguage();
   const isES = language === "ES";
@@ -155,6 +165,14 @@ export default function DocumentsPage() {
     load: isES ? "Carga" : "Load",
     loadingLoads: isES ? "Cargando cargas..." : "Loading loads...",
     selectLoad: isES ? "Selecciona una carga" : "Select a load",
+    pendingLoadsTitle: isES ? "Cargas vigentes: PU99 y PU222" : "Current Loads: PU99 and PU222",
+    pendingLoadsDescription: isES ? "Solo se muestran las cargas vigentes PU99 y PU222 en este selector." : "Only the current PU99 and PU222 loads appear in this selector.",
+    noCurrentLoads: isES ? "No se encontraron las cargas vigentes PU99 o PU222." : "No current PU99 or PU222 loads were found.",
+    completedHistoryTitle: isES ? "Historial de documentos completados" : "Completed Document History",
+    completedHistoryDescription: isES ? "Historial separado de las cargas vigentes. Los documentos históricos se conservan y se muestran aquí sin acciones de eliminación o aprobación." : "Separate from current loads. Historical documents are preserved here without delete or approval actions.",
+    selectHistoryLoad: isES ? "Selecciona una carga del historial" : "Select a historical load",
+    noHistoricalLoads: isES ? "No hay otras cargas en el historial." : "There are no other loads in history.",
+    noCompletedHistoryDocuments: isES ? "No hay documentos completados para esta carga histórica." : "No completed documents found for this historical load.",
     selectedLoad: isES ? "Carga seleccionada" : "Selected Load",
     loadRate: isES ? "Tarifa de carga" : "Load Rate",
     documentType: isES ? "Tipo de documento" : "Document Type",
@@ -355,6 +373,9 @@ export default function DocumentsPage() {
 
   const [loads, setLoads] = useState<Load[]>([]);
   const [selectedLoadId, setSelectedLoadId] = useState("");
+  const [selectedHistoryLoadId, setSelectedHistoryLoadId] = useState("");
+  const [historyDocuments, setHistoryDocuments] = useState<Document[]>([]);
+  const [loadingHistoryDocuments, setLoadingHistoryDocuments] = useState(false);
   const [loadStops, setLoadStops] = useState<LoadStop[]>([]);
   const [selectedLoadStopId, setSelectedLoadStopId] = useState("");
   const [documents, setDocuments] = useState<Document[]>([]);
@@ -386,6 +407,54 @@ export default function DocumentsPage() {
     [loads, selectedLoadId]
   );
 
+  // Current work is identified by BOTH the PU label and its exact street address.
+  // This keeps the completed PU99/PU51 load in history instead of confusing it
+  // with the current PU99 stop at 9950 W Flagler.
+  const currentLoads = useMemo(() => {
+    const picked: Load[] = [];
+
+    for (const [wantedLabel, wantedAddressKey] of Object.entries(CURRENT_PICKUP_ADDRESS_KEYS)) {
+      const candidates = loads
+        .filter((load) => loadStops.some((stop) => {
+          const stopType = stop.stop_type.trim().toLowerCase().replace(/[_-]+/g, " ");
+          const label = formatPickupNumber(stop.pickup_number).trim().toUpperCase();
+          const addressKey = normalizeAddressKey(stop.address);
+          return stop.load_id === load.id &&
+            ["pickup", "pick up"].includes(stopType) &&
+            label === wantedLabel &&
+            addressKey.includes(wantedAddressKey);
+        }))
+        .sort((a, b) => {
+          const aTime = a.created_at ? new Date(a.created_at).getTime() : 0;
+          const bTime = b.created_at ? new Date(b.created_at).getTime() : 0;
+          return bTime - aTime;
+        });
+      if (candidates[0] && !picked.some((load) => load.id === candidates[0].id)) {
+        picked.push(candidates[0]);
+      }
+    }
+
+    return picked;
+  }, [loads, loadStops]);
+
+  const currentLoadIds = useMemo(
+    () => new Set(currentLoads.map((load) => load.id)),
+    [currentLoads]
+  );
+
+  const historyLoads = useMemo(
+    () => loads.filter((load) => !currentLoadIds.has(load.id)),
+    [loads, currentLoadIds]
+  );
+
+  const completedHistoryDocuments = useMemo(() => {
+    const completedStatuses = ["approved", "document approved", "reviewed", "rejected", "declined", "completed", "complete"];
+    return historyDocuments.filter((document) => {
+      const status = String(document.status ?? "").trim().toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
+      return completedStatuses.includes(status);
+    });
+  }, [historyDocuments]);
+
   const getPickupLabelsForLoad = (loadId: string) =>
     loadStops
       .filter((stop) => {
@@ -401,8 +470,17 @@ export default function DocumentsPage() {
     ? getPickupLabelsForLoad(selectedLoad.id)
     : [];
 
+  const isHumanApprovedDocument = (documentRow: Document) => {
+    const status = (documentRow.status ?? "")
+      .trim()
+      .toLowerCase()
+      .replace(/[_-]+/g, " ")
+      .replace(/\s+/g, " ");
+    return ["approved", "document approved", "reviewed"].includes(status);
+  };
+
   const reviewedCount = useMemo(
-    () => documents.filter((document) => document.status === "approved").length,
+    () => documents.filter(isHumanApprovedDocument).length,
     [documents]
   );
 
@@ -514,12 +592,27 @@ const isLoadFinanceReady = (loadId: string | null | undefined) => {
         documentRow.load_id === loadId &&
         documentRow.load_stop_id === stopId &&
         documentRow.document_type.trim().toUpperCase() === type &&
-        (documentRow.status ?? "").trim().toLowerCase() === "approved"
+        isHumanApprovedDocument(documentRow)
       );
+
+    const hasApprovedRateConfirmation = documents.some((documentRow) => {
+      const normalizedType = documentRow.document_type
+        .trim()
+        .toLowerCase()
+        .replace(/[_-]+/g, " ")
+        .replace(/\s+/g, " ");
+      return (
+        documentRow.load_id === loadId &&
+        normalizedType.includes("rate") &&
+        normalizedType.includes("confirmation") &&
+        isHumanApprovedDocument(documentRow)
+      );
+    });
 
     return (
       pickupStops.every((stop) => hasApprovedDocumentForStop("BOL", stop.id)) &&
-      deliveryStops.every((stop) => hasApprovedDocumentForStop("POD", stop.id))
+      deliveryStops.every((stop) => hasApprovedDocumentForStop("POD", stop.id)) &&
+      hasApprovedRateConfirmation
     );
   };
 
@@ -537,6 +630,48 @@ const isLoadFinanceReady = (loadId: string | null | undefined) => {
   useEffect(() => {
     loadData();
   }, []);
+
+  useEffect(() => {
+    if (currentLoads.some((load) => load.id === selectedLoadId)) return;
+    setSelectedLoadId(currentLoads[0]?.id ?? "");
+    setSelectedLoadStopId("");
+  }, [currentLoads, selectedLoadId]);
+
+  useEffect(() => {
+    if (historyLoads.some((load) => load.id === selectedHistoryLoadId)) return;
+    setSelectedHistoryLoadId(historyLoads[0]?.id ?? "");
+  }, [historyLoads, selectedHistoryLoadId]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function fetchHistoryDocuments() {
+      if (!selectedHistoryLoadId) {
+        setHistoryDocuments([]);
+        setLoadingHistoryDocuments(false);
+        return;
+      }
+
+      setLoadingHistoryDocuments(true);
+      const { data, error } = await supabase
+        .from("documents")
+        .select("id, load_id, load_stop_id, document_type, file_name, storage_path, status, uploaded_at")
+        .eq("load_id", selectedHistoryLoadId)
+        .order("uploaded_at", { ascending: false });
+
+      if (cancelled) return;
+      if (error) {
+        console.error("DOCUMENT HISTORY LOAD ERROR:", error);
+        setHistoryDocuments([]);
+      } else {
+        setHistoryDocuments((data ?? []) as Document[]);
+      }
+      setLoadingHistoryDocuments(false);
+    }
+
+    void fetchHistoryDocuments();
+    return () => { cancelled = true; };
+  }, [selectedHistoryLoadId]);
 
   useEffect(() => {
     if (!selectedLoadId) {
@@ -602,6 +737,29 @@ const { data, error } = await supabase
     setLoadingLoads(true);
     setErrorMessage("");
 
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) {
+      setLoads([]);
+      setLoadStops([]);
+      setErrorMessage(isES ? "Inicia sesión para ver las cargas." : "Sign in to view loads.");
+      setLoadingLoads(false);
+      return;
+    }
+
+    const { data: userData, error: userError } = await supabase
+      .from("users")
+      .select("company_id")
+      .eq("id", user.id)
+      .maybeSingle();
+
+    if (userError || !userData?.company_id) {
+      setLoads([]);
+      setLoadStops([]);
+      setErrorMessage(userError?.message || (isES ? "No se encontró la empresa del usuario." : "User company was not found."));
+      setLoadingLoads(false);
+      return;
+    }
+
     const { data, error } = await supabase
       .from("loads")
       .select(
@@ -619,6 +777,7 @@ const { data, error } = await supabase
         created_at
       `
       )
+      .eq("company_id", userData.company_id)
       .order("created_at", { ascending: false });
 
     if (error) {
@@ -640,13 +799,10 @@ const { data, error } = await supabase
       destination_state: load.destination_state ?? null,
       status: load.status ?? null,
       rate: load.rate ?? 0,
+      created_at: load.created_at ?? null,
     }));
 
     setLoads(formattedLoads);
-
-    if (!selectedLoadId && formattedLoads.length > 0) {
-      setSelectedLoadId(formattedLoads[0].id);
-    }
 
     setLoadingLoads(false);
   }
@@ -1304,6 +1460,40 @@ if (insertError || !insertedDocument?.id) {
     },
   ];
 
+  const historyDocumentColumns = [
+    {
+      key: "document_type" as keyof Document,
+      label: isES ? "Tipo" : "Type",
+    },
+    {
+      key: "file_name" as keyof Document,
+      label: isES ? "Archivo" : "File",
+    },
+    {
+      key: "status" as keyof Document,
+      label: isES ? "Estado final" : "Final Status",
+      render: (value: Document[keyof Document]) => (
+        <StatusBadge status={String(value ?? "—")} />
+      ),
+    },
+    {
+      key: "uploaded_at" as keyof Document,
+      label: isES ? "Fecha" : "Date",
+      render: (value: Document[keyof Document]) => (
+        <span style={{ color: "#64748b" }}>{formatDate(value as string | null)}</span>
+      ),
+    },
+    {
+      key: "id" as keyof Document,
+      label: isES ? "Archivo" : "File",
+      render: (_value: Document[keyof Document], row: Document) => (
+        <ActionButton variant="secondary" onClick={() => openDocument(row)}>
+          {text.open}
+        </ActionButton>
+      ),
+    },
+  ];
+
   return (
     <>
       <PageContainer>
@@ -1317,6 +1507,17 @@ if (insertError || !insertedDocument?.id) {
 
             if (selectedLoadId) {
               loadDocuments(selectedLoadId);
+            }
+            if (selectedHistoryLoadId) {
+              const historyLoadId = selectedHistoryLoadId;
+              void (async () => {
+                const { data, error } = await supabase
+                  .from("documents")
+                  .select("id, load_id, load_stop_id, document_type, file_name, storage_path, status, uploaded_at")
+                  .eq("load_id", historyLoadId)
+                  .order("uploaded_at", { ascending: false });
+                if (!error) setHistoryDocuments((data ?? []) as Document[]);
+              })();
             }
           }}
         />
@@ -1407,7 +1608,7 @@ if (insertError || !insertedDocument?.id) {
           <div>
             <SectionCard
               title={text.uploadTitle}
-              description={text.uploadDescription}
+              description={`${text.uploadDescription} ${text.pendingLoadsDescription}`}
             >
               <div
                 style={{
@@ -1453,16 +1654,22 @@ if (insertError || !insertedDocument?.id) {
                         : text.selectLoad}
                     </option>
 
-                  {loads.map((load) => {
+                  {currentLoads.map((load) => {
                     const pickupLabels = getPickupLabelsForLoad(load.id);
                     return (
                       <option key={load.id} value={load.id}>
-                        {pickupLabels.length ? pickupLabels.join(" / ") : load.load_number}
+                        {pickupLabels.length ? pickupLabels.join(" / ") : (isES ? "Sin etiqueta PU" : "No PU label")}
                         {load.broker_name ? ` — ${load.broker_name}` : ""}
+                        {` · ${load.load_number || load.id.slice(0, 8)}`}
                       </option>
                     );
                   })}
                   </select>
+                  {!loadingLoads && currentLoads.length === 0 && (
+                    <p style={{ margin: "7px 0 0", color: "#b45309", fontSize: "12px" }}>
+                      {text.noCurrentLoads}
+                    </p>
+                  )}
                 </div>
 
                 {selectedLoad && (
@@ -1495,7 +1702,17 @@ if (insertError || !insertedDocument?.id) {
                     >
                       {selectedPickupLabels.length
                         ? selectedPickupLabels.join(" / ")
-                        : selectedLoad.load_number}
+                        : (isES ? "Sin etiqueta PU" : "No PU label")}
+                    </div>
+                    <div
+                      style={{
+                        marginTop: "3px",
+                        fontSize: "11px",
+                        fontWeight: 700,
+                        color: "#475569",
+                      }}
+                    >
+                      {(isES ? "Carga" : "Load")}: {selectedLoad.load_number || selectedLoad.id.slice(0, 8)}
                     </div>
 
                     <div
@@ -1876,6 +2093,50 @@ if (insertError || !insertedDocument?.id) {
                 emptyMessage={text.noDocuments}
               />
             )}
+          </SectionCard>
+        </div>
+
+        <div style={{ marginTop: "22px" }}>
+          <SectionCard
+            title={text.completedHistoryTitle}
+            description={text.completedHistoryDescription}
+          >
+            <div style={{ display: "grid", gap: "14px" }}>
+              <label style={{ display: "grid", gap: "7px", maxWidth: "520px", fontSize: "12px", fontWeight: 700, color: "#334155" }}>
+                {text.selectHistoryLoad}
+                <select
+                  value={selectedHistoryLoadId}
+                  onChange={(event) => setSelectedHistoryLoadId(event.target.value)}
+                  style={{ width: "100%", boxSizing: "border-box", border: "1px solid #cbd5e1", borderRadius: "9px", background: "#ffffff", padding: "10px 12px", fontSize: "13px", color: "#0f172a" }}
+                >
+                  <option value="">{text.selectHistoryLoad}</option>
+                  {historyLoads.map((load) => {
+                    const labels = getPickupLabelsForLoad(load.id);
+                    return (
+                      <option key={load.id} value={load.id}>
+                        {labels.length ? labels.join(" / ") : (isES ? "Sin etiqueta PU" : "No PU label")}
+                        {` · ${load.load_number || load.id.slice(0, 8)}`}
+                        {load.status ? ` — ${load.status}` : ""}
+                      </option>
+                    );
+                  })}
+                </select>
+              </label>
+
+              {historyLoads.length === 0 ? (
+                <p style={{ margin: 0, padding: "20px 0", color: "#64748b", fontSize: "13px" }}>{text.noHistoricalLoads}</p>
+              ) : loadingHistoryDocuments ? (
+                <p style={{ margin: 0, padding: "20px 0", color: "#64748b", fontSize: "13px" }}>{text.loadingDocuments}</p>
+              ) : completedHistoryDocuments.length === 0 ? (
+                <p style={{ margin: 0, padding: "20px 0", color: "#64748b", fontSize: "13px" }}>{text.noCompletedHistoryDocuments}</p>
+              ) : (
+                <DataTable
+                  columns={historyDocumentColumns}
+                  data={completedHistoryDocuments}
+                  emptyMessage={text.noCompletedHistoryDocuments}
+                />
+              )}
+            </div>
           </SectionCard>
         </div>
       </PageContainer>

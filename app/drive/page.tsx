@@ -485,6 +485,44 @@ export default function DriverPage() {
   const [navigationFullscreen, setNavigationFullscreen] = useState(false);
   const [navigationDetailsOpen, setNavigationDetailsOpen] = useState(false);
   const navigationTouchStartX = useRef<number | null>(null);
+  const fullscreenHistoryActiveRef = useRef(false);
+
+  // Use the browser Back gesture to exit fullscreen navigation first, rather
+  // than accidentally navigating from Drive back to Login while driving.
+  useEffect(() => {
+    if (navigationFullscreen) {
+      if (!fullscreenHistoryActiveRef.current) {
+        window.history.pushState(
+          { ...(window.history.state ?? {}), __driveNavigationFullscreen: true },
+          "",
+          window.location.href
+        );
+        fullscreenHistoryActiveRef.current = true;
+      }
+
+      const handleFullscreenBack = () => {
+        if (!fullscreenHistoryActiveRef.current) return;
+        fullscreenHistoryActiveRef.current = false;
+        setNavigationFullscreen(false);
+        setNavigationDetailsOpen(false);
+      };
+
+      window.addEventListener("popstate", handleFullscreenBack);
+      return () => {
+        window.removeEventListener("popstate", handleFullscreenBack);
+      };
+    }
+
+    // If the user exits with the on-screen button, remove the extra history
+    // entry so the next Back gesture behaves normally.
+    if (
+      fullscreenHistoryActiveRef.current &&
+      window.history.state?.__driveNavigationFullscreen === true
+    ) {
+      fullscreenHistoryActiveRef.current = false;
+      window.history.back();
+    }
+  }, [navigationFullscreen]);
 
   const [documentModalOpen, setDocumentModalOpen] = useState(false);
   const [documentType, setDocumentType] = useState("POD");
@@ -4236,6 +4274,20 @@ value={
                   </p>
                 )}
               </div>
+              {!navigationFullscreen && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNavigationDetailsOpen(false);
+                    setNavigationFullscreen(true);
+                  }}
+                  aria-label={isES ? "Ampliar mapa" : "Expand map"}
+                  title={isES ? "Ampliar mapa" : "Expand map"}
+                  className="ml-3 shrink-0 rounded-lg bg-slate-900 px-3 py-2 text-xs font-bold text-white shadow-sm hover:bg-slate-700"
+                >
+                  {isES ? "⛶ AMPLIAR MAPA" : "⛶ EXPAND MAP"}
+                </button>
+              )}
               {navigationFullscreen && (
                 <div className="flex shrink-0 gap-2">
                   <button
@@ -4252,7 +4304,7 @@ value={
                     onClick={() => setNavigationFullscreen(false)}
                     className="rounded-lg bg-white px-3 py-2 text-xs font-bold text-slate-900"
                   >
-                    {isES ? "Volver" : "Back"}
+                    {isES ? "VOLVER A DRIVE" : "RETURN TO DRIVE"}
                   </button>
                 </div>
               )}

@@ -128,14 +128,39 @@ function formatPickupNumber(value: string | null | undefined) {
   return `PU${pickupNumber}`;
 }
 
-function normalizeAddressKey(value: string | null | undefined) {
-  return String(value ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+// Mostrar cualquier carga operativa activa con al menos una parada de recogida.
+const ACTIVE_LOAD_STATUSES = new Set([
+  "assigned",
+  "at pickup",
+  "in transit",
+  "at delivery",
+  "dispatched",
+  "in progress",
+]);
+
+function normalizePickupLabel(value: string | null | undefined) {
+  return formatPickupNumber(value)
+    .trim()
+    .toUpperCase()
+    .replace(/[\s-]+/g, "");
 }
 
-const CURRENT_PICKUP_ADDRESS_KEYS: Record<string, string> = {
-  PU99: "9950WFLAGLER",
-  PU222: "9565WFLAGLER",
-};
+function normalizeLoadStatus(value: string | null | undefined) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ");
+}
+
+const COMPLETED_LOAD_STATUSES = new Set([
+  "delivered",
+  "completed",
+  "complete",
+  "cancelled",
+  "canceled",
+  "closed",
+]);
 
 export default function DocumentsPage() {
   const { language } = useLanguage();
@@ -165,9 +190,9 @@ export default function DocumentsPage() {
     load: isES ? "Carga" : "Load",
     loadingLoads: isES ? "Cargando cargas..." : "Loading loads...",
     selectLoad: isES ? "Selecciona una carga" : "Select a load",
-    pendingLoadsTitle: isES ? "Cargas vigentes: PU99 y PU222" : "Current Loads: PU99 and PU222",
-    pendingLoadsDescription: isES ? "Solo se muestran las cargas vigentes PU99 y PU222 en este selector." : "Only the current PU99 and PU222 loads appear in this selector.",
-    noCurrentLoads: isES ? "No se encontraron las cargas vigentes PU99 o PU222." : "No current PU99 or PU222 loads were found.",
+    pendingLoadsTitle: isES ? "Cargas operativas" : "Operational Loads",
+    pendingLoadsDescription: isES ? "Se muestran las cargas activas disponibles con paradas de recogida." : "Active available loads with pickup stops are shown here.",
+    noCurrentLoads: isES ? "No hay cargas operativas activas con paradas de recogida. Verifica las cargas y sus paradas en Supabase." : "No active operational loads with pickup stops were found. Check loads and their stops in Supabase.",
     completedHistoryTitle: isES ? "Historial de documentos completados" : "Completed Document History",
     completedHistoryDescription: isES ? "Historial separado de las cargas vigentes. Los documentos históricos se conservan y se muestran aquí sin acciones de eliminación o aprobación." : "Separate from current loads. Historical documents are preserved here without delete or approval actions.",
     selectHistoryLoad: isES ? "Selecciona una carga del historial" : "Select a historical load",
@@ -407,34 +432,30 @@ export default function DocumentsPage() {
     [loads, selectedLoadId]
   );
 
-  // Current work is identified by BOTH the PU label and its exact street address.
-  // This keeps the completed PU99/PU51 load in history instead of confusing it
-  // with the current PU99 stop at 9950 W Flagler.
+  // Current work includes any active operational load with a pickup stop.
+  // Las cargas vigentes incluyen cualquier carga operativa activa con una parada de recogida.
   const currentLoads = useMemo(() => {
-    const picked: Load[] = [];
+    return loads
+      .filter((load) => ACTIVE_LOAD_STATUSES.has(normalizeLoadStatus(load.status)))
+      .filter((load) =>
+        loadStops.some((stop) => {
+          const stopType = String(stop.stop_type ?? "")
+            .trim()
+            .toLowerCase()
+            .replace(/[_-]+/g, " ")
+            .replace(/\s+/g, " ");
 
-    for (const [wantedLabel, wantedAddressKey] of Object.entries(CURRENT_PICKUP_ADDRESS_KEYS)) {
-      const candidates = loads
-        .filter((load) => loadStops.some((stop) => {
-          const stopType = stop.stop_type.trim().toLowerCase().replace(/[_-]+/g, " ");
-          const label = formatPickupNumber(stop.pickup_number).trim().toUpperCase();
-          const addressKey = normalizeAddressKey(stop.address);
-          return stop.load_id === load.id &&
-            ["pickup", "pick up"].includes(stopType) &&
-            label === wantedLabel &&
-            addressKey.includes(wantedAddressKey);
-        }))
-        .sort((a, b) => {
-          const aTime = a.created_at ? new Date(a.created_at).getTime() : 0;
-          const bTime = b.created_at ? new Date(b.created_at).getTime() : 0;
-          return bTime - aTime;
-        });
-      if (candidates[0] && !picked.some((load) => load.id === candidates[0].id)) {
-        picked.push(candidates[0]);
-      }
-    }
-
-    return picked;
+          return (
+            String(stop.load_id) === String(load.id) &&
+            ["pickup", "pick up"].includes(stopType)
+          );
+        })
+      )
+      .sort((a, b) => {
+        const aTime = a.created_at ? new Date(a.created_at).getTime() : 0;
+        const bTime = b.created_at ? new Date(b.created_at).getTime() : 0;
+        return bTime - aTime;
+      });
   }, [loads, loadStops]);
 
   const currentLoadIds = useMemo(
@@ -2749,4 +2770,3 @@ if (insertError || !insertedDocument?.id) {
     </>
   );
 }
-

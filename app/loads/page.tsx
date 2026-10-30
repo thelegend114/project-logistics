@@ -84,6 +84,7 @@ type LoadStop = {
   longitude: number | null;
   scheduled_date: string;
   scheduled_time: string;
+  status?: string | null;
 };
 
 function sortStopsByOperationalSequence<T extends {
@@ -92,6 +93,9 @@ function sortStopsByOperationalSequence<T extends {
   scheduled_time: string | null | undefined;
 }>(items: T[]): T[] {
   return [...items].sort((a, b) => {
+    const cancelledA = String((a as any).status ?? "").trim().toLowerCase() === "cancelled";
+    const cancelledB = String((b as any).status ?? "").trim().toLowerCase() === "cancelled";
+    if (cancelledA !== cancelledB) return cancelledA ? 1 : -1;
     const groupA = a.stop_type.trim().toLowerCase() === "pickup" ? 0 : 1;
     const groupB = b.stop_type.trim().toLowerCase() === "pickup" ? 0 : 1;
 
@@ -533,7 +537,7 @@ async function loadData() {
 
     supabase
       .from("load_stops")
-      .select("id, load_id, stop_order, stop_type, address, city, state, zip_code, pickup_number, bol_number, latitude, longitude, scheduled_date, scheduled_time")
+      .select("id, load_id, stop_order, stop_type, address, city, state, zip_code, pickup_number, bol_number, latitude, longitude, scheduled_date, scheduled_time, status")
       .order("stop_order", { ascending: true }),
 
     supabase
@@ -582,8 +586,12 @@ async function loadData() {
       if (!counts) continue;
 
       const stopType = String(row.stop_type ?? "").trim().toLowerCase();
-      if (stopType === "pickup") counts.pickups += 1;
-      else if (stopType === "delivery") counts.deliveries += 1;
+      const stopStatus = String(row.status ?? "pending").trim().toLowerCase();
+      const isCancelled = stopStatus === "cancelled";
+      if (!isCancelled) {
+        if (stopType === "pickup") counts.pickups += 1;
+        else if (stopType === "delivery") counts.deliveries += 1;
+      }
 
       const loadStops = stopsByLoad.get(row.load_id);
       if (loadStops) {
@@ -601,6 +609,7 @@ async function loadData() {
           longitude: row.longitude == null ? null : Number(row.longitude),
           scheduled_date: row.scheduled_date ?? "",
           scheduled_time: row.scheduled_time ?? "",
+          status: row.status ?? "pending",
         });
       }
     }
@@ -814,7 +823,10 @@ async function loadData() {
     }
 
     const rows = stopRows ?? [];
-    if (rows.some((stop: any) => stop.status && stop.status !== "pending")) {
+    const activeRows = rows.filter(
+      (stop: any) => String(stop.status ?? "pending").trim().toLowerCase() !== "cancelled"
+    );
+    if (activeRows.some((stop: any) => stop.status && stop.status !== "pending")) {
       setErrorMessage(text.editBlocked);
       return;
     }
@@ -833,7 +845,7 @@ async function loadData() {
       trailer_id: load.trailer_id ?? "",
     });
 
-    setStops(rows.length ? rows.map((stop: any) => ({
+    setStops(activeRows.length ? activeRows.map((stop: any) => ({
       stop_number: String(stop.id),
       stop_order: Number(stop.stop_order),
       stop_type: stop.stop_type as StopType,
@@ -1062,57 +1074,66 @@ for (const stop of stops) {
 
         if (currentRowsError) throw new Error(currentRowsError.message);
 
-        if ((currentRows ?? []).some((row: any) => row.status && row.status !== "pending")) {
+        if ((currentRows ?? []).some((row: any) => {
+          const status = String(row.status ?? "pending").trim().toLowerCase();
+          return status !== "cancelled" && status !== "pending";
+        })) {
           throw new Error(text.editBlocked);
         }
 
-        const { error: updateError } = await supabase
-          .from("loads")
-          .update(loadPayload)
-          .eq("id", editingLoadId);
-        if (updateError) throw new Error(updateError.message);
-        const retainedIds = new Set(stops.filter(stop => stop.stop_number && !stop.stop_number.startsWith("stop-")).map(stop => stop.stop_number));
-        const removedIds = (currentRows ?? []).filter((row: any) => !retainedIds.has(String(row.id))).map((row: any) => row.id);
-       if (removedIds.length) {
-  const { error: deleteError } = await supabase
-    .from("load_stops")
-    .delete()
-    .eq("load_id", editingLoadId)
-    .in("id", removedIds);
+        // Reserve a unique temporary order for EVERY existing row before deleting,
+        // renumbering, or inserting stops. This avoids transient collisions with
+        // load_stops_load_order_unique while the final sequence is being applied.
+        const existingRows = currentRows ?? [];
+        const maxStopOrder = Math.max(
+          0,
+          ...existingRows.map((row: any) => Number(row.stop_order) || 0)
+        );
+        const temporaryBase = maxStopOrder + existingRows.length + 1000;
 
-  if (deleteError) {
-    throw new Error(deleteError.message);
-  }
-}
+        for (let index = 0; index < existingRows.length; index++) {
+          const row = existingRows[index];
+          const { error: tempOrderError } = await supabase
+            .from("load_stops")
+            .update({ stop_order: temporaryBase + index })
+            .eq("id", row.id)
+            .eq("load_id", editingLoadId);
 
-const retainedStops = geocodedStops.filter(
-  (stop) =>
-    stop.stop_number &&
-    !stop.stop_number.startsWith("stop-")
-);
+          if (tempOrderError) {
+            throw new Error(
+              `${isES ? "No se pudo preparar la secuencia de paradas" : "Could not prepare the stop sequence"}: ${tempOrderError.message}`
+            );
+          }
+        }
 
-const maxStopOrder = Math.max(
-  0,
-  ...(currentRows ?? []).map(
-    (row: any) => Number(row.stop_order) || 0
-  )
-);
+        const retainedIds = new Set(
+          stops
+            .filter(
+              (stop) =>
+                stop.stop_number &&
+                !stop.stop_number.startsWith("stop-")
+            )
+            .map((stop) => stop.stop_number)
+        );
+        const removedIds = existingRows
+          .filter((row: any) => !retainedIds.has(String(row.id)))
+          .map((row: any) => row.id);
 
-for (let index = 0; index < retainedStops.length; index++) {
-  const stop = retainedStops[index];
+        if (removedIds.length) {
+          // Preserve removed stops as a durable cancellation record for shift handoffs.
+          // Their unique temporary stop_order keeps them out of the active sequence.
+          const { error: cancelError } = await supabase
+            .from("load_stops")
+            .update({ status: "cancelled" })
+            .eq("load_id", editingLoadId)
+            .in("id", removedIds);
 
-  const { error: tempOrderError } = await supabase
-    .from("load_stops")
-    .update({
-      stop_order: maxStopOrder + 1000 + index,
-    })
-    .eq("id", stop.stop_number)
-    .eq("load_id", editingLoadId);
-
-  if (tempOrderError) {
-    throw new Error(tempOrderError.message);
-  }
-}
+          if (cancelError) {
+            throw new Error(
+              `${isES ? "No se pudieron marcar las paradas como canceladas" : "Could not mark stops as cancelled"}: ${cancelError.message}`
+            );
+          }
+        }
 
         const orderedStops = sortStopsByOperationalSequence(geocodedStops);
 
@@ -1148,6 +1169,13 @@ for (let index = 0; index < orderedStops.length; index++) {
             if (stopInsertError) throw new Error(stopInsertError.message);
           }
         }
+
+        // Update the parent record only after all stop changes have been saved.
+        const { error: updateError } = await supabase
+          .from("loads")
+          .update(loadPayload)
+          .eq("id", editingLoadId);
+        if (updateError) throw new Error(updateError.message);
       } else {
       
 const { data: createdLoad, error: createError } = await supabase
@@ -1569,6 +1597,19 @@ async function releaseLoadToDispatch(load: Load) {
     );
   }
 
+  function formatScheduledDate(value: string | null | undefined) {
+    if (!value) return "—";
+    const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
+    if (!match) return formatDate(value);
+    const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 12);
+    return date.toLocaleDateString(isES ? "es-US" : "en-US", {
+      timeZone: "America/New_York",
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    });
+  }
+
   function formatTime(value: string | null) {
     if (!value) return "—";
 
@@ -1968,291 +2009,227 @@ async function releaseLoadToDispatch(load: Load) {
               <table
                 style={{
                   width: "100%",
-                  minWidth: 1630,
-                  borderCollapse:
-                    "collapse",
+                  minWidth: 2180,
+                  borderCollapse: "collapse",
                 }}
               >
-               <thead>
-  <tr
-    style={{
-      background: "#f8fafc",
-    }}
-  >
-    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
-      {text.load}
-    </th>
+                <thead>
+                  <tr style={{ background: "#f8fafc" }}>
+                    {[
+                      { label: text.load, width: 105 },
+                      { label: text.broker, width: 150 },
+                      { label: text.customer, width: 150 },
+                      { label: text.route, width: 330 },
+                      { label: isES ? "RECOGIDA" : "PICK-UP", width: 115 },
+                      { label: text.dates, width: 190 },
+                      { label: text.driver, width: 145 },
+                      { label: text.truck, width: 105 },
+                      { label: text.trailer, width: 105 },
+                      { label: text.miles, width: 90 },
+                      { label: text.rate, width: 105 },
+                      { label: text.status, width: 135 },
+                      { label: isES ? "Acciones" : "Actions", width: 100 },
+                    ].map((column) => (
+                      <th
+                        key={column.label}
+                        style={{
+                          padding: "12px 12px",
+                          textAlign: "left",
+                          fontSize: 11,
+                          fontWeight: 800,
+                          color: "#64748b",
+                          textTransform: "uppercase",
+                          letterSpacing: 0.4,
+                          whiteSpace: "nowrap",
+                          minWidth: column.width,
+                        }}
+                      >
+                        {column.label}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
 
-    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
-      {text.brokerCustomer}
-    </th>
-
-    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
-      {text.route}
-    </th>
-
-    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
-      {text.dates}
-    </th>
-
-    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
-      {text.driver}
-    </th>
-
-    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
-      {text.truck}
-    </th>
-
-    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
-      {text.trailer}
-    </th>
-
-    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
-      {text.miles}
-    </th>
-
-    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
-      {text.rate}
-    </th>
-
-    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
-      {text.status}
-    </th>
-
-    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
-      {isES ? "Acciones" : "Actions"}
-    </th>
-  </tr>
-</thead>
-
-                
-<tbody>
-  {filteredLoads.map((load) => {
-    const style =
-      statusStyles[load.status ?? "available"] ??
-      statusStyles.available;
-
-    const cellStyle = {
-      ...tdStyle,
-      whiteSpace: "nowrap" as const,
-      paddingTop: 8,
-      paddingBottom: 8,
-      verticalAlign: "middle" as const,
-    };
-
-    const innerTextStyle = {
-      whiteSpace: "nowrap" as const,
-      overflow: "hidden",
-      textOverflow: "ellipsis",
-      maxWidth: 220,
-    };
-
-    return (
-      <tr
-        key={load.id}
-        style={{
-          borderTop: "1px solid #eef2f7",
-          height: 56,
-        }}
-      >
-        <td style={cellStyle}>
-          <div style={{ fontWeight: 800, color: "#0f172a" }}>
-            {`${load.pickup_count ?? 0}-${load.delivery_count ?? 0}`}
-          </div>
-          <div
-            style={{
-              marginTop: 4,
-              fontSize: 11,
-              color: "#94a3b8",
-              ...innerTextStyle,
-            }}
-          >
-            {companyName(load.company_id)}
-          </div>
-        </td>
-
-        <td style={cellStyle}>
-          <div style={{ fontWeight: 700, ...innerTextStyle }}>
-            {load.broker_name || "—"}
-          </div>
-          <div
-            style={{
-              marginTop: 4,
-              fontSize: 12,
-              color: "#64748b",
-              ...innerTextStyle,
-            }}
-          >
-            {load.customer_name || text.noCustomer}
-          </div>
-        </td>
-
-        <td style={{ ...cellStyle, minWidth: 260, maxWidth: 420, whiteSpace: "normal" }}>
-          <div
-            title={(load.stops ?? []).map((stop) => {
-              const rawPickupNumber = stop.pickup_number?.trim() ?? "";
-              const pickupLabel = rawPickupNumber
-                ? (/^PU/i.test(rawPickupNumber) ? rawPickupNumber.toUpperCase() : `PU${rawPickupNumber}`)
-                : (isES ? "Recogida" : "Pickup");
-              const label = stop.stop_type === "pickup"
-                ? pickupLabel
-                : (isES ? "Entrega" : "Delivery");
-              return `${label}: ${[stop.address, stop.city, stop.state, stop.zip_code].filter(Boolean).join(", ")}`;
-            }).join("\n")}
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "stretch",
-              gap: 5,
-              maxWidth: 420,
-              whiteSpace: "normal",
-              fontSize: 11,
-            }}
-          >
-            {(load.stops?.length ?? 0) > 0 ? (
-              load.stops!.map((stop) => {
-                const rawPickupNumber = stop.pickup_number?.trim() ?? "";
-                const pickupLabel = rawPickupNumber
-                  ? (/^PU/i.test(rawPickupNumber) ? rawPickupNumber.toUpperCase() : `PU${rawPickupNumber}`)
-                  : (isES ? "Recogida" : "Pickup");
-                const label = stop.stop_type === "pickup"
-                  ? pickupLabel
-                  : (isES ? "Entrega" : "Delivery");
-                const location = [stop.address, stop.city, stop.state, stop.zip_code]
-                  .filter(Boolean)
-                  .join(", ");
-                return (
-                  <div
-                    key={stop.stop_number}
-                    style={{
+                <tbody>
+                  {filteredLoads.map((load) => {
+                    const style =
+                      statusStyles[load.status ?? "available"] ??
+                      statusStyles.available;
+                    const cellStyle: CSSProperties = {
+                      ...tdStyle,
+                      paddingTop: 4,
+                      paddingBottom: 4,
+                      verticalAlign: "top",
+                    };
+                    const stopLineStyle: CSSProperties = {
+                      minHeight: 20,
                       display: "flex",
-                      alignItems: "flex-start",
-                      gap: 6,
-                      minWidth: 0,
-                      lineHeight: 1.35,
-                    }}
-                  >
-                    <span style={{ color: stop.stop_type === "pickup" ? "#1d4ed8" : "#047857", fontWeight: 800, flexShrink: 0 }}>
-                      {label}
-                    </span>
-                    <span style={{ color: "#334155", overflowWrap: "anywhere", minWidth: 0 }}>
-                      {location || "—"}
-                    </span>
-                  </div>
-                );
-              })
-            ) : (
-              <span style={{ fontWeight: 700, ...innerTextStyle }}>
-                {[load.pickup_address, load.origin_city, load.origin_state].filter(Boolean).join(", ") || "—"}
-                <span style={{ color: "#94a3b8", margin: "0 7px" }}>→</span>
-                {[load.delivery_address, load.destination_city, load.destination_state].filter(Boolean).join(", ") || "—"}
-              </span>
-            )}
-          </div>
-        </td>
+                      flexDirection: "column",
+                      justifyContent: "center",
+                      gap: 0,
+                      padding: "0px 4px",
+                      borderRadius: 4,
+                      marginBottom: 0,
+                      fontSize: 11,
+                      lineHeight: 1.05,
+                    };
+                    const boardStops = load.stops ?? [];
+                    const hasStops = boardStops.length > 0;
 
-        <td style={cellStyle}>
-          <div style={{ whiteSpace: "nowrap" }}>
-            <span style={{ color: "#94a3b8", fontSize: 11 }}>
-              {text.pickup}
-            </span>{" "}
-            <strong>
-              {formatDate(load.pickup_date)}
-              {load.pickup_date
-                ? ` · ${formatTime(load.pickup_date)} ET`
-                : ""}
-            </strong>
-          </div>
-          <div style={{ marginTop: 5, whiteSpace: "nowrap" }}>
-            <span style={{ color: "#94a3b8", fontSize: 11 }}>
-              {text.delivery}
-            </span>{" "}
-            <strong>
-              {formatDate(load.delivery_date)}
-              {load.delivery_date
-                ? ` · ${formatTime(load.delivery_date)} ET`
-                : ""}
-            </strong>
-          </div>
-        </td>
+                    return (
+                      <tr
+                        key={load.id}
+                        style={{
+                          borderTop: "1px solid #eef2f7",
+                        }}
+                      >
+                        {/* LOAD */}
+                        <td style={cellStyle}>
+                          <div style={{ fontWeight: 800, color: "#0f172a", whiteSpace: "nowrap" }}>
+                            {`${load.pickup_count ?? 0}-${load.delivery_count ?? 0}`}
+                          </div>
+                          <div style={{ marginTop: 4, fontSize: 11, color: "#94a3b8", whiteSpace: "nowrap" }}>
+                            {companyName(load.company_id)}
+                          </div>
+                        </td>
 
-        <td style={cellStyle}>
-          <div style={{ fontWeight: 700, ...innerTextStyle }}>
-            {driverName(load.driver_id)}
-          </div>
-        </td>
+                        {/* BROKER */}
+                        <td style={{ ...cellStyle, minWidth: 150, maxWidth: 190, overflowWrap: "anywhere" }}>
+                          <strong style={{ color: "#0f172a", fontSize: 12 }}>
+                            {load.broker_name || "—"}
+                          </strong>
+                        </td>
 
-        <td style={cellStyle}>
-          <div style={{ fontWeight: 700, ...innerTextStyle }}>
-            {truckName(load.truck_id)}
-          </div>
-        </td>
+                        {/* CUSTOMER */}
+                        <td style={{ ...cellStyle, minWidth: 150, maxWidth: 190, overflowWrap: "anywhere" }}>
+                          <strong style={{ color: "#0f172a", fontSize: 12 }}>
+                            {load.customer_name || text.noCustomer}
+                          </strong>
+                        </td>
 
-        <td style={cellStyle}>
-          <div style={{ fontWeight: 700, ...innerTextStyle }}>
-            {trailerName(load.trailer_id)}
-          </div>
-        </td>
+                        {/* ROUTE: one address per stop */}
+                        <td style={{ ...cellStyle, minWidth: 330, maxWidth: 420, whiteSpace: "normal" }}>
+                          {hasStops ? boardStops.map((stop) => {
+                            const cancelled = String(stop.status ?? "").trim().toLowerCase() === "cancelled";
+                            const address = [stop.address, stop.city, stop.state, stop.zip_code].filter(Boolean).join(", ");
+                            return (
+                              <div key={stop.stop_number} style={{ ...stopLineStyle, background: cancelled ? "#fee2e2" : "transparent", color: cancelled ? "#b91c1c" : "#334155", border: cancelled ? "1px solid #fecaca" : "1px solid transparent" }}>
+                                <strong style={{ overflowWrap: "anywhere", textDecoration: cancelled ? "line-through" : "none" }}>{address || "—"}</strong>
+                                {cancelled && <span style={{ color: "#b91c1c", fontWeight: 900 }}>{isES ? "CANCELADO" : "CANCELLED"}</span>}
+                              </div>
+                            );
+                          }) : (
+                            <>
+                              <div style={stopLineStyle}>{[load.pickup_address, load.origin_city, load.origin_state].filter(Boolean).join(", ") || "—"}</div>
+                              <div style={stopLineStyle}>{[load.delivery_address, load.destination_city, load.destination_state].filter(Boolean).join(", ") || "—"}</div>
+                            </>
+                          )}
+                        </td>
 
-        <td style={cellStyle}>
-          <strong>{formatNumber(load.miles)}</strong>
-        </td>
+                        {/* PICK-UP / STOP TYPE: same stop order as ROUTE */}
+                        <td style={{ ...cellStyle, minWidth: 115, whiteSpace: "nowrap" }}>
+                          {hasStops ? boardStops.map((stop) => {
+                            const cancelled = String(stop.status ?? "").trim().toLowerCase() === "cancelled";
+                            const isPickup = stop.stop_type === "pickup";
+                            const raw = stop.pickup_number?.trim() ?? "";
+                            const pu = raw ? (/^PU/i.test(raw) ? raw.toUpperCase() : `PU${raw}`) : (isES ? "RECOGIDA" : "PICK-UP");
+                            return (
+                              <div key={stop.stop_number} style={{ ...stopLineStyle, alignItems: "flex-start", background: cancelled ? "#fee2e2" : "transparent", border: cancelled ? "1px solid #fecaca" : "1px solid transparent" }}>
+                                <strong style={{ color: cancelled ? "#b91c1c" : (isPickup ? "#1d4ed8" : "#047857"), textDecoration: cancelled ? "line-through" : "none" }}>
+                                  {isPickup ? pu : (isES ? "ENTREGA" : "DELIVERY")}
+                                </strong>
+                              </div>
+                            );
+                          }) : (
+                            <>
+                              <div style={{ ...stopLineStyle, color: "#1d4ed8", fontWeight: 800 }}>{isES ? "RECOGIDA" : "PICKUP"}</div>
+                              <div style={{ ...stopLineStyle, color: "#047857", fontWeight: 800 }}>{isES ? "ENTREGA" : "DELIVERY"}</div>
+                            </>
+                          )}
+                        </td>
 
-        <td style={cellStyle}>
-          <strong>{formatCurrency(load.rate)}</strong>
-        </td>
+                        {/* DATES: same stop order; cancelled stops have no date */}
+                        <td style={{ ...cellStyle, minWidth: 190, whiteSpace: "nowrap" }}>
+                          {hasStops ? boardStops.map((stop) => {
+                            const cancelled = String(stop.status ?? "").trim().toLowerCase() === "cancelled";
+                            const dateValue = stop.scheduled_date ? formatScheduledDate(stop.scheduled_date) : "";
+                            const timeValue = stop.scheduled_time?.trim() ?? "";
+                            return (
+                              <div key={stop.stop_number} style={{ ...stopLineStyle, background: cancelled ? "#fee2e2" : "transparent", border: cancelled ? "1px solid #fecaca" : "1px solid transparent", color: cancelled ? "#b91c1c" : "#334155" }}>
+                                {cancelled ? <span style={{ fontWeight: 900 }}>{isES ? "CANCELADO" : "CANCELLED"}</span> : (
+                                  <strong>{dateValue || "—"}{timeValue ? ` · ${timeValue} ET` : ""}</strong>
+                                )}
+                              </div>
+                            );
+                          }) : (
+                            <>
+                              <div style={{ ...stopLineStyle, color: "#1d4ed8", fontWeight: 800 }}>{load.pickup_date ? formatDate(load.pickup_date) : "—"}</div>
+                              <div style={{ ...stopLineStyle, color: "#047857", fontWeight: 800 }}>{load.delivery_date ? formatDate(load.delivery_date) : "—"}</div>
+                            </>
+                          )}
+                        </td>
 
-        <td style={cellStyle}>
-          <button
-            type="button"
-            onClick={(event) => toggleStatusMenu(load.id, event)}
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 7,
-              minWidth: 125,
-              justifyContent: "space-between",
-              padding: "7px 10px",
-              borderRadius: 999,
-              border: `1px solid ${style.border}`,
-              background: style.background,
-              color: style.color,
-              fontSize: 12,
-              fontWeight: 800,
-              cursor: "pointer",
-              whiteSpace: "nowrap",
-            }}
-          >
-            <span>{statusLabel(load.status)}</span>
-            <span style={{ fontSize: 10 }}>▾</span>
-          </button>
-        </td>
-
-        <td style={cellStyle}>
-          <button
-            type="button"
-            onClick={() => openEditForm(load)}
-            style={{
-              height: 34,
-              padding: "0 12px",
-              border: "1px solid #cbd5e1",
-              borderRadius: 8,
-              background: "#ffffff",
-              color: "#0f172a",
-              fontSize: 12,
-              fontWeight: 800,
-              cursor: "pointer",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {text.edit}
-          </button>
-        </td>
-      </tr>
-    );
-  })}
-</tbody>
-
+                        {/* DRIVER */}
+                        <td style={cellStyle}><div style={{ fontWeight: 700, maxWidth: 145, whiteSpace: "normal", overflowWrap: "anywhere" }}>{driverName(load.driver_id)}</div></td>
+                        {/* TRUCK */}
+                        <td style={cellStyle}><div style={{ fontWeight: 700, whiteSpace: "nowrap" }}>{truckName(load.truck_id)}</div></td>
+                        {/* TRAILER */}
+                        <td style={cellStyle}><div style={{ fontWeight: 700, whiteSpace: "nowrap" }}>{trailerName(load.trailer_id)}</div></td>
+                        {/* MILES */}
+                        <td style={cellStyle}><strong>{formatNumber(load.miles)}</strong></td>
+                        {/* RATE */}
+                        <td style={cellStyle}><strong>{formatCurrency(load.rate)}</strong></td>
+                        {/* STATUS */}
+                        <td style={cellStyle}>
+                          <button
+                            type="button"
+                            onClick={(event) => toggleStatusMenu(load.id, event)}
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              gap: 7,
+                              minWidth: 125,
+                              justifyContent: "space-between",
+                              padding: "7px 10px",
+                              borderRadius: 999,
+                              border: `1px solid ${style.border}`,
+                              background: style.background,
+                              color: style.color,
+                              fontSize: 12,
+                              fontWeight: 800,
+                              cursor: "pointer",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            <span>{statusLabel(load.status)}</span>
+                            <span style={{ fontSize: 10 }}>▾</span>
+                          </button>
+                        </td>
+                        {/* ACTIONS */}
+                        <td style={cellStyle}>
+                          <button
+                            type="button"
+                            onClick={() => openEditForm(load)}
+                            style={{
+                              height: 34,
+                              padding: "0 12px",
+                              border: "1px solid #cbd5e1",
+                              borderRadius: 8,
+                              background: "#ffffff",
+                              color: "#0f172a",
+                              fontSize: 12,
+                              fontWeight: 800,
+                              cursor: "pointer",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            {text.edit}
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
               </table>
             </div>
           )}

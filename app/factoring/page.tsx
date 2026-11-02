@@ -117,8 +117,8 @@ export default function FactoringPage() {
       : "Track recorded factoring payments and reconciliation.",
 
     historyDescription: isES
-      ? "Consulta las facturas cerradas y su historial de factoring."
-      : "View closed invoices and their factoring history.",
+      ? "Consulta las facturas financiadas o cerradas y su historial de factoring."
+      : "View funded or closed invoices and their factoring history.",
 
     loading: isES
       ? "Cargando datos de factoring..."
@@ -136,6 +136,22 @@ export default function FactoringPage() {
     factoringCompany: isES
       ? "Empresa de Factoring"
       : "Factoring Company",
+
+    selectFactoringCompany: isES
+      ? "Selecciona una empresa de factoring"
+      : "Select a factoring company",
+
+    otherFactoringCompany: isES
+      ? "Otra empresa / agregar una nueva"
+      : "Other / Add a new company",
+
+    newFactoringCompany: isES
+      ? "Nombre de la nueva empresa de factoring"
+      : "New factoring company name",
+
+    editFactoringDetails: isES
+      ? "Editar datos de factoring"
+      : "Edit Factoring Details",
 
     amountSubmitted: isES
       ? "Enviado"
@@ -377,6 +393,13 @@ export default function FactoringPage() {
   const [factoringFee, setFactoringFee] =
     useState("");
 
+  const [factoringCompany, setFactoringCompany] = useState("");
+  const [newFactoringCompany, setNewFactoringCompany] = useState("");
+  const otherFactoringOption = "__other_factoring_company__";
+  const factoringCompanyOptions = useMemo(() => Array.from(new Set(
+    submissions.map((submission) => submission.factoring_company?.trim()).filter((name): name is string => Boolean(name))
+  )).sort((a, b) => a.localeCompare(b)), [submissions]);
+
   const [actionLoading, setActionLoading] =
     useState(false);
 
@@ -616,6 +639,19 @@ export default function FactoringPage() {
     loadData();
   }, []);
 
+  function isHistoricalSubmission(
+    submission: FactoringSubmission
+  ) {
+    const invoiceStatus = String(
+      invoiceMap.get(submission.invoice_id)?.status || ""
+    ).trim().toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
+    const factoringStatus = String(submission.status || "")
+      .trim().toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
+
+    return invoiceStatus === "closed" ||
+      ["funded", "completed", "paid"].includes(factoringStatus);
+  }
+
   function getNextAction(
     submission: FactoringSubmission
   ) {
@@ -667,14 +703,20 @@ export default function FactoringPage() {
       submission.status === "Approved"
     ) {
       return (
-        <button
-          onClick={() =>
-            fundSubmission(submission)
-          }
-          style={styles.actionButton}
-        >
-          {text.fundSubmission}
-        </button>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          <button
+            onClick={() => fundSubmission(submission)}
+            style={styles.actionButton}
+          >
+            {text.fundSubmission}
+          </button>
+          <button
+            onClick={() => openFundingControl(submission)}
+            style={styles.actionButton}
+          >
+            {text.editFactoringDetails}
+          </button>
+        </div>
       );
     }
 
@@ -758,6 +800,8 @@ export default function FactoringPage() {
     submission: FactoringSubmission
   ) {
     setFundingSubmission(submission);
+    setFactoringCompany(submission.factoring_company || "");
+    setNewFactoringCompany("");
 
     const submitted = Number(
       submission.submitted_amount || 0
@@ -802,6 +846,8 @@ export default function FactoringPage() {
 
   async function approveFunding() {
     if (!fundingSubmission) return;
+    const selectedFactoringCompany = factoringCompany === otherFactoringOption ? newFactoringCompany.trim() : factoringCompany.trim();
+    if (!selectedFactoringCompany) { alert(text.selectFactoringCompany); return; }
 
     const advance =
       Number(advanceAmount);
@@ -830,6 +876,7 @@ export default function FactoringPage() {
     const { error } = await supabase
       .from("factoring_submissions")
       .update({
+        factoring_company: selectedFactoringCompany,
         advance_amount: advance,
         reserve_amount: reserve,
         factoring_fee: fee,
@@ -1394,17 +1441,7 @@ export default function FactoringPage() {
               isES={isES}
               text={text}
               submissions={filteredSubmissions.filter(
-                (submission) => {
-                  const invoice =
-                    invoiceMap.get(
-                      submission.invoice_id
-                    );
-
-                  return (
-                    invoice?.status?.toLowerCase() !==
-                    "closed"
-                  );
-                }
+                (submission) => !isHistoricalSubmission(submission)
               )}
               invoiceMap={invoiceMap}
               paymentTotalsBySubmission={
@@ -1454,17 +1491,7 @@ export default function FactoringPage() {
               isES={isES}
               text={text}
               submissions={filteredSubmissions.filter(
-                (submission) => {
-                  const invoice =
-                    invoiceMap.get(
-                      submission.invoice_id
-                    );
-
-                  return (
-                    invoice?.status?.toLowerCase() ===
-                    "closed"
-                  );
-                }
+                (submission) => isHistoricalSubmission(submission)
               )}
               invoiceMap={invoiceMap}
               paymentTotalsBySubmission={
@@ -1644,6 +1671,15 @@ export default function FactoringPage() {
             </div>
 
             <div style={styles.formGrid}>
+              <label style={styles.field}>
+                <span>{text.factoringCompany}</span>
+                <select value={factoringCompany} onChange={(event) => { const value = event.target.value; setFactoringCompany(value); if (value !== otherFactoringOption) setNewFactoringCompany(""); }} style={styles.input}>
+                  <option value="">{text.selectFactoringCompany}</option>
+                  {factoringCompanyOptions.map((company) => <option key={company} value={company}>{company}</option>)}
+                  <option value={otherFactoringOption}>{text.otherFactoringCompany}</option>
+                </select>
+                {factoringCompany === otherFactoringOption && <input type="text" value={newFactoringCompany} onChange={(event) => setNewFactoringCompany(event.target.value)} placeholder={text.newFactoringCompany} style={styles.input} />}
+              </label>
               <label style={styles.field}>
                 <span>
                   {text.advanceAmount}

@@ -135,6 +135,11 @@ const statusStyles: Record<
     color: "#6d28d9",
     border: "#ddd6fe",
   },
+  cancelled: {
+    background: "#fee2e2",
+    color: "#b91c1c",
+    border: "#fca5a5",
+  },
 };
 
 const inputStyle: CSSProperties = {
@@ -806,8 +811,12 @@ async function loadData() {
     setErrorMessage("");
     setOpenStatusMenu(null);
 
-    if (load.status === "in_transit" || load.status === "delivered") {
-      setErrorMessage(text.editBlocked);
+    if (["in_transit", "delivered", "cancelled"].includes(String(load.status ?? "").toLowerCase())) {
+      setErrorMessage(
+        String(load.status ?? "").toLowerCase() === "cancelled"
+          ? (isES ? "Una carga cancelada se conserva como historial y no se puede editar." : "A cancelled load is retained as history and cannot be edited.")
+          : text.editBlocked
+      );
       return;
     }
 
@@ -1274,6 +1283,69 @@ if (
 
 
 
+async function cancelLoadFromLoads(load: Load) {
+  setMessage("");
+  setErrorMessage("");
+  setOpenStatusMenu(null);
+
+  const currentStatus = String(load.status ?? "").toLowerCase();
+  if (currentStatus === "cancelled") {
+    setErrorMessage(isES ? "Esta carga ya está cancelada." : "This load is already cancelled.");
+    return;
+  }
+  if (currentStatus === "delivered") {
+    setErrorMessage(isES ? "Una carga entregada no se puede cancelar." : "A delivered load cannot be cancelled.");
+    return;
+  }
+
+  const confirmed = window.confirm(
+    isES
+      ? `¿Cancelar la carga ${load.load_number}? Se conservará en LOADS como historial y saldrá de DISPATCH.`
+      : `Cancel load ${load.load_number}? It will remain in LOADS as history and be removed from DISPATCH.`
+  );
+  if (!confirmed) return;
+
+  setSaving(true);
+  try {
+    // LOADS is the source of truth: cancel the parent first so Dispatch
+    // immediately excludes this load, even if stop cleanup needs a retry.
+    const { data: updatedLoad, error: loadCancelError } = await supabase
+      .from("loads")
+      .update({ status: "cancelled" })
+      .eq("id", load.id)
+      .neq("status", "delivered")
+      .neq("status", "cancelled")
+      .select("id, status")
+      .maybeSingle();
+
+    if (loadCancelError) throw new Error(loadCancelError.message);
+    if (!updatedLoad) {
+      throw new Error(isES ? "La carga cambió de estado. Actualiza LOADS e inténtalo de nuevo." : "The load status changed. Refresh LOADS and try again.");
+    }
+
+    const { error: stopsCancelError } = await supabase
+      .from("load_stops")
+      .update({ status: "cancelled" })
+      .eq("load_id", load.id)
+      .in("status", ["pending", "in_progress"]);
+
+    await loadData();
+
+    if (stopsCancelError) {
+      throw new Error(
+        (isES ? "La carga quedó cancelada y fuera de DISPATCH, pero no se pudieron cancelar todas las paradas pendientes: " : "The load is cancelled and removed from DISPATCH, but some pending stops could not be cancelled: ") + stopsCancelError.message
+      );
+    }
+
+    setMessage(isES ? `La carga ${load.load_number} fue cancelada. Su historial y documentos se conservaron.` : `Load ${load.load_number} was cancelled. Its history and documents were preserved.`);
+  } catch (error) {
+    setErrorMessage(error instanceof Error ? error.message : (isES ? "No se pudo cancelar la carga." : "Could not cancel the load."));
+    await loadData();
+  } finally {
+    setSaving(false);
+  }
+}
+
 async function updateLoadStatus(
   load: Load,
   newStatus: string
@@ -1568,6 +1640,9 @@ async function releaseLoadToDispatch(load: Load) {
   }
 
   function statusLabel(status: string | null) {
+    if (String(status ?? "").toLowerCase() === "cancelled") {
+      return isES ? "Cancelada" : "Cancelled";
+    }
     return (
       STATUS_OPTIONS.find(
         (option) => option.value === status
@@ -1890,6 +1965,7 @@ async function releaseLoadToDispatch(load: Load) {
                     </option>
                   )
                 )}
+                <option value="cancelled">{isES ? "Canceladas" : "Cancelled"}</option>
               </select>
             </div>
 
@@ -2009,227 +2085,266 @@ async function releaseLoadToDispatch(load: Load) {
               <table
                 style={{
                   width: "100%",
-                  minWidth: 2180,
-                  borderCollapse: "collapse",
+                  minWidth: 1630,
+                  borderCollapse:
+                    "collapse",
                 }}
               >
-                <thead>
-                  <tr style={{ background: "#f8fafc" }}>
-                    {[
-                      { label: text.load, width: 105 },
-                      { label: text.broker, width: 150 },
-                      { label: text.customer, width: 150 },
-                      { label: text.route, width: 330 },
-                      { label: isES ? "RECOGIDA" : "PICK-UP", width: 115 },
-                      { label: text.dates, width: 190 },
-                      { label: text.driver, width: 145 },
-                      { label: text.truck, width: 105 },
-                      { label: text.trailer, width: 105 },
-                      { label: text.miles, width: 90 },
-                      { label: text.rate, width: 105 },
-                      { label: text.status, width: 135 },
-                      { label: isES ? "Acciones" : "Actions", width: 100 },
-                    ].map((column) => (
-                      <th
-                        key={column.label}
-                        style={{
-                          padding: "12px 12px",
-                          textAlign: "left",
-                          fontSize: 11,
-                          fontWeight: 800,
-                          color: "#64748b",
-                          textTransform: "uppercase",
-                          letterSpacing: 0.4,
-                          whiteSpace: "nowrap",
-                          minWidth: column.width,
-                        }}
-                      >
-                        {column.label}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
+               <thead>
+  <tr
+    style={{
+      background: "#f8fafc",
+    }}
+  >
+    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+      {text.load}
+    </th>
 
-                <tbody>
-                  {filteredLoads.map((load) => {
-                    const style =
-                      statusStyles[load.status ?? "available"] ??
-                      statusStyles.available;
-                    const cellStyle: CSSProperties = {
-                      ...tdStyle,
-                      paddingTop: 4,
-                      paddingBottom: 4,
-                      verticalAlign: "top",
-                    };
-                    const stopLineStyle: CSSProperties = {
-                      minHeight: 20,
-                      display: "flex",
-                      flexDirection: "column",
-                      justifyContent: "center",
-                      gap: 0,
-                      padding: "0px 4px",
-                      borderRadius: 4,
-                      marginBottom: 0,
-                      fontSize: 11,
-                      lineHeight: 1.05,
-                    };
-                    const boardStops = load.stops ?? [];
-                    const hasStops = boardStops.length > 0;
+    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+      {text.brokerCustomer}
+    </th>
 
-                    return (
-                      <tr
-                        key={load.id}
-                        style={{
-                          borderTop: "1px solid #eef2f7",
-                        }}
-                      >
-                        {/* LOAD */}
-                        <td style={cellStyle}>
-                          <div style={{ fontWeight: 800, color: "#0f172a", whiteSpace: "nowrap" }}>
-                            {`${load.pickup_count ?? 0}-${load.delivery_count ?? 0}`}
-                          </div>
-                          <div style={{ marginTop: 4, fontSize: 11, color: "#94a3b8", whiteSpace: "nowrap" }}>
-                            {companyName(load.company_id)}
-                          </div>
-                        </td>
+    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+      {text.route}
+    </th>
 
-                        {/* BROKER */}
-                        <td style={{ ...cellStyle, minWidth: 150, maxWidth: 190, overflowWrap: "anywhere" }}>
-                          <strong style={{ color: "#0f172a", fontSize: 12 }}>
-                            {load.broker_name || "—"}
-                          </strong>
-                        </td>
 
-                        {/* CUSTOMER */}
-                        <td style={{ ...cellStyle, minWidth: 150, maxWidth: 190, overflowWrap: "anywhere" }}>
-                          <strong style={{ color: "#0f172a", fontSize: 12 }}>
-                            {load.customer_name || text.noCustomer}
-                          </strong>
-                        </td>
+    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+      {text.driver}
+    </th>
 
-                        {/* ROUTE: one address per stop */}
-                        <td style={{ ...cellStyle, minWidth: 330, maxWidth: 420, whiteSpace: "normal" }}>
-                          {hasStops ? boardStops.map((stop) => {
-                            const cancelled = String(stop.status ?? "").trim().toLowerCase() === "cancelled";
-                            const address = [stop.address, stop.city, stop.state, stop.zip_code].filter(Boolean).join(", ");
-                            return (
-                              <div key={stop.stop_number} style={{ ...stopLineStyle, background: cancelled ? "#fee2e2" : "transparent", color: cancelled ? "#b91c1c" : "#334155", border: cancelled ? "1px solid #fecaca" : "1px solid transparent" }}>
-                                <strong style={{ overflowWrap: "anywhere", textDecoration: cancelled ? "line-through" : "none" }}>{address || "—"}</strong>
-                                {cancelled && <span style={{ color: "#b91c1c", fontWeight: 900 }}>{isES ? "CANCELADO" : "CANCELLED"}</span>}
-                              </div>
-                            );
-                          }) : (
-                            <>
-                              <div style={stopLineStyle}>{[load.pickup_address, load.origin_city, load.origin_state].filter(Boolean).join(", ") || "—"}</div>
-                              <div style={stopLineStyle}>{[load.delivery_address, load.destination_city, load.destination_state].filter(Boolean).join(", ") || "—"}</div>
-                            </>
-                          )}
-                        </td>
+    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+      {text.truck}
+    </th>
 
-                        {/* PICK-UP / STOP TYPE: same stop order as ROUTE */}
-                        <td style={{ ...cellStyle, minWidth: 115, whiteSpace: "nowrap" }}>
-                          {hasStops ? boardStops.map((stop) => {
-                            const cancelled = String(stop.status ?? "").trim().toLowerCase() === "cancelled";
-                            const isPickup = stop.stop_type === "pickup";
-                            const raw = stop.pickup_number?.trim() ?? "";
-                            const pu = raw ? (/^PU/i.test(raw) ? raw.toUpperCase() : `PU${raw}`) : (isES ? "RECOGIDA" : "PICK-UP");
-                            return (
-                              <div key={stop.stop_number} style={{ ...stopLineStyle, alignItems: "flex-start", background: cancelled ? "#fee2e2" : "transparent", border: cancelled ? "1px solid #fecaca" : "1px solid transparent" }}>
-                                <strong style={{ color: cancelled ? "#b91c1c" : (isPickup ? "#1d4ed8" : "#047857"), textDecoration: cancelled ? "line-through" : "none" }}>
-                                  {isPickup ? pu : (isES ? "ENTREGA" : "DELIVERY")}
-                                </strong>
-                              </div>
-                            );
-                          }) : (
-                            <>
-                              <div style={{ ...stopLineStyle, color: "#1d4ed8", fontWeight: 800 }}>{isES ? "RECOGIDA" : "PICKUP"}</div>
-                              <div style={{ ...stopLineStyle, color: "#047857", fontWeight: 800 }}>{isES ? "ENTREGA" : "DELIVERY"}</div>
-                            </>
-                          )}
-                        </td>
+    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+      {text.trailer}
+    </th>
 
-                        {/* DATES: same stop order; cancelled stops have no date */}
-                        <td style={{ ...cellStyle, minWidth: 190, whiteSpace: "nowrap" }}>
-                          {hasStops ? boardStops.map((stop) => {
-                            const cancelled = String(stop.status ?? "").trim().toLowerCase() === "cancelled";
-                            const dateValue = stop.scheduled_date ? formatScheduledDate(stop.scheduled_date) : "";
-                            const timeValue = stop.scheduled_time?.trim() ?? "";
-                            return (
-                              <div key={stop.stop_number} style={{ ...stopLineStyle, background: cancelled ? "#fee2e2" : "transparent", border: cancelled ? "1px solid #fecaca" : "1px solid transparent", color: cancelled ? "#b91c1c" : "#334155" }}>
-                                {cancelled ? <span style={{ fontWeight: 900 }}>{isES ? "CANCELADO" : "CANCELLED"}</span> : (
-                                  <strong>{dateValue || "—"}{timeValue ? ` · ${timeValue} ET` : ""}</strong>
-                                )}
-                              </div>
-                            );
-                          }) : (
-                            <>
-                              <div style={{ ...stopLineStyle, color: "#1d4ed8", fontWeight: 800 }}>{load.pickup_date ? formatDate(load.pickup_date) : "—"}</div>
-                              <div style={{ ...stopLineStyle, color: "#047857", fontWeight: 800 }}>{load.delivery_date ? formatDate(load.delivery_date) : "—"}</div>
-                            </>
-                          )}
-                        </td>
+    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+      {text.miles}
+    </th>
 
-                        {/* DRIVER */}
-                        <td style={cellStyle}><div style={{ fontWeight: 700, maxWidth: 145, whiteSpace: "normal", overflowWrap: "anywhere" }}>{driverName(load.driver_id)}</div></td>
-                        {/* TRUCK */}
-                        <td style={cellStyle}><div style={{ fontWeight: 700, whiteSpace: "nowrap" }}>{truckName(load.truck_id)}</div></td>
-                        {/* TRAILER */}
-                        <td style={cellStyle}><div style={{ fontWeight: 700, whiteSpace: "nowrap" }}>{trailerName(load.trailer_id)}</div></td>
-                        {/* MILES */}
-                        <td style={cellStyle}><strong>{formatNumber(load.miles)}</strong></td>
-                        {/* RATE */}
-                        <td style={cellStyle}><strong>{formatCurrency(load.rate)}</strong></td>
-                        {/* STATUS */}
-                        <td style={cellStyle}>
-                          <button
-                            type="button"
-                            onClick={(event) => toggleStatusMenu(load.id, event)}
-                            style={{
-                              display: "inline-flex",
-                              alignItems: "center",
-                              gap: 7,
-                              minWidth: 125,
-                              justifyContent: "space-between",
-                              padding: "7px 10px",
-                              borderRadius: 999,
-                              border: `1px solid ${style.border}`,
-                              background: style.background,
-                              color: style.color,
-                              fontSize: 12,
-                              fontWeight: 800,
-                              cursor: "pointer",
-                              whiteSpace: "nowrap",
-                            }}
-                          >
-                            <span>{statusLabel(load.status)}</span>
-                            <span style={{ fontSize: 10 }}>▾</span>
-                          </button>
-                        </td>
-                        {/* ACTIONS */}
-                        <td style={cellStyle}>
-                          <button
-                            type="button"
-                            onClick={() => openEditForm(load)}
-                            style={{
-                              height: 34,
-                              padding: "0 12px",
-                              border: "1px solid #cbd5e1",
-                              borderRadius: 8,
-                              background: "#ffffff",
-                              color: "#0f172a",
-                              fontSize: 12,
-                              fontWeight: 800,
-                              cursor: "pointer",
-                              whiteSpace: "nowrap",
-                            }}
-                          >
-                            {text.edit}
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
+    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+      {text.rate}
+    </th>
+
+    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+      {text.status}
+    </th>
+
+    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+      {isES ? "Acciones" : "Actions"}
+    </th>
+  </tr>
+</thead>
+
+                
+<tbody>
+  {filteredLoads.map((load) => {
+    const style =
+      statusStyles[load.status ?? "available"] ??
+      statusStyles.available;
+
+    const cellStyle = {
+      ...tdStyle,
+      whiteSpace: "nowrap" as const,
+      paddingTop: 8,
+      paddingBottom: 8,
+      verticalAlign: "middle" as const,
+    };
+
+    const innerTextStyle = {
+      whiteSpace: "nowrap" as const,
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      maxWidth: 220,
+    };
+
+    return (
+      <tr
+        key={load.id}
+        style={{
+          borderTop: "1px solid #eef2f7",
+          height: 56,
+        }}
+      >
+        <td style={cellStyle}>
+          <div style={{ fontWeight: 800, color: "#0f172a" }}>
+            {`${load.pickup_count ?? 0}-${load.delivery_count ?? 0}`}
+          </div>
+          <div
+            style={{
+              marginTop: 4,
+              fontSize: 11,
+              color: "#94a3b8",
+              ...innerTextStyle,
+            }}
+          >
+            {companyName(load.company_id)}
+          </div>
+        </td>
+
+        <td style={{ ...cellStyle, minWidth: 170, whiteSpace: "normal" }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+            <span style={{ color: "#64748b", fontSize: 10, fontWeight: 800, textTransform: "uppercase" }}>Broker</span>
+            <strong style={{ color: "#0f172a", overflowWrap: "anywhere" }}>{load.broker_name || "—"}</strong>
+          </div>
+          <div style={{ height: 1, background: "#e2e8f0", margin: "7px 0" }} />
+          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+            <span style={{ color: "#64748b", fontSize: 10, fontWeight: 800, textTransform: "uppercase" }}>{isES ? "Cliente" : "Customer"}</span>
+            <strong style={{ color: "#0f172a", overflowWrap: "anywhere" }}>{load.customer_name || text.noCustomer}</strong>
+          </div>
+        </td>
+
+        <td style={{ ...cellStyle, minWidth: 430, maxWidth: 600, whiteSpace: "normal" }}>
+          <div
+            title={(load.stops ?? []).map((stop) => {
+              const raw = stop.pickup_number?.trim() ?? "";
+              const pu = raw ? (/^PU/i.test(raw) ? raw.toUpperCase() : `PU${raw}`) : (isES ? "Recogida" : "Pickup");
+              const kind = stop.stop_type === "pickup" ? pu : (isES ? "Entrega" : "Delivery");
+              const cancelled = String(stop.status ?? "").trim().toLowerCase() === "cancelled";
+              const address = [stop.address, stop.city, stop.state, stop.zip_code].filter(Boolean).join(", ");
+              const dt = !cancelled ? [stop.scheduled_date, stop.scheduled_time].filter(Boolean).join(" ") : "";
+              return `${kind}${cancelled ? " — CANCELLED" : ""}: ${address}${dt ? ` — ${dt}` : ""}`;
+            }).join("\n")}
+            style={{ display: "flex", flexDirection: "column", gap: 7, maxWidth: 600, whiteSpace: "normal", fontSize: 11 }}
+          >
+            {(load.stops?.length ?? 0) > 0 ? load.stops!.map((stop) => {
+              const raw = stop.pickup_number?.trim() ?? "";
+              const pu = raw ? (/^PU/i.test(raw) ? raw.toUpperCase() : `PU${raw}`) : (isES ? "Recogida" : "Pickup");
+              const cancelled = String(stop.status ?? "").trim().toLowerCase() === "cancelled";
+              const isPickup = stop.stop_type === "pickup";
+              const kind = isPickup ? (isES ? "RECOGIDA" : "PICKUP") : (isES ? "ENTREGA" : "DELIVERY");
+              const address = [stop.address, stop.city, stop.state, stop.zip_code].filter(Boolean).join(", ");
+              const dateTime = !cancelled ? [stop.scheduled_date, stop.scheduled_time].filter(Boolean).join(" ") : "";
+              const dateLabel = isPickup ? (isES ? "Fecha de recogida" : "Pickup date") : (isES ? "Fecha de entrega" : "Delivery date");
+              return (
+                <div key={stop.stop_number} style={{ display: "grid", gridTemplateColumns: "112px minmax(0, 1fr)", columnGap: 10, alignItems: "start", minWidth: 0, padding: cancelled ? "6px 8px" : "3px 0", border: cancelled ? "1px solid #dc2626" : "1px solid transparent", borderRadius: cancelled ? 5 : 0, background: cancelled ? "#fee2e2" : "transparent", color: cancelled ? "#b91c1c" : "inherit" }}>
+                  <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 4, minWidth: 0 }}>
+                    <span style={{ fontSize: 9, fontWeight: 900, letterSpacing: 0.4, color: cancelled ? "#b91c1c" : (isPickup ? "#1d4ed8" : "#047857") }}>{kind}</span>
+                    <span style={{ display: "inline-flex", justifyContent: "center", alignItems: "center", minWidth: 62, padding: "3px 7px", borderRadius: 4, background: cancelled ? "#b91c1c" : (isPickup ? "#dbeafe" : "#d1fae5"), color: cancelled ? "#ffffff" : (isPickup ? "#1d4ed8" : "#047857"), fontWeight: 900, fontSize: 10, textDecoration: cancelled ? "line-through" : "none" }}>{isPickup ? pu : (isES ? "ENTREGA" : "DELIVERY")}</span>
+                    {cancelled && <strong style={{ color: "#b91c1c", fontSize: 9, lineHeight: 1.2 }}>⛔ {isES ? "CANCELADO" : "CANCELLED"}</strong>}
+                  </div>
+                  <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 3 }}>
+                    <strong style={{ color: cancelled ? "#b91c1c" : "#334155", overflowWrap: "anywhere", textDecoration: cancelled ? "line-through" : "none", lineHeight: 1.35 }}>{address || "—"}</strong>
+                    {!cancelled && dateTime && <span style={{ color: isPickup ? "#1d4ed8" : "#047857", fontSize: 10, fontWeight: 800 }}>{dateLabel}: {formatScheduledDate(stop.scheduled_date)}{stop.scheduled_time ? ` · ${stop.scheduled_time} ET` : ""}</span>}
+                  </div>
+                </div>
+              );
+            }) : (
+              <div style={{ display: "grid", gridTemplateColumns: "112px minmax(0, 1fr)", columnGap: 10, rowGap: 5 }}>
+                <strong style={{ color: "#1d4ed8" }}>{isES ? "RECOGIDA" : "PICKUP"}</strong>
+                <div style={{ minWidth: 0, overflowWrap: "anywhere" }}>{[load.pickup_address, load.origin_city, load.origin_state].filter(Boolean).join(", ") || "—"}<div style={{ color: "#1d4ed8", fontSize: 10, fontWeight: 800 }}>{load.pickup_date ? `${isES ? "Fecha de recogida" : "Pickup date"}: ${formatDate(load.pickup_date)}` : ""}</div></div>
+                <strong style={{ color: "#047857" }}>{isES ? "ENTREGA" : "DELIVERY"}</strong>
+                <div style={{ minWidth: 0, overflowWrap: "anywhere" }}>{[load.delivery_address, load.destination_city, load.destination_state].filter(Boolean).join(", ") || "—"}<div style={{ color: "#047857", fontSize: 10, fontWeight: 800 }}>{load.delivery_date ? `${isES ? "Fecha de entrega" : "Delivery date"}: ${formatDate(load.delivery_date)}` : ""}</div></div>
+              </div>
+            )}
+          </div>
+        </td>
+
+        <td style={cellStyle}>
+          <div style={{ fontWeight: 700, ...innerTextStyle }}>
+            {driverName(load.driver_id)}
+          </div>
+        </td>
+
+        <td style={cellStyle}>
+          <div style={{ fontWeight: 700, ...innerTextStyle }}>
+            {truckName(load.truck_id)}
+          </div>
+        </td>
+
+        <td style={cellStyle}>
+          <div style={{ fontWeight: 700, ...innerTextStyle }}>
+            {trailerName(load.trailer_id)}
+          </div>
+        </td>
+
+        <td style={cellStyle}>
+          <strong>{formatNumber(load.miles)}</strong>
+        </td>
+
+        <td style={cellStyle}>
+          <strong>{formatCurrency(load.rate)}</strong>
+        </td>
+
+        <td style={cellStyle}>
+          <button
+            type="button"
+            disabled={String(load.status ?? "").toLowerCase() === "cancelled"}
+            onClick={(event) => toggleStatusMenu(load.id, event)}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 7,
+              minWidth: 125,
+              justifyContent: "space-between",
+              padding: "7px 10px",
+              borderRadius: 999,
+              border: `1px solid ${style.border}`,
+              background: style.background,
+              color: style.color,
+              fontSize: 12,
+              fontWeight: 800,
+              cursor: String(load.status ?? "").toLowerCase() === "cancelled" ? "not-allowed" : "pointer",
+              opacity: String(load.status ?? "").toLowerCase() === "cancelled" ? 0.9 : 1,
+              whiteSpace: "nowrap",
+            }}
+          >
+            <span>{statusLabel(load.status)}</span>
+            <span style={{ fontSize: 10 }}>▾</span>
+          </button>
+        </td>
+
+        <td style={cellStyle}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <button
+            type="button"
+            disabled={String(load.status ?? "").toLowerCase() === "cancelled"}
+            onClick={() => openEditForm(load)}
+            style={{
+              height: 34,
+              padding: "0 12px",
+              border: "1px solid #cbd5e1",
+              borderRadius: 8,
+              background: "#ffffff",
+              color: "#0f172a",
+              fontSize: 12,
+              fontWeight: 800,
+              cursor: String(load.status ?? "").toLowerCase() === "cancelled" ? "not-allowed" : "pointer",
+              opacity: String(load.status ?? "").toLowerCase() === "cancelled" ? 0.55 : 1,
+              whiteSpace: "nowrap",
+            }}
+          >
+            {text.edit}
+          </button>
+          <button
+            type="button"
+            onClick={() => void cancelLoadFromLoads(load)}
+            disabled={saving || ["cancelled", "delivered"].includes(String(load.status ?? "").toLowerCase())}
+            style={{
+              height: 34,
+              padding: "0 10px",
+              border: "1px solid #fca5a5",
+              borderRadius: 8,
+              background: ["cancelled", "delivered"].includes(String(load.status ?? "").toLowerCase()) ? "#f1f5f9" : "#fef2f2",
+              color: ["cancelled", "delivered"].includes(String(load.status ?? "").toLowerCase()) ? "#94a3b8" : "#b91c1c",
+              fontSize: 11,
+              fontWeight: 800,
+              cursor: saving || ["cancelled", "delivered"].includes(String(load.status ?? "").toLowerCase()) ? "not-allowed" : "pointer",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {isES ? "Cancelar carga" : "Cancel Load"}
+          </button>
+          </div>
+        </td>
+      </tr>
+    );
+  })}
+</tbody>
+
               </table>
             </div>
           )}

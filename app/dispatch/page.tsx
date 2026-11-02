@@ -735,7 +735,10 @@ export default function DispatchPage() {
   
 function stopsForLoad(loadId: string) {
   return loadStops
-    .filter((stop) => stop.load_id === loadId)
+    .filter((stop) =>
+      stop.load_id === loadId &&
+      String(stop.status ?? "pending").trim().toLowerCase() !== "cancelled"
+    )
     .sort((a, b) => {
       const typeA = (a.stop_type || "").toLowerCase();
       const typeB = (b.stop_type || "").toLowerCase();

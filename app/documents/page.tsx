@@ -153,6 +153,15 @@ function normalizeLoadStatus(value: string | null | undefined) {
     .replace(/\s+/g, " ");
 }
 
+function isCancelledStop(stop: LoadStop) {
+  const status = String(stop.status ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ");
+  return ["cancelled", "canceled", "cancelled stop", "canceled stop"].includes(status);
+}
+
 const COMPLETED_LOAD_STATUSES = new Set([
   "delivered",
   "completed",
@@ -557,6 +566,7 @@ export default function DocumentsPage() {
         const isDelivery = ["delivery", "dropoff", "drop_off", "drop-off"].includes(normalizedType);
         return (
           stop.load_id === selectedLoad.id &&
+          !isCancelledStop(stop) &&
           (requiredStopType === "pickup" ? isPickup : isDelivery)
         );
       })
@@ -584,6 +594,7 @@ export default function DocumentsPage() {
         const isPickup = ["pickup", "pick_up"].includes(type);
         const isDelivery = ["delivery", "dropoff", "drop_off"].includes(type);
         return stop.load_id === reviewingDocument.load_id &&
+          !isCancelledStop(stop) &&
           (expectedType === "pickup" ? isPickup : isDelivery);
       })
       .sort((a, b) => a.stop_order - b.stop_order);
@@ -596,7 +607,9 @@ const isLoadFinanceReady = (loadId: string | null | undefined) => {
     const normalizeStopType = (value: string) =>
       value.trim().toLowerCase().replace(/[\s-]+/g, "_");
 
-    const stops = loadStops.filter((stop) => stop.load_id === loadId);
+    const stops = loadStops.filter((stop) =>
+      stop.load_id === loadId && !isCancelledStop(stop)
+    );
 
     const pickupStops = stops.filter((stop) =>
       ["pickup", "pick_up"].includes(normalizeStopType(stop.stop_type))

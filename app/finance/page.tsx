@@ -99,6 +99,7 @@ type LoadStop = {
   load_id: string;
   stop_order: number;
   stop_type: string;
+  status: string | null;
   pickup_number: string | null;
   address: string | null;
   city: string | null;
@@ -159,14 +160,6 @@ const formatPickupNumber = (value: string | null | undefined) => {
   return `PU${pickupNumber}`;
 };
 
-const normalizeAddressKey = (value: string | null | undefined) =>
-  String(value ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
-
-const CURRENT_PICKUP_ADDRESS_KEYS: Record<string, string> = {
-  PU99: "9950WFLAGLER",
-  PU222: "9565WFLAGLER",
-};
-
 const formatDate = (value: string | null | undefined) => {
   if (!value) return "—";
 
@@ -183,6 +176,11 @@ const normalize = (value: string | null | undefined) =>
     .toLowerCase()
     .replace(/[_-]+/g, " ")
     .replace(/\s+/g, " ");
+
+const isCancelledStop = (stop: LoadStop) =>
+  ["cancelled", "canceled", "cancelled stop", "canceled stop"].includes(
+    normalize(stop.status)
+  );
 
 function isApprovedDocument(document: Document) {
   const status = normalize(document.status);
@@ -559,8 +557,7 @@ export default function FinancePage() {
  
 
   async function loadDeliveredLoads(companyId: string) {
-    // Resolve the newest real load IDs for PU99 and PU222 first. This prevents
-    // an older load with a reused PU label from entering the current workflow.
+    // Include every delivered company load so historical deliveries are evaluated too.
     const { data: allLoadsData, error: allLoadsError } = await supabase
       .from("loads")
       .select(
@@ -570,60 +567,12 @@ export default function FinancePage() {
       .order("created_at", { ascending: false });
 
     if (allLoadsError) {
-      console.error("FINANCE CURRENT LOADS ERROR:", allLoadsError);
+      console.error("FINANCE DELIVERED LOADS ERROR:", allLoadsError);
       setReadiness([]);
       return;
     }
 
-    const allLoads = (allLoadsData || []) as Load[];
-    if (allLoads.length === 0) {
-      setReadiness([]);
-      return;
-    }
-
-    const allLoadIds = allLoads.map((load) => load.id);
-    const { data: allStopsData, error: allStopsError } = await supabase
-      .from("load_stops")
-      .select("id, load_id, stop_order, stop_type, pickup_number, address, city, state")
-      .in("load_id", allLoadIds)
-      .order("stop_order", { ascending: true });
-
-    if (allStopsError) {
-      console.error("FINANCE CURRENT LOAD STOPS ERROR:", allStopsError);
-      setReadiness([]);
-      return;
-    }
-
-    const allStops = (allStopsData || []) as LoadStop[];
-    const currentLoads: Load[] = [];
-
-    // Match current loads by pickup label AND street address. PU99 at 9950 W
-    // Flagler is current; the already completed PU99/PU51 load remains history.
-    for (const [wantedLabel, wantedAddressKey] of Object.entries(CURRENT_PICKUP_ADDRESS_KEYS)) {
-      const candidates = allLoads.filter((load) =>
-        allStops.some((stop) => {
-          const stopType = normalize(stop.stop_type);
-          const label = formatPickupNumber(stop.pickup_number).trim().toUpperCase();
-          const addressKey = normalizeAddressKey(stop.address);
-          return stop.load_id === load.id &&
-            ["pickup", "pick up"].includes(stopType) &&
-            label === wantedLabel &&
-            addressKey.includes(wantedAddressKey);
-        })
-      );
-      candidates.sort((a, b) => {
-        const aTime = a.created_at ? new Date(a.created_at).getTime() : 0;
-        const bTime = b.created_at ? new Date(b.created_at).getTime() : 0;
-        return bTime - aTime;
-      });
-      if (candidates[0] && !currentLoads.some((load) => load.id === candidates[0].id)) {
-        currentLoads.push(candidates[0]);
-      }
-    }
-
-    // Finance readiness only concerns delivered current loads; invoice history
-    // and existing invoices remain untouched and are still loaded separately.
-    const deliveredLoads = currentLoads.filter(
+    const deliveredLoads = ((allLoadsData || []) as Load[]).filter(
       (load) => normalize(load.status) === "delivered"
     );
 
@@ -644,7 +593,7 @@ export default function FinancePage() {
         .in("load_id", loadIds),
       supabase
         .from("load_stops")
-        .select("id, load_id, stop_order, stop_type, pickup_number, address, city, state")
+        .select("id, load_id, stop_order, stop_type, status, pickup_number, address, city, state")
         .in("load_id", loadIds)
         .order("stop_order", { ascending: true }),
       supabase
@@ -677,7 +626,9 @@ export default function FinancePage() {
       .filter((load) => !existingInvoices.some((invoice) => invoice.load_id === load.id))
       .map((load) => {
         const loadDocuments = documents.filter((document) => document.load_id === load.id);
-        const stops = loadStops.filter((stop) => stop.load_id === load.id);
+        const stops = loadStops.filter((stop) =>
+          stop.load_id === load.id && !isCancelledStop(stop)
+        );
 
         const pickupStops = stops.filter((stop) =>
           ["pickup", "pick_up"].includes(normalizeStopType(stop.stop_type))

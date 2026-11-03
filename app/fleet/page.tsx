@@ -53,8 +53,8 @@ export default function FleetPage() {
 
   const text = {
     projectLogistics: isES
-      ? "LOGÍSTICA DEL PROYECTO"
-      : "PROJECT LOGISTICS",
+      ? "LINEA DE CONFIANZA EXPRESS"
+      : "TRUSTLINE EXPRESS",
 
     fleet: isES ? "Flota" : "Fleet",
 

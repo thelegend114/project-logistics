@@ -329,7 +329,7 @@ const loadStopsByLoad = useMemo(() => {
                 marginBottom: "8px",
               }}
             >
-              Project Logistics
+              TRUSTLINE EXPRESS
             </div>
 
             <h1

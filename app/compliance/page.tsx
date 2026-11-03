@@ -166,8 +166,8 @@ export default function CompliancePage() {
 
   const text = {
     brand: isES
-      ? "LOGÍSTICA DEL PROYECTO"
-      : "PROJECT LOGISTICS",
+      ? "LINEA DE CONFIANZA EXPRESS"
+      : "TRUSTLINE EXPRESS",
 
     title: isES
       ? "Cumplimiento"

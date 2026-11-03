@@ -4,7 +4,7 @@ import AppShell from "./AppShell";
 import { LanguageProvider } from "../lib/LanguageProvider";
 
 export const metadata: Metadata = {
-  title: "Project Logistics",
+  title: "TRUSTLINE EXPRESS",
   description: "AI-Powered Trucking Operating System",
 };
 

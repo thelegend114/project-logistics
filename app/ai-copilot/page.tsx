@@ -63,7 +63,7 @@ export default function AICopilotPage() {
           <div style={styles.logo}>PL</div>
 
           <div>
-            <div style={styles.logoTitle}>Project Logistics</div>
+            <div style={styles.logoTitle}>TRUSTLINE EXPRESS</div>
             <div style={styles.logoSub}>Project Command</div>
           </div>
         </div>

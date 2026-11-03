@@ -143,7 +143,7 @@ export default function AppShell({
                 letterSpacing: "2px",
               }}
             >
-              PROJECT
+              TRUSTLINE
             </div>
 
             <div
@@ -153,7 +153,7 @@ export default function AppShell({
                 lineHeight: 1.1,
               }}
             >
-              LOGISTICS
+              EXPRESS
             </div>
           </Link>
 

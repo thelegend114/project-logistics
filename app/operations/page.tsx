@@ -500,7 +500,7 @@ export default function OperationsPage() {
                 marginBottom: 10,
               }}
             >
-              PROJECT LOGISTICS
+              TRUSTLINE EXPRESS
             </div>
 
             <h1

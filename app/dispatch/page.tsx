@@ -112,9 +112,9 @@ export default function DispatchPage() {
     useState("");
 
   const text = {
-    eyebrow: "PROJECT LOGISTICS",
+    eyebrow: "TRUSTLINE EXPRESS",
 
-    title: isES ? "Despacho" : "Project Dispatch",
+    title: isES ? "Despacho" : "Dispatch Department",
 
     subtitle: isES
       ? "Administra cargas, conductores y camiones desde un solo centro de control."

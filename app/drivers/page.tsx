@@ -37,7 +37,7 @@ export default function DriversPage() {
   const isES = normalizedLanguage === "es" || normalizedLanguage.startsWith("es-") || normalizedLanguage.startsWith("spanish");
 
   const text = {
-    eyebrow: "PROJECT LOGISTICS",
+    eyebrow: "TRUSTLINE EXPRESS",
     title: isES ? "Conductores" : "Drivers",
     subtitle: isES
       ? "Administra conductores, credenciales, disponibilidad y estado operativo."

@@ -72,7 +72,7 @@ const { data, error } = await supabase.auth.signInWithPassword({
               marginBottom: 10,
             }}
           >
-            PROJECT LOGISTICS
+            TRUSTLINE EXPRESS
           </div>
 
           <h1

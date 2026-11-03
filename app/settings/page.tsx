@@ -34,8 +34,8 @@ export default function SettingsPage() {
 
   const text = {
     brand: isES
-      ? "LOGÍSTICA DEL PROYECTO"
-      : "PROJECT LOGISTICS",
+      ? "LINEA DE CONFIANZA EXPRESS"
+      : "TRUSTLINE EXPRESS",
 
     title: isES ? "Configuración" : "Settings",
 

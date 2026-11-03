@@ -120,7 +120,7 @@ export default function CompanyPage() {
               letterSpacing: "1px",
             }}
           >
-            PROJECT LOGISTICS
+            TRUSTLINE EXPRESS
           </div>
 
           <h1

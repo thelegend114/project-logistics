@@ -116,7 +116,7 @@ export default function AICopilotPage() {
         <header style={styles.header}>
           <div>
             <div style={styles.eyebrow}>
-              {isES ? "INTELIGENCIA ARTIFICIAL" : "PROJECT AI"}
+              {isES ? "INTELIGENCIA ARTIFICIAL" : "TRUSTLINE AI"}
             </div>
 
             <h1 style={styles.title}>

@@ -113,6 +113,7 @@ type LoadReadiness = {
   hasBOL: boolean;
   hasPOD: boolean;
   hasRateConfirmation: boolean;
+  isDelivered: boolean;
   ready: boolean;
 };
 
@@ -558,7 +559,7 @@ export default function FinancePage() {
 
   async function loadDeliveredLoads(companyId: string) {
     // Include every delivered company load so historical deliveries are evaluated too.
-    const { data: allLoadsData, error: allLoadsError } = await supabase
+    const { data: companyLoadsData, error: allLoadsError } = await supabase
       .from("loads")
       .select(
         "id, company_id, load_number, broker_name, origin_city, origin_state, destination_city, destination_state, status, rate, created_at"
@@ -572,10 +573,46 @@ export default function FinancePage() {
       return;
     }
 
-    const deliveredLoads = ((allLoadsData || []) as Load[]).filter(
-      (load) => normalize(load.status) === "delivered"
-    );
+    let allLoadsData = companyLoadsData ?? [];
+    const companyLoadIds = new Set(allLoadsData.map((load) => load.id));
+    const { data: companyDocuments, error: companyDocumentsError } = await supabase
+      .from("documents")
+      .select("load_id")
+      .eq("company_id", companyId)
+      .not("load_id", "is", null);
 
+    if (companyDocumentsError) {
+      console.error("FINANCE COMPANY DOCUMENT LOOKUP ERROR:", companyDocumentsError);
+    } else {
+      const linkedLoadIds = Array.from(
+        new Set(
+          (companyDocuments ?? [])
+            .map((document) => String(document.load_id ?? ""))
+            .filter((loadId) => loadId && !companyLoadIds.has(loadId))
+        )
+      );
+
+      if (linkedLoadIds.length > 0) {
+        const { data: linkedLoads, error: linkedLoadsError } = await supabase
+          .from("loads")
+          .select(
+            "id, company_id, load_number, broker_name, origin_city, origin_state, destination_city, destination_state, status, rate, created_at"
+          )
+          .in("id", linkedLoadIds);
+
+        if (linkedLoadsError) {
+          console.error("FINANCE DOCUMENT-LINKED LOAD LOOKUP ERROR:", linkedLoadsError);
+        } else {
+          allLoadsData = [...allLoadsData, ...(linkedLoads ?? [])];
+        }
+      }
+    }
+    const documentLoadIds = new Set(
+      (companyDocuments ?? []).map((document) => String(document.load_id ?? ""))
+    );
+    const deliveredLoads = ((allLoadsData || []) as Load[]).filter(
+      (load) => normalize(load.status) === "delivered" || documentLoadIds.has(load.id)
+    );
     if (deliveredLoads.length === 0) {
       setReadiness([]);
       return;
@@ -648,6 +685,8 @@ export default function FinancePage() {
           pickupStops.every((stop) => hasApprovedDocumentForStop("bol", stop.id));
         const hasPOD = deliveryStops.length > 0 &&
           deliveryStops.every((stop) => hasApprovedDocumentForStop("pod", stop.id));
+        const isDelivered = normalize(load.status) === "delivered";
+
         const hasRateConfirmation = loadDocuments.some((document) =>
           documentTypeMatches(document, "rate") && isApprovedDocument(document)
         );
@@ -659,7 +698,8 @@ export default function FinancePage() {
           hasBOL,
           hasPOD,
           hasRateConfirmation,
-          ready: hasBOL && hasPOD && hasRateConfirmation,
+          isDelivered,
+          ready: isDelivered && hasBOL && hasPOD && hasRateConfirmation,
         };
       });
 
@@ -752,6 +792,49 @@ export default function FinancePage() {
 
   useEffect(() => {
     loadData();
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    let channel: ReturnType<typeof supabase.channel> | null = null;
+
+    void getCompanyId().then((companyId) => {
+      if (!active || !companyId) return;
+
+      channel = supabase
+        .channel(`finance-document-readiness-${companyId}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "*",
+            schema: "public",
+            table: "documents",
+            filter: `company_id=eq.${companyId}`,
+          },
+          () => {
+            if (active) void loadData();
+          }
+        )
+        .on(
+          "postgres_changes",
+          {
+            event: "*",
+            schema: "public",
+            table: "loads",
+            filter: `company_id=eq.${companyId}`,
+          },
+          () => {
+            if (active) void loadData();
+          }
+        );
+
+      channel.subscribe();
+    });
+
+    return () => {
+      active = false;
+      if (channel) void supabase.removeChannel(channel);
+    };
   }, []);
 
   const revenue = useMemo(
@@ -1568,7 +1651,13 @@ const deductions = useMemo(
                     {item.load.destination_city},{" "}
                     {item.load.destination_state}
                   </div>
-                  <div
+                  {!item.isDelivered && (
+                    <div style={{ color: "#b45309", fontSize: "12px", fontWeight: 700, marginTop: "7px" }}>
+                      {isES
+                        ? "Documentos recibidos; esperando que la carga se marque como entregada para preparar la factura."
+                        : "Documents received; waiting for the load to be marked delivered before invoice preparation."}
+                    </div>
+                  )}                  <div
                     style={{
                       color: "#334155",
                       fontSize: "11px",

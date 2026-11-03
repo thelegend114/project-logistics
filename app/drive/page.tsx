@@ -38,6 +38,7 @@ type Alert = {
 
 type Load = {
   id: string;
+  company_id: string | null;
   load_number: string | null;
   broker_name: string | null;
   customer_name: string | null;
@@ -115,7 +116,7 @@ type DocumentStop = {
 type DriverWorkStatus = "off_duty" | "hold" | "available" | "on_duty" | "driving";
 
 const LOAD_SELECT =
-  "id, load_number, broker_name, customer_name, origin_city, origin_state, pickup_address, destination_city, destination_state, delivery_address, pickup_date, delivery_date, miles, rate, status, driver_id, truck_id, trailer_id, pickup_unlocked";
+  "id, company_id, load_number, broker_name, customer_name, origin_city, origin_state, pickup_address, destination_city, destination_state, delivery_address, pickup_date, delivery_date, miles, rate, status, driver_id, truck_id, trailer_id, pickup_unlocked";
 
 function calculateDistanceMiles(
   latitude1: number,
@@ -536,6 +537,10 @@ export default function DriverPage() {
   const [realtimeRetryKey, setRealtimeRetryKey] = useState(0);
 
   const gpsWatchId = useRef<number | null>(null);
+  const screenWakeLock = useRef<{
+    release: () => Promise<void>;
+    addEventListener: (type: "release", listener: () => void) => void;
+  } | null>(null);
   const gpsInsertInProgress = useRef(false);
   const messageTimer = useRef<number | null>(null);
   const realtimeRetryCount = useRef(0);
@@ -792,6 +797,78 @@ function isMobileBrowser(): boolean {
     Math.min(window.screen.width, window.screen.height) < 900;
 
   return mobileUserAgent || touchDevice;
+}
+
+async function setDriverAndHosStatus(nextStatus: "on_duty"): Promise<boolean> {
+  if (!selectedDriver) {
+    showMessage(text.selectDriverFirst);
+    return false;
+  }
+
+  const previousStatus = selectedDriver.status || "off_duty";
+  const { data: updatedDriver, error: driverError } = await supabase
+    .from("drivers")
+    .update({ status: nextStatus })
+    .eq("id", selectedDriver.id)
+    .select("id, status")
+    .maybeSingle();
+
+  if (driverError || !updatedDriver) {
+    console.error("DRIVER/HOS STATUS UPDATE ERROR:", driverError);
+    showMessage(
+      isES
+        ? "No se pudo actualizar el estado del conductor. HOS no fue cambiado."
+        : "Could not update the driver's status. HOS was not changed."
+    );
+    return false;
+  }
+
+  setDrivers((currentDrivers) =>
+    currentDrivers.map((driver) =>
+      String(driver.id) === String(updatedDriver.id)
+        ? { ...driver, status: updatedDriver.status }
+        : driver
+    )
+  );
+  setDriverWorkStatus(nextStatus);
+
+  const latestHosStatus = String(latestHosEvent?.event_type ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+  const hosSaved =
+    latestHosStatus === "on_duty" ? true : await setHosStatus("On Duty");
+  if (hosSaved) return true;
+
+  // Si HOS no se guardó, revierte el status operativo para no dejar estados distintos.
+  const { data: restoredDriver, error: rollbackError } = await supabase
+    .from("drivers")
+    .update({ status: previousStatus })
+    .eq("id", selectedDriver.id)
+    .select("id, status")
+    .maybeSingle();
+
+  if (rollbackError || !restoredDriver) {
+    console.error("DRIVER STATUS ROLLBACK FAILED AFTER HOS ERROR:", rollbackError);
+    return false;
+  }
+
+  setDrivers((currentDrivers) =>
+    currentDrivers.map((driver) =>
+      String(driver.id) === String(restoredDriver.id)
+        ? { ...driver, status: restoredDriver.status }
+        : driver
+    )
+  );
+  const normalizedPreviousStatus = String(restoredDriver.status)
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+  const validStatuses = ["off_duty", "hold", "available", "on_duty", "driving"];
+  if (validStatuses.includes(normalizedPreviousStatus)) {
+    setDriverWorkStatus(normalizedPreviousStatus as DriverWorkStatus);
+  }
+  return false;
 }
 
 async function setHosStatus(status: string): Promise<boolean> {
@@ -1098,25 +1175,131 @@ console.log(
         : "GPS received in real time"
       : gpsStatus;
 
-  // CORREGIDO: antes faltaba el addEventListener, por lo que la reconexión
-  // del GPS al volver a la aplicación nunca se ejecutaba.
+  // Al volver al primer plano, renueva los datos operativos y el watch GPS.
+  // Los navegadores pueden pausar geolocalización y temporizadores mientras el
+  // teléfono está bloqueado; este código recupera el seguimiento al reabrir la app.
   useEffect(() => {
+    let wasHidden = document.visibilityState !== "visible";
+
     const handleVisibilityChange = () => {
-      if (document.visibilityState !== "visible") return;
-
-      // "available" no se incluye: el botón Available detiene el GPS a propósito.
-      const isShiftActive = driverWorkStatus === "driving" || driverWorkStatus === "on_duty";
-
-      if (isShiftActive && gpsWatchId.current === null) {
-        console.log("Uber Guard: Reconectando GPS tras volver a la aplicación...");
-        startGpsRef.current();
+      if (document.visibilityState !== "visible") {
+        wasHidden = true;
+        return;
       }
+
+      setClockNow(Date.now());
+      if (!wasHidden) return;
+      wasHidden = false;
+
+      const isShiftActive = driverWorkStatus === "driving" || driverWorkStatus === "on_duty";
+      if (!isShiftActive) return;
+
+      void (async () => {
+        // Revalida el estado del chofer porque Realtime puede pausarse en background.
+        let shouldResumeGps: boolean = isShiftActive;
+        if (selectedDriverId) {
+          const { data: refreshedDriver, error } = await supabase
+            .from("drivers")
+            .select("id, status, current_load_id")
+            .eq("id", selectedDriverId)
+            .maybeSingle();
+
+          if (!error && refreshedDriver) {
+            const normalizedStatus = String(refreshedDriver.status ?? "")
+              .trim()
+              .toLowerCase()
+              .replace(/[\s-]+/g, "_");
+            const validStatuses = ["off_duty", "hold", "available", "on_duty", "driving"];
+
+            setDrivers((currentDrivers) =>
+              currentDrivers.map((driver) =>
+                String(driver.id) === String(refreshedDriver.id)
+                  ? {
+                      ...driver,
+                      status: refreshedDriver.status,
+                      current_load_id: refreshedDriver.current_load_id,
+                    }
+                  : driver
+              )
+            );
+            if (validStatuses.includes(normalizedStatus)) {
+              setDriverWorkStatus(normalizedStatus as DriverWorkStatus);
+              shouldResumeGps = normalizedStatus === "driving" || normalizedStatus === "on_duty";
+            }
+          }
+          await loadDriverHos(selectedDriverId);
+        }
+
+        if (!shouldResumeGps) return;
+
+        // Un watch existente puede quedar congelado después de bloquear el teléfono.
+        if (gpsWatchId.current !== null) {
+          navigator.geolocation.clearWatch(gpsWatchId.current);
+          gpsWatchId.current = null;
+        }
+        console.log("GPS: renovando seguimiento al volver a la aplicación...");
+        startGpsRef.current();
+      })();
     };
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("pageshow", handleVisibilityChange);
 
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("pageshow", handleVisibilityChange);
+    };
+  }, [driverWorkStatus, selectedDriverId]);
+
+// Keeps the display awake during active work so GPS can continue in the browser.
+  // The OS may release the lock; request it again when the page becomes visible.
+  useEffect(() => {
+    let effectActive = true;
+    const shouldKeepScreenOn = driverWorkStatus === "driving" || driverWorkStatus === "on_duty";
+
+    const requestScreenWakeLock = async () => {
+      if (!shouldKeepScreenOn || document.visibilityState !== "visible" || screenWakeLock.current) {
+        return;
+      }
+
+      const wakeLockNavigator = navigator as Navigator & {
+        wakeLock?: {
+          request: (type: "screen") => Promise<{
+            release: () => Promise<void>;
+            addEventListener: (type: "release", listener: () => void) => void;
+          }>;
+        };
+      };
+      if (!wakeLockNavigator.wakeLock) return;
+
+      try {
+        const sentinel = await wakeLockNavigator.wakeLock.request("screen");
+        if (!effectActive || document.visibilityState !== "visible") {
+          await sentinel.release();
+          return;
+        }
+        screenWakeLock.current = sentinel;
+        sentinel.addEventListener("release", () => {
+          if (screenWakeLock.current === sentinel) screenWakeLock.current = null;
+        });
+      } catch (error) {
+        console.info("Screen Wake Lock is unavailable:", error);
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") void requestScreenWakeLock();
+    };
+
+    void requestScreenWakeLock();
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      effectActive = false;
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      const activeWakeLock = screenWakeLock.current;
+      screenWakeLock.current = null;
+      if (activeWakeLock) void activeWakeLock.release().catch(() => {});
     };
   }, [driverWorkStatus]);
 
@@ -2426,10 +2609,12 @@ async function startDrive(): Promise<boolean> {
       }
 
       if (currentLoadStatus === "at_pickup") {
+        const statusSynced = await setDriverAndHosStatus("on_duty");
+        if (!statusSynced) return false;
         showMessage(
           isES
-            ? "La recogida ya está confirmada."
-            : "Pickup is already confirmed."
+            ? "La recogida ya estaba confirmada. Estados sincronizados: On Duty."
+            : "Pickup was already confirmed. Statuses synced: On Duty."
         );
         return true;
       }
@@ -2508,7 +2693,7 @@ async function startDrive(): Promise<boolean> {
       await refreshNavigation();
 
       // AT PICKUP cambia HOS manualmente a On Duty; nunca depende del GPS.
-      const pickupHosSaved = await setHosStatus("On Duty");
+      const pickupHosSaved = await setDriverAndHosStatus("on_duty");
       if (!pickupHosSaved) return false;
 
       showMessage(
@@ -2661,8 +2846,12 @@ async function startDrive(): Promise<boolean> {
       }
 
       if (currentLoadStatus === "at_delivery") {
+        const statusSynced = await setDriverAndHosStatus("on_duty");
+        if (!statusSynced) return false;
         showMessage(
-          isES ? "La entrega ya está confirmada." : "Delivery is already confirmed."
+          isES
+            ? "La entrega ya estaba confirmada. Estados sincronizados: On Duty."
+            : "Delivery was already confirmed. Statuses synced: On Duty."
         );
         return true;
       }
@@ -2729,7 +2918,7 @@ async function startDrive(): Promise<boolean> {
       await refreshNavigation();
 
       // AT DELIVERY registra On Duty al confirmar manualmente la llegada.
-      const deliveryHosSaved = await setHosStatus("On Duty");
+      const deliveryHosSaved = await setDriverAndHosStatus("on_duty");
       if (!deliveryHosSaved) return false;
 
       showMessage(
@@ -3316,6 +3505,16 @@ async function startDrive(): Promise<boolean> {
       return;
     }
 
+    const documentCompanyId = selectedLoad.company_id ?? selectedDriver.company_id;
+    if (!documentCompanyId) {
+      showMessage(
+        isES
+          ? "No se puede guardar el documento porque la carga y el conductor no tienen una empresa asignada. Pida a operaciones que corrija la carga."
+          : "This document cannot be saved because neither the load nor the driver has a company assigned. Ask operations to correct the load."
+      );
+      return;
+    }
+
     if (!selectedFile) {
       showMessage(text.chooseFileFirst);
       return;
@@ -3441,6 +3640,7 @@ if (
       } = await supabase
         .from("documents")
         .insert({
+          company_id: documentCompanyId,
           load_id: selectedLoad.id,
           driver_id: selectedDriver.id,
           document_type: normalizedDocumentType,
@@ -3568,6 +3768,64 @@ if (
 
   const latestStatus = latestHosEvent?.event_type || "Unknown";
   const latestStatusNormalized = latestStatus.toLowerCase().replace(/[\s-]+/g, "_");
+
+  // Arrival at delivery is an On Duty state. Reconcile an older saved driver
+  // status when this page is reopened after the load and HOS were already saved.
+  useEffect(() => {
+    if (!selectedDriver || !selectedLoad) return;
+
+    const loadStatus = normalizeLoadStatus(selectedLoad.status);
+    const driverStatus = String(selectedDriver.status ?? "")
+      .trim()
+      .toLowerCase()
+      .replace(/[\s-]+/g, "_");
+    const hosStatus = String(latestHosEvent?.event_type ?? "")
+      .trim()
+      .toLowerCase()
+      .replace(/[\s-]+/g, "_");
+
+    if (loadStatus !== "at_delivery" || hosStatus !== "on_duty" || driverStatus === "on_duty") {
+      return;
+    }
+
+    let isActive = true;
+    void supabase
+      .from("drivers")
+      .update({ status: "on_duty" })
+      .eq("id", selectedDriver.id)
+      .select("id, status")
+      .maybeSingle()
+      .then(({ data, error }) => {
+        if (!isActive) return;
+        if (error || !data) {
+          console.error("AT DELIVERY DRIVER STATUS RECONCILIATION FAILED:", error);
+          return;
+        }
+
+        setDrivers((currentDrivers) =>
+          currentDrivers.map((driver) =>
+            String(driver.id) === String(data.id)
+              ? { ...driver, status: data.status }
+              : driver
+          )
+        );
+        setDriverWorkStatus("on_duty");
+      });
+
+    return () => {
+      isActive = false;
+    };
+  }, [selectedDriver?.id, selectedDriver?.status, selectedLoad?.id, selectedLoad?.status, latestHosEvent?.id]);
+
+  // Resume GPS for an active shift after a reload or a duty-status transition.
+  useEffect(() => {
+    const shiftIsActive = driverWorkStatus === "driving" || driverWorkStatus === "on_duty";
+    if (!shiftIsActive || !selectedDriver || !selectedLoad || !navigator.geolocation) return;
+    if (gpsWatchId.current !== null) return;
+
+    console.log("GPS: starting/resuming for active driver status", driverWorkStatus);
+    startGpsRef.current();
+  }, [driverWorkStatus, selectedDriver?.id, selectedLoad?.id]);
 
   const driveLimitMs = 11 * 60 * 60 * 1000;
   const shiftLimitMs = 14 * 60 * 60 * 1000;
@@ -4893,8 +5151,7 @@ function SecondaryButton({
     <button
       type="button"
       onClick={onClick}
-      className={`rounded-xl border px-4 py-2.5 text-sm font-bold transition ${
-        active
+      className={`rounded-xl border px-4 py-2.5 text-sm font-bold transition ${active
           ? "border-slate-900 bg-slate-900 text-white"
           : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
       }`}

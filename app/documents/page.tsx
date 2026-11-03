@@ -128,8 +128,10 @@ function formatPickupNumber(value: string | null | undefined) {
   return `PU${pickupNumber}`;
 }
 
-// Mostrar cualquier carga operativa activa con al menos una parada de recogida.
+// Mostrar cargas disponibles y activas. Las entregadas quedan en el historial.
 const ACTIVE_LOAD_STATUSES = new Set([
+  "available",
+  "pending",
   "assigned",
   "at pickup",
   "in transit",
@@ -200,13 +202,13 @@ export default function DocumentsPage() {
     loadingLoads: isES ? "Cargando cargas..." : "Loading loads...",
     selectLoad: isES ? "Selecciona una carga" : "Select a load",
     pendingLoadsTitle: isES ? "Cargas operativas" : "Operational Loads",
-    pendingLoadsDescription: isES ? "Se muestran las cargas activas disponibles con paradas de recogida." : "Active available loads with pickup stops are shown here.",
-    noCurrentLoads: isES ? "No hay cargas operativas activas con paradas de recogida. Verifica las cargas y sus paradas en Supabase." : "No active operational loads with pickup stops were found. Check loads and their stops in Supabase.",
-    completedHistoryTitle: isES ? "Historial de documentos completados" : "Completed Document History",
-    completedHistoryDescription: isES ? "Historial separado de las cargas vigentes. Los documentos históricos se conservan y se muestran aquí sin acciones de eliminación o aprobación." : "Separate from current loads. Historical documents are preserved here without delete or approval actions.",
+    pendingLoadsDescription: isES ? "Se muestran cargas disponibles y en operación; las cargas entregadas y sus documentos están en el historial." : "Available and active loads appear here. Delivered loads and their documents are in history.",
+    noCurrentLoads: isES ? "No hay cargas disponibles o activas. Revisa el historial para las cargas entregadas." : "No available or active loads were found. Check history for delivered loads.",
+    completedHistoryTitle: isES ? "Historial de documentos de cargas completadas" : "Completed Load Documents",
+    completedHistoryDescription: isES ? "Incluye documentos aprobados y recién subidos de cargas entregadas; aquí no se pueden eliminar ni aprobar." : "Includes approved and newly uploaded documents from delivered loads; they cannot be deleted or approved here.",
     selectHistoryLoad: isES ? "Selecciona una carga del historial" : "Select a historical load",
     noHistoricalLoads: isES ? "No hay otras cargas en el historial." : "There are no other loads in history.",
-    noCompletedHistoryDocuments: isES ? "No hay documentos completados para esta carga histórica." : "No completed documents found for this historical load.",
+    noCompletedHistoryDocuments: isES ? "No hay documentos para esta carga histórica." : "No documents found for this historical load.",
     selectedLoad: isES ? "Carga seleccionada" : "Selected Load",
     loadRate: isES ? "Tarifa de carga" : "Load Rate",
     documentType: isES ? "Tipo de documento" : "Document Type",
@@ -406,6 +408,7 @@ export default function DocumentsPage() {
   };
 
   const [loads, setLoads] = useState<Load[]>([]);
+  const [companyId, setCompanyId] = useState("");
   const [selectedLoadId, setSelectedLoadId] = useState("");
   const [selectedHistoryLoadId, setSelectedHistoryLoadId] = useState("");
   const [historyDocuments, setHistoryDocuments] = useState<Document[]>([]);
@@ -441,31 +444,17 @@ export default function DocumentsPage() {
     [loads, selectedLoadId]
   );
 
-  // Current work includes any active operational load with a pickup stop.
-  // Las cargas vigentes incluyen cualquier carga operativa activa con una parada de recogida.
+  // All active loads remain selectable, even when their stops are incomplete.
+  // Las cargas activas siguen seleccionables aunque falten paradas.
   const currentLoads = useMemo(() => {
     return loads
       .filter((load) => ACTIVE_LOAD_STATUSES.has(normalizeLoadStatus(load.status)))
-      .filter((load) =>
-        loadStops.some((stop) => {
-          const stopType = String(stop.stop_type ?? "")
-            .trim()
-            .toLowerCase()
-            .replace(/[_-]+/g, " ")
-            .replace(/\s+/g, " ");
-
-          return (
-            String(stop.load_id) === String(load.id) &&
-            ["pickup", "pick up"].includes(stopType)
-          );
-        })
-      )
       .sort((a, b) => {
         const aTime = a.created_at ? new Date(a.created_at).getTime() : 0;
         const bTime = b.created_at ? new Date(b.created_at).getTime() : 0;
         return bTime - aTime;
       });
-  }, [loads, loadStops]);
+  }, [loads]);
 
   const currentLoadIds = useMemo(
     () => new Set(currentLoads.map((load) => load.id)),
@@ -478,7 +467,7 @@ export default function DocumentsPage() {
   );
 
   const completedHistoryDocuments = useMemo(() => {
-    const completedStatuses = ["approved", "document approved", "reviewed", "rejected", "declined", "completed", "complete"];
+    const completedStatuses = ["uploaded", "pending", "pending review", "under review", "approved", "document approved", "reviewed", "rejected", "declined", "completed", "complete"];
     return historyDocuments.filter((document) => {
       const status = String(document.status ?? "").trim().toLowerCase().replace(/[_-]+/g, " ").replace(/\s+/g, " ");
       return completedStatuses.includes(status);
@@ -500,6 +489,8 @@ export default function DocumentsPage() {
     ? getPickupLabelsForLoad(selectedLoad.id)
     : [];
 
+  const displayDocuments = selectedLoad ? documents : historyDocuments;
+
   const isHumanApprovedDocument = (documentRow: Document) => {
     const status = (documentRow.status ?? "")
       .trim()
@@ -510,43 +501,43 @@ export default function DocumentsPage() {
   };
 
   const reviewedCount = useMemo(
-    () => documents.filter(isHumanApprovedDocument).length,
-    [documents]
+    () => displayDocuments.filter(isHumanApprovedDocument).length,
+    [displayDocuments]
   );
 
   const pendingCount = useMemo(
     () =>
-      documents.filter(
+      displayDocuments.filter(
         (document) =>
           document.status === "pending" ||
           document.status === "uploaded"
       ).length,
-    [documents]
+    [displayDocuments]
   );
 
   const bolCount = useMemo(
     () =>
-      documents.filter(
+      displayDocuments.filter(
         (document) => document.document_type === "BOL"
       ).length,
-    [documents]
+    [displayDocuments]
   );
 
   const podCount = useMemo(
     () =>
-      documents.filter(
+      displayDocuments.filter(
         (document) => document.document_type === "POD"
       ).length,
-    [documents]
+    [displayDocuments]
   );
 
   const rateConfirmationCount = useMemo(
     () =>
-      documents.filter(
+      displayDocuments.filter(
         (document) =>
           document.document_type === "Rate Confirmation"
       ).length,
-    [documents]
+    [displayDocuments]
   );
 
   const requiredStopType =
@@ -773,6 +764,7 @@ const { data, error } = await supabase
 
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) {
+      setCompanyId("");
       setLoads([]);
       setLoadStops([]);
       setErrorMessage(isES ? "Inicia sesión para ver las cargas." : "Sign in to view loads.");
@@ -787,6 +779,7 @@ const { data, error } = await supabase
       .maybeSingle();
 
     if (userError || !userData?.company_id) {
+      setCompanyId("");
       setLoads([]);
       setLoadStops([]);
       setErrorMessage(userError?.message || (isES ? "No se encontró la empresa del usuario." : "User company was not found."));
@@ -794,6 +787,7 @@ const { data, error } = await supabase
       return;
     }
 
+    setCompanyId(userData.company_id);
     const { data, error } = await supabase
       .from("loads")
       .select(
@@ -822,7 +816,7 @@ const { data, error } = await supabase
       return;
     }
 
-    const formattedLoads: Load[] = (data ?? []).map((load) => ({
+    let formattedLoads: Load[] = (data ?? []).map((load) => ({
       id: load.id,
       company_id: load.company_id ?? null,
       load_number: load.load_number,
@@ -836,10 +830,147 @@ const { data, error } = await supabase
       created_at: load.created_at ?? null,
     }));
 
+    // Include loads referenced by this company's documents even if an older
+    // load row is missing company_id. Driver uploads stamp the document with
+    // the driver's company, so filtering loads alone would hide those files.
+    const { data: companyDocuments, error: companyDocumentsError } = await supabase
+      .from("documents")
+      .select("load_id")
+      .eq("company_id", userData.company_id)
+      .not("load_id", "is", null);
+
+    if (companyDocumentsError) {
+      console.error("COMPANY DOCUMENT LOAD LOOKUP ERROR:", companyDocumentsError);
+    } else {
+      const existingLoadIds = new Set(formattedLoads.map((load) => load.id));
+      const missingLoadIds = Array.from(
+        new Set(
+          (companyDocuments ?? [])
+            .map((document) => String(document.load_id ?? ""))
+            .filter((loadId) => loadId && !existingLoadIds.has(loadId))
+        )
+      );
+
+      if (missingLoadIds.length > 0) {
+        const { data: linkedLoads, error: linkedLoadsError } = await supabase
+          .from("loads")
+          .select(
+            "id, company_id, load_number, broker_name, origin_city, origin_state, destination_city, destination_state, status, rate, created_at"
+          )
+          .in("id", missingLoadIds);
+
+        if (linkedLoadsError) {
+          console.error("DOCUMENT-LINKED LOAD LOOKUP ERROR:", linkedLoadsError);
+        } else {
+          formattedLoads = [
+            ...formattedLoads,
+            ...(linkedLoads ?? []).map((load) => ({
+              id: load.id,
+              company_id: load.company_id ?? null,
+              load_number: load.load_number,
+              broker_name: load.broker_name ?? null,
+              origin_city: load.origin_city ?? null,
+              origin_state: load.origin_state ?? null,
+              destination_city: load.destination_city ?? null,
+              destination_state: load.destination_state ?? null,
+              status: load.status ?? null,
+              rate: load.rate ?? 0,
+              created_at: load.created_at ?? null,
+            })),
+          ];
+        }
+      }
+    }
+
     setLoads(formattedLoads);
+
+    const companyLoadIds = formattedLoads.map((load) => load.id);
+    if (companyLoadIds.length > 0) {
+      const { data: latestDocument, error: latestDocumentError } = await supabase
+        .from("documents")
+        .select("load_id")
+        .in("load_id", companyLoadIds)
+        .order("uploaded_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (latestDocumentError) {
+        console.error("LATEST DOCUMENT LOAD LOOKUP ERROR:", latestDocumentError);
+      } else if (latestDocument?.load_id) {
+        const latestDocumentLoad = formattedLoads.find(
+          (load) => load.id === latestDocument.load_id
+        );
+        if (latestDocumentLoad) {
+          if (ACTIVE_LOAD_STATUSES.has(normalizeLoadStatus(latestDocumentLoad.status))) {
+            setSelectedLoadId(latestDocumentLoad.id);
+          } else {
+            setSelectedHistoryLoadId(latestDocumentLoad.id);
+          }
+        }
+      }
+    }
 
     setLoadingLoads(false);
   }
+
+  useEffect(() => {
+    if (!companyId) return;
+
+    let active = true;
+    let channel = supabase.channel(`documents-page-${companyId}`);
+
+    channel = channel.on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "documents",
+        filter: `company_id=eq.${companyId}`,
+      },
+      (payload) => {
+        if (!active || payload.eventType === "DELETE") return;
+
+        const changedDocument = payload.new as Partial<Document>;
+        const loadId = String(changedDocument.load_id ?? "");
+        if (!loadId) return;
+
+        if (currentLoadIds.has(loadId)) {
+          setSelectedLoadId(loadId);
+          void loadDocuments(loadId);
+          return;
+        }
+
+        setSelectedHistoryLoadId(loadId);
+        void supabase
+          .from("documents")
+          .select("id, load_id, load_stop_id, document_type, file_name, storage_path, status, uploaded_at")
+          .eq("load_id", loadId)
+          .order("uploaded_at", { ascending: false })
+          .then(({ data, error }) => {
+            if (active && !error) setHistoryDocuments((data ?? []) as Document[]);
+          });
+      }
+    );
+
+    channel = channel.on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "loads",
+        filter: `company_id=eq.${companyId}`,
+      },
+      () => {
+        if (active) void loadData();
+      }
+    );
+
+    channel.subscribe();
+    return () => {
+      active = false;
+      void supabase.removeChannel(channel);
+    };
+  }, [companyId, currentLoadIds]);
 
   async function loadDocuments(loadId: string) {
     setLoadingDocuments(true);
@@ -1505,7 +1636,7 @@ if (insertError || !insertedDocument?.id) {
     },
     {
       key: "status" as keyof Document,
-      label: isES ? "Estado final" : "Final Status",
+      label: isES ? "Estado" : "Status",
       render: (value: Document[keyof Document]) => (
         <StatusBadge status={String(value ?? "—")} />
       ),
@@ -1601,7 +1732,7 @@ if (insertError || !insertedDocument?.id) {
         >
           <StatCard
             label={text.total}
-            value={documents.length}
+            value={displayDocuments.length}
           />
 
           <StatCard

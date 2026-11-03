@@ -575,6 +575,26 @@ export default function FactoringPage() {
     };
   }, [submissions, payments]);
 
+  async function getCompanyId() {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) return null;
+
+    const { data, error } = await supabase
+      .from("users")
+      .select("company_id")
+      .eq("id", user.id)
+      .maybeSingle();
+
+    if (error) {
+      console.error("FACTORING COMPANY LOOKUP ERROR:", error);
+      return null;
+    }
+
+    return data?.company_id || null;
+  }
   async function loadData() {
     setLoading(true);
 
@@ -637,6 +657,61 @@ export default function FactoringPage() {
 
   useEffect(() => {
     loadData();
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    let channel: ReturnType<typeof supabase.channel> | null = null;
+
+    void getCompanyId().then((companyId) => {
+      if (!active || !companyId) return;
+
+      channel = supabase
+        .channel(`factoring-workflow-${companyId}`)
+        .on(
+          "postgres_changes",
+          {
+            event: "*",
+            schema: "public",
+            table: "factoring_submissions",
+            filter: `company_id=eq.${companyId}`,
+          },
+          () => {
+            if (active) void loadData();
+          }
+        )
+        .on(
+          "postgres_changes",
+          {
+            event: "*",
+            schema: "public",
+            table: "factoring_payments",
+            filter: `company_id=eq.${companyId}`,
+          },
+          () => {
+            if (active) void loadData();
+          }
+        )
+        .on(
+          "postgres_changes",
+          {
+            event: "*",
+            schema: "public",
+            table: "invoices",
+            filter: `company_id=eq.${companyId}`,
+          },
+          () => {
+            if (active) void loadData();
+          }
+        );
+
+      channel.subscribe();
+    });
+
+    return () => {
+      active = false;
+      if (channel) void supabase.removeChannel(channel);
+    };
   }, []);
 
   function isHistoricalSubmission(

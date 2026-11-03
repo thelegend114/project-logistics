@@ -937,6 +937,11 @@ async function loadData() {
       return;
     }
 
+    if (!form.company_id) {
+      setErrorMessage(text.selectCompany);
+      return;
+    }
+
     if (stops.length < 2) {
       setErrorMessage(text.stopsRequired);
       return;
@@ -1030,7 +1035,7 @@ for (const stop of stops) {
 }
 
       const loadPayload = {
-            company_id: form.company_id || null,
+            company_id: form.company_id,
             load_number: form.load_number.trim(),
             broker_name:
               form.broker_name.trim() || null,

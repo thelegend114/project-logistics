@@ -953,9 +953,10 @@ async function updateDriverWorkStatus(nextStatus: "off_duty" | "hold" | "availab
     requestedStatus: nextStatus,
   });
 
+  const savedWorkStatus = nextStatus === "hold" ? "available" : nextStatus;
   const { data, error } = await supabase
     .from("drivers")
-    .update({ status: nextStatus })
+    .update({ status: savedWorkStatus })
     .eq("id", driverProfile.id)
     .select("id, full_name, status")
     .single();
@@ -996,29 +997,36 @@ async function updateDriverWorkStatus(nextStatus: "off_duty" | "hold" | "availab
     setDriverWorkStatus(normalizedWorkStatus as DriverWorkStatus);
   }
 
-  // Estos estados operativos no deben mantener activo el seguimiento GPS.
-  if (
-    nextStatus === "hold" ||
-    nextStatus === "off_duty" ||
-    nextStatus === "available"
-  ) {
-    stopGpsTracking();
-  }
-
-  // Personal Time y Hold también deben cerrar el intervalo HOS anterior.
-  // Hold se registra como evento operativo propio para no clasificarlo falsamente
-  // como Off Duty; ambos eventos detienen los relojes operativos en esta pantalla.
+  // Personal Time y Hold registran Off Duty. Hold deja al conductor disponible
+  // para despacho, pero fuera de servicio hasta que vuelva a iniciar trabajo.
   if (nextStatus === "off_duty" || nextStatus === "hold") {
-    const hosEventSaved = await setHosStatus(
-      nextStatus === "off_duty" ? "Off Duty" : "Hold"
-    );
+    const hosEventSaved = await setHosStatus("Off Duty");
 
     if (!hosEventSaved) {
       console.error("WORK STATUS SAVED BUT HOS EVENT FAILED:", {
         driverId: driverProfile.id,
         nextStatus,
       });
+      await supabase
+        .from("drivers")
+        .update({ status: driverProfile.status })
+        .eq("id", driverProfile.id);
+      setDrivers((currentDrivers) =>
+        currentDrivers.map((driver) =>
+          String(driver.id) === String(driverProfile.id)
+            ? { ...driver, status: driverProfile.status }
+            : driver
+        )
+      );
+      setDriverWorkStatus(String(driverProfile.status).toLowerCase() as DriverWorkStatus);
+      showMessage(isES ? "No se pudo guardar el estado HOS; se restauró el estado anterior." : "HOS could not be saved; the previous status was restored.");
+      return false;
     }
+  }
+
+  // Detener GPS solo después de guardar el estado y el evento HOS correctamente.
+  if (nextStatus === "hold" || nextStatus === "off_duty" || nextStatus === "available") {
+    stopGpsTracking();
   }
 
   if (nextStatus === "available") {
@@ -2197,18 +2205,8 @@ async function startDrive(): Promise<boolean> {
     return false;
   }
 
-  if (selectedLoad.pickup_date) {
-    const pickupTime = new Date(selectedLoad.pickup_date).getTime();
-
-    if (!Number.isNaN(pickupTime) && pickupTime > Date.now()) {
-      showMessage(
-        isES
-          ? "Esta carga todavía es futura."
-          : "This load is still scheduled for the future."
-      );
-      return false;
-    }
-  }
+  // pickup_date es la cita de recogida, no una hora de salida hacia el local.
+  // El conductor puede iniciar el viaje antes para llegar puntualmente a la cita.
 
   // Verificar en Supabase que la carga continúa asignada al conductor.
   const { data: loadCheck, error: loadCheckError } = await supabase
@@ -2242,19 +2240,6 @@ async function startDrive(): Promise<boolean> {
         : "The load is still locked in Supabase."
     );
     return false;
-  }
-
-  if (loadCheck.pickup_date) {
-    const pickupTime = new Date(loadCheck.pickup_date).getTime();
-
-    if (!Number.isNaN(pickupTime) && pickupTime > Date.now()) {
-      showMessage(
-        isES
-          ? "La fecha de recogida todavía es futura."
-          : "The pickup date is still in the future."
-      );
-      return false;
-    }
   }
 
   // Conservar el vínculo de la carga activa con el conductor.
@@ -3831,30 +3816,51 @@ if (
   const shiftLimitMs = 14 * 60 * 60 * 1000;
   const cycleLimitMs = 70 * 60 * 60 * 1000;
 
-  const driveElapsedMs =
-    latestStatusNormalized === "driving" &&
-    latestHosTimestamp !== null &&
-    Number.isFinite(latestHosTimestamp)
-      ? Math.max(0, clockNow - latestHosTimestamp)
-      : 0;
-
-  const hosClockIsRunning =
-    latestStatusNormalized === "driving" ||
-    latestStatusNormalized === "on_duty";
-
-  const shiftElapsedMs =
-    hosClockIsRunning &&
-    latestHosTimestamp !== null &&
-    Number.isFinite(latestHosTimestamp)
-      ? Math.max(0, clockNow - latestHosTimestamp)
-      : 0;
-
   const hosEventsChronological = [...hosEvents]
     .filter((event): event is typeof event & { event_time: string } => {
       if (typeof event.event_time !== "string") return false;
       return Number.isFinite(new Date(event.event_time).getTime());
     })
     .sort((a, b) => new Date(a.event_time).getTime() - new Date(b.event_time).getTime());
+
+  // A short Off Duty pause never restarts either clock. The 14-hour window
+  // continues through that pause; only 10 consecutive hours off-duty/sleeper
+  // reset the shift when the driver next reports for duty.
+  let shiftStartTimestamp: number | null = null;
+  let previousEvent: (typeof hosEventsChronological)[number] | null = null;
+  for (const event of hosEventsChronological) {
+    const status = event.event_type?.toLowerCase().replace(/[\s-]+/g, "_");
+    const timestamp = new Date(event.event_time).getTime();
+    const isDuty = status === "driving" || status === "on_duty";
+    const wasResting = previousEvent && ["off_duty", "sleeper", "sleeper_berth"].includes(
+      previousEvent.event_type?.toLowerCase().replace(/[\s-]+/g, "_") || ""
+    );
+    if (isDuty && wasResting && previousEvent) {
+      const restMs = timestamp - new Date(previousEvent.event_time).getTime();
+      if (restMs >= 10 * 60 * 60 * 1000) shiftStartTimestamp = timestamp;
+    } else if (isDuty && shiftStartTimestamp === null) {
+      shiftStartTimestamp = timestamp;
+    }
+    previousEvent = event;
+  }
+
+  const latestStatusIsRest = ["off_duty", "sleeper", "sleeper_berth"].includes(latestStatusNormalized);
+  const currentRestMs = latestStatusIsRest && latestHosTimestamp !== null
+    ? Math.max(0, clockNow - latestHosTimestamp)
+    : 0;
+  if (currentRestMs >= 10 * 60 * 60 * 1000) shiftStartTimestamp = null;
+
+  const shiftElapsedMs = shiftStartTimestamp === null
+    ? 0
+    : Math.max(0, clockNow - shiftStartTimestamp);
+
+  const driveElapsedMs = shiftStartTimestamp === null ? 0 : hosEventsChronological.reduce((total, event, index) => {
+    const status = event.event_type?.toLowerCase().replace(/[\s-]+/g, "_");
+    if (status !== "driving" || new Date(event.event_time).getTime() < shiftStartTimestamp!) return total;
+    const nextEvent = hosEventsChronological[index + 1];
+    const end = nextEvent ? new Date(nextEvent.event_time).getTime() : clockNow;
+    return total + Math.max(0, end - new Date(event.event_time).getTime());
+  }, 0);
 
   const cycleDrivingMs = hosEventsChronological.reduce((total, event, index) => {
     if (event.event_type?.toLowerCase().replace(/[\s-]+/g, "_") !== "driving") {

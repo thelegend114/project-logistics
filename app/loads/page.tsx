@@ -74,6 +74,7 @@ type LoadStop = {
   stop_number: string;
   stop_order: number;
   stop_type: StopType;
+  customer_name: string;
   address: string;
   city: string;
   state: string;
@@ -171,6 +172,7 @@ function createEmptyStop(
     stop_number: `stop-${Date.now()}`,
     stop_order: stopOrder,
     stop_type: stopType,
+    customer_name: "",
     address: "",
     city: "",
     state: "",
@@ -542,7 +544,7 @@ async function loadData() {
 
     supabase
       .from("load_stops")
-      .select("id, load_id, stop_order, stop_type, address, city, state, zip_code, pickup_number, bol_number, latitude, longitude, scheduled_date, scheduled_time, status")
+      .select("id, load_id, stop_order, stop_type, customer_name, address, city, state, zip_code, pickup_number, bol_number, latitude, longitude, scheduled_date, scheduled_time, status")
       .order("stop_order", { ascending: true }),
 
     supabase
@@ -604,6 +606,7 @@ async function loadData() {
           stop_number: String(row.id),
           stop_order: Number(row.stop_order) || 0,
           stop_type: stopType === "delivery" ? "delivery" : "pickup",
+          customer_name: row.customer_name ?? "",
           address: row.address ?? "",
           city: row.city ?? "",
           state: row.state ?? "",
@@ -731,6 +734,7 @@ async function loadData() {
           ...(load.stops ?? []).flatMap((stop) => [
             stop.pickup_number,
             stop.bol_number,
+            stop.customer_name,
             stop.address,
             stop.city,
             stop.state,
@@ -822,7 +826,7 @@ async function loadData() {
 
     const { data: stopRows, error: stopError } = await supabase
       .from("load_stops")
-      .select("id, stop_order, stop_type, address, city, state, zip_code, pickup_number, bol_number, latitude, longitude, scheduled_date, scheduled_time, status")
+      .select("id, stop_order, stop_type, customer_name, address, city, state, zip_code, pickup_number, bol_number, latitude, longitude, scheduled_date, scheduled_time, status")
       .eq("load_id", load.id)
       .order("stop_order", { ascending: true });
 
@@ -858,6 +862,7 @@ async function loadData() {
       stop_number: String(stop.id),
       stop_order: Number(stop.stop_order),
       stop_type: stop.stop_type as StopType,
+      customer_name: stop.customer_name ?? "",
       address: stop.address ?? "",
       city: stop.city ?? "",
       state: stop.state ?? "",
@@ -1004,11 +1009,29 @@ for (const stop of stops) {
     });
 
     const result = await response.json();
+    const coordinateResult = result?.results?.[0] ?? result?.data ?? result;
+    const latitudeValue =
+      coordinateResult?.latitude ??
+      coordinateResult?.lat ??
+      coordinateResult?.geometry?.location?.lat;
+    const longitudeValue =
+      coordinateResult?.longitude ??
+      coordinateResult?.lon ??
+      coordinateResult?.lng ??
+      coordinateResult?.geometry?.location?.lng;
+    const latitude =
+      latitudeValue == null || latitudeValue === ""
+        ? Number.NaN
+        : Number(latitudeValue);
+    const longitude =
+      longitudeValue == null || longitudeValue === ""
+        ? Number.NaN
+        : Number(longitudeValue);
 
     if (
       !response.ok ||
-      !Number.isFinite(Number(result.latitude)) ||
-      !Number.isFinite(Number(result.longitude))
+      !Number.isFinite(latitude) ||
+      !Number.isFinite(longitude)
     ) {
       setErrorMessage(
         isES
@@ -1020,8 +1043,8 @@ for (const stop of stops) {
 
     geocodedStops.push({
       ...stop,
-      latitude: Number(result.latitude),
-      longitude: Number(result.longitude),
+      latitude,
+      longitude,
     });
   } catch (error) {
     console.error("GEOCODING STOP ERROR:", stop.stop_order, error);
@@ -1158,6 +1181,7 @@ for (let index = 0; index < orderedStops.length; index++) {
     load_id: editingLoadId,
     stop_order: index + 1,
     stop_type: stop.stop_type,
+    customer_name: stop.customer_name.trim() || null,
     address: stop.address.trim() || null,
     city: stop.city.trim(),
     state: stop.state.trim(),
@@ -1220,6 +1244,7 @@ const loadStops = orderedStopsForNewLoad.map((stop, index) => ({
   load_id: createdLoad.id,
   stop_order: index + 1,
   stop_type: stop.stop_type,
+  customer_name: stop.customer_name.trim() || null,
   address: stop.address.trim() || null,
   city: stop.city.trim(),
   state: stop.state.trim(),
@@ -2150,6 +2175,17 @@ async function releaseLoadToDispatch(load: Load) {
     const style =
       statusStyles[load.status ?? "available"] ??
       statusStyles.available;
+    const stopCustomers = Array.from(
+      new Set(
+        (load.stops ?? [])
+          .filter((stop) => String(stop.status ?? "pending").toLowerCase() !== "cancelled")
+          .map((stop) => stop.customer_name.trim())
+          .filter(Boolean)
+      )
+    );
+    const customerSummary = stopCustomers.length
+      ? stopCustomers.join(" · ")
+      : load.customer_name || text.noCustomer;
 
     const cellStyle = {
       ...tdStyle,
@@ -2198,7 +2234,7 @@ async function releaseLoadToDispatch(load: Load) {
           <div style={{ height: 1, background: "#e2e8f0", margin: "7px 0" }} />
           <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
             <span style={{ color: "#64748b", fontSize: 10, fontWeight: 800, textTransform: "uppercase" }}>{isES ? "Cliente" : "Customer"}</span>
-            <strong style={{ color: "#0f172a", overflowWrap: "anywhere" }}>{load.customer_name || text.noCustomer}</strong>
+            <strong style={{ color: "#0f172a", overflowWrap: "anywhere" }}>{customerSummary}</strong>
           </div>
         </td>
 
@@ -2211,7 +2247,8 @@ async function releaseLoadToDispatch(load: Load) {
               const cancelled = String(stop.status ?? "").trim().toLowerCase() === "cancelled";
               const address = [stop.address, stop.city, stop.state, stop.zip_code].filter(Boolean).join(", ");
               const dt = !cancelled ? [stop.scheduled_date, stop.scheduled_time].filter(Boolean).join(" ") : "";
-              return `${kind}${cancelled ? " — CANCELLED" : ""}: ${address}${dt ? ` — ${dt}` : ""}`;
+              const customer = stop.customer_name.trim();
+              return `${kind}${cancelled ? " — CANCELLED" : ""}${customer ? ` · ${customer}` : ""}: ${address}${dt ? ` — ${dt}` : ""}`;
             }).join("\n")}
             style={{ display: "flex", flexDirection: "column", gap: 7, maxWidth: 600, whiteSpace: "normal", fontSize: 11 }}
           >
@@ -2224,6 +2261,7 @@ async function releaseLoadToDispatch(load: Load) {
               const address = [stop.address, stop.city, stop.state, stop.zip_code].filter(Boolean).join(", ");
               const dateTime = !cancelled ? [stop.scheduled_date, stop.scheduled_time].filter(Boolean).join(" ") : "";
               const dateLabel = isPickup ? (isES ? "Fecha de recogida" : "Pickup date") : (isES ? "Fecha de entrega" : "Delivery date");
+              const customer = stop.customer_name.trim() || load.customer_name || "";
               return (
                 <div key={stop.stop_number} style={{ display: "grid", gridTemplateColumns: "112px minmax(0, 1fr)", columnGap: 10, alignItems: "start", minWidth: 0, padding: cancelled ? "6px 8px" : "3px 0", border: cancelled ? "1px solid #dc2626" : "1px solid transparent", borderRadius: cancelled ? 5 : 0, background: cancelled ? "#fee2e2" : "transparent", color: cancelled ? "#b91c1c" : "inherit" }}>
                   <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 4, minWidth: 0 }}>
@@ -2232,6 +2270,7 @@ async function releaseLoadToDispatch(load: Load) {
                     {cancelled && <strong style={{ color: "#b91c1c", fontSize: 9, lineHeight: 1.2 }}>⛔ {isES ? "CANCELADO" : "CANCELLED"}</strong>}
                   </div>
                   <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 3 }}>
+                    {customer && !cancelled && <span style={{ color: "#0f172a", fontSize: 10, fontWeight: 800 }}>{isES ? "Cliente" : "Customer"}: {customer}</span>}
                     <strong style={{ color: cancelled ? "#b91c1c" : "#334155", overflowWrap: "anywhere", textDecoration: cancelled ? "line-through" : "none", lineHeight: 1.35 }}>{address || "—"}</strong>
                     {!cancelled && dateTime && <span style={{ color: isPickup ? "#1d4ed8" : "#047857", fontSize: 10, fontWeight: 800 }}>{dateLabel}: {formatScheduledDate(stop.scheduled_date)}{stop.scheduled_time ? ` · ${stop.scheduled_time} ET` : ""}</span>}
                   </div>
@@ -2889,6 +2928,18 @@ async function releaseLoadToDispatch(load: Load) {
                                       }
                                     </button>
                                   )}
+                              </div>
+
+                              <div style={{ marginBottom: 12 }}>
+                                <Field label={isES ? "Cliente de esta parada" : "Customer for this stop"}>
+                                  <input
+                                    value={stop.customer_name}
+                                    onChange={(event) => updateStop(index, "customer_name", event.target.value)}
+                                    placeholder={isES ? "Nombre del cliente" : "Customer name"}
+                                    disabled={saving}
+                                    style={inputStyle}
+                                  />
+                                </Field>
                               </div>
 
                               {/* INDIVIDUAL STOP */}
@@ -3786,3 +3837,4 @@ const tdStyle: CSSProperties = {
   fontSize: 12,
   color: "#334155",
 };
+

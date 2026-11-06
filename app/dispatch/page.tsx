@@ -28,6 +28,7 @@ type LoadStop = {
   load_id: string;
   stop_order: number;
   stop_type: string;
+  customer_name: string | null;
   address: string | null;
   city: string | null;
   state: string | null;
@@ -461,7 +462,7 @@ export default function DispatchPage() {
           } = await supabase
             .from("load_stops")
             .select(
-              "id, load_id, stop_order, stop_type, address, city, state, zip_code, pickup_number, scheduled_date, scheduled_time, status"
+              "id, load_id, stop_order, stop_type, customer_name, address, city, state, zip_code, pickup_number, scheduled_date, scheduled_time, status"
             )
             .in("load_id", loadIds)
             .order("stop_order", {
@@ -1119,6 +1120,35 @@ function stopsForLoad(loadId: string) {
         maximumFractionDigits: 0,
       }
     );
+  }
+
+  // Fecha de cada parada (sin cambiar de día por zona horaria) y hora en ET.
+  function formatStopDate(
+    date: string | null,
+    time: string | null
+  ) {
+    if (!date) return "";
+
+    const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(date);
+    const parsed = match
+      ? new Date(
+          Number(match[1]),
+          Number(match[2]) - 1,
+          Number(match[3]),
+          12
+        )
+      : new Date(date);
+
+    const label = Number.isNaN(parsed.getTime())
+      ? date
+      : parsed.toLocaleDateString(
+          isES ? "es-US" : "en-US",
+          { month: "short", day: "numeric", year: "numeric" }
+        );
+
+    const hour = time ? time.slice(0, 5) : "";
+
+    return hour ? `${label} · ${hour} ET` : label;
   }
 
   function statusBackground(
@@ -1941,7 +1971,7 @@ function buildSequenceStops(
           </div>
 
           <div style={headerStyle}>Load</div>
-          <div style={headerStyle}>Customer</div>
+          <div style={headerStyle}>Customer / Date</div>
           <div style={headerStyle}>Route / Stops</div>
           <div style={headerStyle}>Pickup</div>
           <div style={headerStyle}>Delivery</div>
@@ -1975,52 +2005,6 @@ function buildSequenceStops(
           const pickupCount = pickupStops.length;
           const deliveryCount = deliveryStops.length;
           const isSelected = selectedSequenceLoadIds.includes(load.id);
-
-          const addressList = (
-            items: typeof routeStops,
-            color: string
-          ) => (
-            <div
-              style={{
-                display: "flex",
-                flexDirection: "column",
-                gap: 5,
-                minWidth: 0,
-              }}
-            >
-              {items.length > 0 ? (
-                items.map((stop) => (
-                  <div
-                    key={stop.id}
-                    title={[
-                      stop.address,
-                      stop.city,
-                      stop.state,
-                      stop.zip_code,
-                    ]
-                      .filter(Boolean)
-                      .join(", ")}
-                    style={{
-                      fontSize: 11,
-                      lineHeight: 1.35,
-                      fontWeight: 650,
-                      color,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                      minWidth: 0,
-                    }}
-                  >
-                    {stop.address || "—"}
-                  </div>
-                ))
-              ) : (
-                <span style={{ color: "#94a3b8", fontSize: 10 }}>
-                  —
-                </span>
-              )}
-            </div>
-          );
 
           return (
             <div
@@ -2071,155 +2055,244 @@ function buildSequenceStops(
                 </div>
               </div>
 
-              {/* CUSTOMER */}
-              <div style={{ padding: 9, minWidth: 0 }}>
-                <div
-                  title={load.customer_name || ""}
-                  style={{
-                    fontSize: 10,
-                    fontWeight: 700,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {load.customer_name || "—"}
-                </div>
-              </div>
-
-              {/* ROUTE: all stops in stop_order */}
-              <div
-                style={{
-                  padding: 8,
-                  minWidth: 0,
-                  boxSizing: "border-box",
-                }}
-              >
+              {/* CUSTOMER + FECHA / ROUTE / PICKUP / DELIVERY / BROKER.
+                  Una fila por parada: cada customer queda en la fila de su
+                  propia dirección, con su fecha y su broker. */}
+              <div style={{ gridColumn: "3 / 8", minWidth: 0 }}>
                 {routeStops.length > 0 ? (
+                  routeStops.map((stop, index) => {
+                    const isPickup =
+                      stop.stop_type.toLowerCase() === "pickup";
+
+                    const customerName =
+                      (stop.customer_name || "").trim() ||
+                      load.customer_name ||
+                      "—";
+
+                    const dateText = formatStopDate(
+                      stop.scheduled_date,
+                      stop.scheduled_time
+                    );
+
+                    const fullAddress = [
+                      stop.address,
+                      stop.city,
+                      stop.state,
+                      stop.zip_code,
+                    ]
+                      .filter(Boolean)
+                      .join(", ");
+
+                    const puLabel = stop.pickup_number
+                      ? String(stop.pickup_number)
+                          .toUpperCase()
+                          .startsWith("PU")
+                        ? String(stop.pickup_number)
+                        : `PU${stop.pickup_number}`
+                      : "—";
+
+                    return (
+                      <div
+                        key={stop.id}
+                        style={{
+                          display: "grid",
+                          gridTemplateColumns:
+                            "170px 220px 160px 160px 130px",
+                          borderTop:
+                            index > 0
+                              ? "1px solid #f1f5f9"
+                              : "none",
+                        }}
+                      >
+                        {/* CUSTOMER + fecha de esta parada */}
+                        <div style={{ padding: "6px 9px", minWidth: 0 }}>
+                          <div
+                            title={customerName}
+                            style={{
+                              fontSize: 11,
+                              fontWeight: 700,
+                              lineHeight: 1.35,
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            {customerName}
+                          </div>
+
+                          {dateText && (
+                            <div
+                              title={dateText}
+                              style={{
+                                marginTop: 2,
+                                fontSize: 10,
+                                fontWeight: 700,
+                                lineHeight: 1.35,
+                                color: isPickup ? "#15803d" : "#1d4ed8",
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              📅 {dateText}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* ROUTE */}
+                        <div style={{ padding: "6px 8px", minWidth: 0 }}>
+                          <div
+                            title={fullAddress}
+                            style={{
+                              fontSize: 11,
+                              lineHeight: 1.35,
+                              fontWeight: 650,
+                              color: "#334155",
+                              whiteSpace: "nowrap",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              minWidth: 0,
+                            }}
+                          >
+                            {index + 1}. {isPickup ? "Pickup: " : "Delivery: "}
+                            {stop.address || "—"}
+                          </div>
+                        </div>
+
+                        {/* PICKUP */}
+                        <div
+                          style={{
+                            padding: "6px",
+                            minWidth: 0,
+                            background: "#f0fdf4",
+                            borderLeft: "1px solid #dcfce7",
+                          }}
+                        >
+                          {isPickup && (
+                            <div
+                              title={puLabel}
+                              style={{
+                                fontSize: 11,
+                                lineHeight: 1.35,
+                                fontWeight: 700,
+                                color: "#15803d",
+                                whiteSpace: "nowrap",
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                              }}
+                            >
+                              {puLabel}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* DELIVERY */}
+                        <div
+                          style={{
+                            padding: "6px",
+                            minWidth: 0,
+                            background: "#eff6ff",
+                            borderLeft: "1px solid #dbeafe",
+                          }}
+                        >
+                          {!isPickup && (
+                            <div
+                              title={fullAddress}
+                              style={{
+                                fontSize: 11,
+                                lineHeight: 1.35,
+                                fontWeight: 650,
+                                color: "#1d4ed8",
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {stop.address || "—"}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* BROKER (repetido en cada parada) */}
+                        <div style={{ padding: "6px 9px", minWidth: 0 }}>
+                          <div
+                            title={load.broker_name || ""}
+                            style={{
+                              fontSize: 11,
+                              fontWeight: 700,
+                              lineHeight: 1.35,
+                              whiteSpace: "nowrap",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                            }}
+                          >
+                            {load.broker_name || text.noBroker}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })
+                ) : (
                   <div
                     style={{
-                      display: "flex",
-                      flexDirection: "column",
-                      gap: 5,
-                      minWidth: 0,
+                      display: "grid",
+                      gridTemplateColumns:
+                        "170px 220px 160px 160px 130px",
                     }}
                   >
-                    {routeStops.map((stop, index) => (
+                    <div style={{ padding: "6px 9px", minWidth: 0 }}>
                       <div
-                        key={stop.id}
-                        title={[
-                          stop.address,
-                          stop.city,
-                          stop.state,
-                          stop.zip_code,
-                        ]
-                          .filter(Boolean)
-                          .join(", ")}
                         style={{
                           fontSize: 11,
-                          lineHeight: 1.35,
-                          fontWeight: 650,
-                          color: "#334155",
-                          whiteSpace: "nowrap",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          minWidth: 0,
-                        }}
-                      >
-                        {index + 1}.{" "}
-                        {stop.stop_type.toLowerCase() === "pickup"
-                          ? "Pickup: "
-                          : "Delivery: "}
-                        {stop.address || "—"}
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <span style={{ fontSize: 10, color: "#64748b" }}>
-                    {text.noStops}
-                  </span>
-                )}
-              </div>
-
-              {/* PICKUP */}
-              <div
-                style={{
-                  padding: 6,
-                  minWidth: 0,
-                  background: "#f0fdf4",
-                  borderLeft: "1px solid #dcfce7",
-                }}
-              >
-                <div
-                  style={{
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: 8,
-                    minWidth: 0,
-                  }}
-                >
-                  {pickupStops.length > 0 ? (
-                    pickupStops.map((stop) => (
-                      <div
-                        key={stop.id}
-                        title={
-                          stop.pickup_number
-                            ? `PU${stop.pickup_number}`
-                            : "Pickup"
-                        }
-                        style={{
-                          fontSize: 10,
-                          lineHeight: 1.8,
                           fontWeight: 700,
-                          color: "#15803d",
+                          lineHeight: 1.35,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {load.customer_name || "—"}
+                      </div>
+                    </div>
+
+                    <div style={{ padding: "6px 8px", minWidth: 0 }}>
+                      <span style={{ fontSize: 10, color: "#64748b" }}>
+                        {text.noStops}
+                      </span>
+                    </div>
+
+                    <div
+                      style={{
+                        padding: 6,
+                        background: "#f0fdf4",
+                        borderLeft: "1px solid #dcfce7",
+                      }}
+                    />
+
+                    <div
+                      style={{
+                        padding: 6,
+                        background: "#eff6ff",
+                        borderLeft: "1px solid #dbeafe",
+                      }}
+                    />
+
+                    <div style={{ padding: "6px 9px", minWidth: 0 }}>
+                      <div
+                        style={{
+                          fontSize: 11,
+                          fontWeight: 700,
+                          lineHeight: 1.35,
                           whiteSpace: "nowrap",
                           overflow: "hidden",
                           textOverflow: "ellipsis",
                         }}
                       >
-                        {stop.pickup_number
-                          ? String(stop.pickup_number)
-                              .toUpperCase()
-                              .startsWith("PU")
-                            ? stop.pickup_number
-                            : `PU${stop.pickup_number}`
-                          : "—"}
+                        {load.broker_name || text.noBroker}
                       </div>
-                    ))
-                  ) : (
-                    <span style={{ color: "#94a3b8", fontSize: 10 }}>
-                      —
-                    </span>
-                  )}
-                </div>
-              </div>
-
-              {/* DELIVERY */}
-              <div
-                style={{
-                  padding: 6,
-                  minWidth: 0,
-                  background: "#eff6ff",
-                  borderLeft: "1px solid #dbeafe",
-                }}
-              >
-                {addressList(deliveryStops, "#1d4ed8")}
-              </div>
-
-              {/* BROKER */}
-              <div style={{ padding: 9, minWidth: 0 }}>
-                <div
-                  title={load.broker_name || ""}
-                  style={{
-                    fontSize: 11,
-                    fontWeight: 700,
-                    whiteSpace: "nowrap",
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                  }}
-                >
-                  {load.broker_name || text.noBroker}
-                </div>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* DRIVER */}

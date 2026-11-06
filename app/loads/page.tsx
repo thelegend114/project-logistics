@@ -186,14 +186,6 @@ function createEmptyStop(
   };
 }
 
-/**
- * Convierte una fecha/hora escrita como hora local de Eastern Time
- * a ISO UTC respetando EST/EDT.
- *
- * Ejemplo:
- * 2026-10-10 + 09:30
- * se interpreta como 9:30 AM America/New_York.
- */
 function easternDateTimeToISO(
   date: string,
   time: string
@@ -425,38 +417,35 @@ export default function LoadsPage() {
       : "Loads created from Operations and Loads use the same load record.",
   };
 
- 
-
-const STATUS_OPTIONS = [
-  {
-    value: "pending_review",
-    label: isES ? "Pendiente de revisión" : "Pending Review",
-    description: isES
-      ? "Pendiente de validar y liberar a Dispatch."
-      : "Awaiting validation and release to Dispatch.",
-  },
-  {
-    value: "available",
-    label: text.availableLabel,
-    description: text.availableDescription,
-  },
-  {
-    value: "assigned",
-    label: text.assignedLabel,
-    description: text.assignedDescription,
-  },
-  {
-    value: "in_transit",
-    label: text.inTransitLabel,
-    description: text.inTransitDescription,
-  },
-  {
-    value: "delivered",
-    label: text.deliveredLabel,
-    description: text.deliveredDescription,
-  },
-];
-
+  const STATUS_OPTIONS = [
+    {
+      value: "pending_review",
+      label: isES ? "Pendiente de revisión" : "Pending Review",
+      description: isES
+        ? "Pendiente de validar y liberar a Dispatch."
+        : "Awaiting validation and release to Dispatch.",
+    },
+    {
+      value: "available",
+      label: text.availableLabel,
+      description: text.availableDescription,
+    },
+    {
+      value: "assigned",
+      label: text.assignedLabel,
+      description: text.assignedDescription,
+    },
+    {
+      value: "in_transit",
+      label: text.inTransitLabel,
+      description: text.inTransitDescription,
+    },
+    {
+      value: "delivered",
+      label: text.deliveredLabel,
+      description: text.deliveredDescription,
+    },
+  ];
 
   const [loads, setLoads] = useState<Load[]>([]);
   const [companies, setCompanies] = useState<Company[]>([]);
@@ -475,8 +464,7 @@ const STATUS_OPTIONS = [
   const [message, setMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
 
-  const [openStatusMenu, setOpenStatusMenu] =
-    useState<string | null>(null);
+  const [openStatusMenu, setOpenStatusMenu] = useState<string | null>(null);
 
   const [statusMenuPosition, setStatusMenuPosition] = useState({
     top: 0,
@@ -503,157 +491,155 @@ const STATUS_OPTIONS = [
     createEmptyStop(2, "delivery"),
   ]);
 
-  
-async function loadData() {
-  setLoading(true);
-  setErrorMessage("");
+  async function loadData() {
+    setLoading(true);
+    setErrorMessage("");
 
-  const [
-    loadsResult,
-    stopsResult,
-    companiesResult,
-    driversResult,
-    trucksResult,
-    trailersResult,
-  ] = await Promise.all([
-    supabase
-      .from("loads")
-      .select(`
-        id,
-        company_id,
-        load_number,
-        broker_name,
-        customer_name,
-        origin_city,
-        origin_state,
-        pickup_address,
-        destination_city,
-        destination_state,
-        delivery_address,
-        pickup_date,
-        delivery_date,
-        miles,
-        rate,
-        status,
-        driver_id,
-        truck_id,
-        trailer_id,
-        created_at
-      `)
-      .order("created_at", { ascending: false }),
+    const [
+      loadsResult,
+      stopsResult,
+      companiesResult,
+      driversResult,
+      trucksResult,
+      trailersResult,
+    ] = await Promise.all([
+      supabase
+        .from("loads")
+        .select(`
+          id,
+          company_id,
+          load_number,
+          broker_name,
+          customer_name,
+          origin_city,
+          origin_state,
+          pickup_address,
+          destination_city,
+          destination_state,
+          delivery_address,
+          pickup_date,
+          delivery_date,
+          miles,
+          rate,
+          status,
+          driver_id,
+          truck_id,
+          trailer_id,
+          created_at
+        `)
+        .order("created_at", { ascending: false }),
 
-    supabase
-      .from("load_stops")
-      .select("id, load_id, stop_order, stop_type, customer_name, address, city, state, zip_code, pickup_number, bol_number, latitude, longitude, scheduled_date, scheduled_time, status")
-      .order("stop_order", { ascending: true }),
+      supabase
+        .from("load_stops")
+        .select("id, load_id, stop_order, stop_type, customer_name, address, city, state, zip_code, pickup_number, bol_number, latitude, longitude, scheduled_date, scheduled_time, status")
+        .order("stop_order", { ascending: true }),
 
-    supabase
-      .from("companies")
-      .select("id, name")
-      .order("name"),
+      supabase
+        .from("companies")
+        .select("id, name")
+        .order("name"),
 
-    supabase
-      .from("drivers")
-      .select("id, full_name, driver_number")
-      .order("full_name"),
+      supabase
+        .from("drivers")
+        .select("id, full_name, driver_number")
+        .order("full_name"),
 
-    supabase
-      .from("trucks")
-      .select("id, unit_number, make, model")
-      .order("unit_number"),
+      supabase
+        .from("trucks")
+        .select("id, unit_number, make, model")
+        .order("unit_number"),
 
-    supabase
-      .from("trailers")
-      .select(
-        "id, company_id, unit_number, year, make, model, trailer_type, status"
-      )
-      .order("unit_number"),
-  ]);
+      supabase
+        .from("trailers")
+        .select(
+          "id, company_id, unit_number, year, make, model, trailer_type, status"
+        )
+        .order("unit_number"),
+    ]);
 
-  if (loadsResult.error) {
-    setErrorMessage(loadsResult.error.message);
-    setLoads([]);
-  } else if (stopsResult.error) {
-    setErrorMessage(stopsResult.error.message);
-    setLoads((loadsResult.data ?? []) as Load[]);
-  } else {
-    const stopCounts = new Map<
-      string,
-      { pickups: number; deliveries: number }
-    >();
-    const stopsByLoad = new Map<string, LoadStop[]>();
+    if (loadsResult.error) {
+      setErrorMessage(loadsResult.error.message);
+      setLoads([]);
+    } else if (stopsResult.error) {
+      setErrorMessage(stopsResult.error.message);
+      setLoads((loadsResult.data ?? []) as Load[]);
+    } else {
+      const stopCounts = new Map<
+        string,
+        { pickups: number; deliveries: number }
+      >();
+      const stopsByLoad = new Map<string, LoadStop[]>();
 
-    for (const load of loadsResult.data ?? []) {
-      stopCounts.set(load.id, { pickups: 0, deliveries: 0 });
-      stopsByLoad.set(load.id, []);
-    }
-
-    for (const row of stopsResult.data ?? []) {
-      const counts = stopCounts.get(row.load_id);
-      if (!counts) continue;
-
-      const stopType = String(row.stop_type ?? "").trim().toLowerCase();
-      const stopStatus = String(row.status ?? "pending").trim().toLowerCase();
-      const isCancelled = stopStatus === "cancelled";
-      if (!isCancelled) {
-        if (stopType === "pickup") counts.pickups += 1;
-        else if (stopType === "delivery") counts.deliveries += 1;
+      for (const load of loadsResult.data ?? []) {
+        stopCounts.set(load.id, { pickups: 0, deliveries: 0 });
+        stopsByLoad.set(load.id, []);
       }
 
-      const loadStops = stopsByLoad.get(row.load_id);
-      if (loadStops) {
-        loadStops.push({
-          stop_number: String(row.id),
-          stop_order: Number(row.stop_order) || 0,
-          stop_type: stopType === "delivery" ? "delivery" : "pickup",
-          customer_name: row.customer_name ?? "",
-          address: row.address ?? "",
-          city: row.city ?? "",
-          state: row.state ?? "",
-          zip_code: row.zip_code ?? "",
-          pickup_number: row.pickup_number ?? "",
-          bol_number: row.bol_number ?? "",
-          latitude: row.latitude == null ? null : Number(row.latitude),
-          longitude: row.longitude == null ? null : Number(row.longitude),
-          scheduled_date: row.scheduled_date ?? "",
-          scheduled_time: row.scheduled_time ?? "",
-          status: row.status ?? "pending",
-        });
+      for (const row of stopsResult.data ?? []) {
+        const counts = stopCounts.get(row.load_id);
+        if (!counts) continue;
+
+        const stopType = String(row.stop_type ?? "").trim().toLowerCase();
+        const stopStatus = String(row.status ?? "pending").trim().toLowerCase();
+        const isCancelled = stopStatus === "cancelled";
+        if (!isCancelled) {
+          if (stopType === "pickup") counts.pickups += 1;
+          else if (stopType === "delivery") counts.deliveries += 1;
+        }
+
+        const loadStops = stopsByLoad.get(row.load_id);
+        if (loadStops) {
+          loadStops.push({
+            stop_number: String(row.id),
+            stop_order: Number(row.stop_order) || 0,
+            stop_type: stopType === "delivery" ? "delivery" : "pickup",
+            customer_name: row.customer_name ?? "",
+            address: row.address ?? "",
+            city: row.city ?? "",
+            state: row.state ?? "",
+            zip_code: row.zip_code ?? "",
+            pickup_number: row.pickup_number ?? "",
+            bol_number: row.bol_number ?? "",
+            latitude: row.latitude == null ? null : Number(row.latitude),
+            longitude: row.longitude == null ? null : Number(row.longitude),
+            scheduled_date: row.scheduled_date ?? "",
+            scheduled_time: row.scheduled_time ?? "",
+            status: row.status ?? "pending",
+          });
+        }
       }
+
+      setLoads(
+        (loadsResult.data ?? []).map((load) => {
+          const counts = stopCounts.get(load.id);
+          return {
+            ...load,
+            pickup_count: counts?.pickups ?? 0,
+            delivery_count: counts?.deliveries ?? 0,
+            stops: sortStopsByOperationalSequence(stopsByLoad.get(load.id) ?? []),
+          };
+        }) as Load[]
+      );
     }
 
-    setLoads(
-      (loadsResult.data ?? []).map((load) => {
-        const counts = stopCounts.get(load.id);
-        return {
-          ...load,
-          pickup_count: counts?.pickups ?? 0,
-          delivery_count: counts?.deliveries ?? 0,
-          stops: sortStopsByOperationalSequence(stopsByLoad.get(load.id) ?? []),
-        };
-      }) as Load[]
-    );
+    if (!companiesResult.error) {
+      setCompanies((companiesResult.data ?? []) as Company[]);
+    }
+
+    if (!driversResult.error) {
+      setDrivers((driversResult.data ?? []) as Driver[]);
+    }
+
+    if (!trucksResult.error) {
+      setTrucks((trucksResult.data ?? []) as Truck[]);
+    }
+
+    if (!trailersResult.error) {
+      setTrailers((trailersResult.data ?? []) as Trailer[]);
+    }
+
+    setLoading(false);
   }
-
-  if (!companiesResult.error) {
-    setCompanies((companiesResult.data ?? []) as Company[]);
-  }
-
-  if (!driversResult.error) {
-    setDrivers((driversResult.data ?? []) as Driver[]);
-  }
-
-  if (!trucksResult.error) {
-    setTrucks((trucksResult.data ?? []) as Truck[]);
-  }
-
-  if (!trailersResult.error) {
-    setTrailers((trailersResult.data ?? []) as Trailer[]);
-  }
-
-  setLoading(false);
-}
-
 
   useEffect(() => {
     loadData();
@@ -903,13 +889,12 @@ async function loadData() {
     );
   }
 
-  
-   function addStop(stopType: StopType) {
-  setStops((current) => [
-    ...current,
-    createEmptyStop(current.length + 1, stopType),
-  ]);
-}
+  function addStop(stopType: StopType) {
+    setStops((current) => [
+      ...current,
+      createEmptyStop(current.length + 1, stopType),
+    ]);
+  }
 
   function removeStop(index: number) {
     setStops((current) => {
@@ -980,129 +965,105 @@ async function loadData() {
         lastStop.scheduled_time
       );
 
-   const geocodedStops: LoadStop[] = [];
+      const geocodedStops: LoadStop[] = [];
 
-for (const stop of stops) {
-  const address = stop.address.trim();
-  const city = stop.city.trim();
-  const state = stop.state.trim();
+      for (const stop of stops) {
+        const address = stop.address.trim();
+        const city = stop.city.trim();
+        const state = stop.state.trim();
 
-  if (!address || !city || !state) {
-    setErrorMessage(
-      isES
-        ? `Falta la dirección de la parada ${stop.stop_order}.`
-        : `Address information is missing for stop ${stop.stop_order}.`
-    );
-    return;
-  }
+        if (!address || !city || !state) {
+          setErrorMessage(
+            isES
+              ? `Falta la dirección de la parada ${stop.stop_order}.`
+              : `Address information is missing for stop ${stop.stop_order}.`
+          );
+          return;
+        }
 
-  try {
-    const response = await fetch("/api/geocode", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        address,
-        city,
-        state,
-        zip_code: stop.zip_code?.trim() || "",
-      }),
-    });
+        try {
+          const response = await fetch("/api/geocode", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              address,
+              city,
+              state,
+              zip_code: stop.zip_code?.trim() || "",
+            }),
+          });
 
-    const result = await response.json();
-    const coordinateResult = result?.results?.[0] ?? result?.data ?? result;
-    const latitudeValue =
-      coordinateResult?.latitude ??
-      coordinateResult?.lat ??
-      coordinateResult?.geometry?.location?.lat;
-    const longitudeValue =
-      coordinateResult?.longitude ??
-      coordinateResult?.lon ??
-      coordinateResult?.lng ??
-      coordinateResult?.geometry?.location?.lng;
-    const latitude =
-      latitudeValue == null || latitudeValue === ""
-        ? Number.NaN
-        : Number(latitudeValue);
-    const longitude =
-      longitudeValue == null || longitudeValue === ""
-        ? Number.NaN
-        : Number(longitudeValue);
+          const result = await response.json();
+          const coordinateResult = result?.results?.[0] ?? result?.data ?? result;
+          const latitudeValue =
+            coordinateResult?.latitude ??
+            coordinateResult?.lat ??
+            coordinateResult?.geometry?.location?.lat;
+          const longitudeValue =
+            coordinateResult?.longitude ??
+            coordinateResult?.lon ??
+            coordinateResult?.lng ??
+            coordinateResult?.geometry?.location?.lng;
+          const latitude =
+            latitudeValue == null || latitudeValue === ""
+              ? Number.NaN
+              : Number(latitudeValue);
+          const longitude =
+            longitudeValue == null || longitudeValue === ""
+              ? Number.NaN
+              : Number(longitudeValue);
 
-    if (
-      !response.ok ||
-      !Number.isFinite(latitude) ||
-      !Number.isFinite(longitude)
-    ) {
-      setErrorMessage(
-        isES
-          ? `No se pudo localizar la parada ${stop.stop_order}: ${address}, ${city}, ${state}.`
-          : `Could not locate stop ${stop.stop_order}: ${address}, ${city}, ${state}.`
-      );
-      return;
-    }
+          if (
+            !response.ok ||
+            !Number.isFinite(latitude) ||
+            !Number.isFinite(longitude)
+          ) {
+            setErrorMessage(
+              isES
+                ? `No se pudo localizar la parada ${stop.stop_order}: ${address}, ${city}, ${state}.`
+                : `Could not locate stop ${stop.stop_order}: ${address}, ${city}, ${state}.`
+            );
+            return;
+          }
 
-    geocodedStops.push({
-      ...stop,
-      latitude,
-      longitude,
-    });
-  } catch (error) {
-    console.error("GEOCODING STOP ERROR:", stop.stop_order, error);
-    setErrorMessage(
-      isES
-        ? `No se pudo localizar la parada ${stop.stop_order}.`
-        : `Could not locate stop ${stop.stop_order}.`
-    );
-    return;
-  }
-}
+          geocodedStops.push({
+            ...stop,
+            latitude,
+            longitude,
+          });
+        } catch (error) {
+          console.error("GEOCODING STOP ERROR:", stop.stop_order, error);
+          setErrorMessage(
+            isES
+              ? `No se pudo localizar la parada ${stop.stop_order}.`
+              : `Could not locate stop ${stop.stop_order}.`
+          );
+          return;
+        }
+      }
 
       const loadPayload = {
-            company_id: form.company_id,
-            load_number: form.load_number.trim(),
-            broker_name:
-              form.broker_name.trim() || null,
-            customer_name:
-              form.customer_name.trim() || null,
-
-            pickup_address:
-              firstStop.address.trim() || null,
-
-            origin_city:
-              firstStop.city.trim(),
-
-            origin_state:
-              firstStop.state.trim(),
-
-            delivery_address:
-              lastStop.address.trim() || null,
-
-            destination_city:
-              lastStop.city.trim(),
-
-            destination_state:
-              lastStop.state.trim(),
-
-            pickup_date: pickupDateTime,
-            delivery_date: deliveryDateTime,
-
-            miles: form.miles
-              ? Number(form.miles)
-              : null,
-
-            rate: form.rate
-              ? Number(form.rate)
-              : null,
-
-            status: editingLoadId ? form.status : "pending_review",
-            driver_id: form.driver_id || null,
-            truck_id: form.truck_id || null,
-            trailer_id: form.trailer_id || null,
+        company_id: form.company_id,
+        load_number: form.load_number.trim(),
+        broker_name: form.broker_name.trim() || null,
+        customer_name: form.customer_name.trim() || null,
+        pickup_address: firstStop.address.trim() || null,
+        origin_city: firstStop.city.trim(),
+        origin_state: firstStop.state.trim(),
+        delivery_address: lastStop.address.trim() || null,
+        destination_city: lastStop.city.trim(),
+        destination_state: lastStop.state.trim(),
+        pickup_date: pickupDateTime,
+        delivery_date: deliveryDateTime,
+        miles: form.miles ? Number(form.miles) : null,
+        rate: form.rate ? Number(form.rate) : null,
+        status: editingLoadId ? form.status : "pending_review",
+        driver_id: form.driver_id || null,
+        truck_id: form.truck_id || null,
+        trailer_id: form.trailer_id || null,
       };
 
       if (editingLoadId) {
-        // Validate the latest stop state BEFORE changing the parent load.
-        // This prevents a stale edit form from updating a load whose stops are no longer pending.
         const { data: currentRows, error: currentRowsError } =
           await supabase
             .from("load_stops")
@@ -1118,9 +1079,6 @@ for (const stop of stops) {
           throw new Error(text.editBlocked);
         }
 
-        // Reserve a unique temporary order for EVERY existing row before deleting,
-        // renumbering, or inserting stops. This avoids transient collisions with
-        // load_stops_load_order_unique while the final sequence is being applied.
         const existingRows = currentRows ?? [];
         const maxStopOrder = Math.max(
           0,
@@ -1157,8 +1115,6 @@ for (const stop of stops) {
           .map((row: any) => row.id);
 
         if (removedIds.length) {
-          // Preserve removed stops as a durable cancellation record for shift handoffs.
-          // Their unique temporary stop_order keeps them out of the active sequence.
           const { error: cancelError } = await supabase
             .from("load_stops")
             .update({ status: "cancelled" })
@@ -1174,31 +1130,31 @@ for (const stop of stops) {
 
         const orderedStops = sortStopsByOperationalSequence(geocodedStops);
 
-for (let index = 0; index < orderedStops.length; index++) {
-  const stop = orderedStops[index];
+        for (let index = 0; index < orderedStops.length; index++) {
+          const stop = orderedStops[index];
 
-  const payload = {
-    load_id: editingLoadId,
-    stop_order: index + 1,
-    stop_type: stop.stop_type,
-    customer_name: stop.customer_name.trim() || null,
-    address: stop.address.trim() || null,
-    city: stop.city.trim(),
-    state: stop.state.trim(),
-    zip_code: stop.zip_code.trim() || null,
-    pickup_number:
-      stop.stop_type.trim().toLowerCase() === "pickup"
-        ? stop.pickup_number.trim() || null
-        : null,
-    bol_number:
-      stop.stop_type.trim().toLowerCase() === "pickup"
-        ? stop.bol_number.trim() || null
-        : null,
-    latitude: stop.latitude,
-    longitude: stop.longitude,
-    scheduled_date: stop.scheduled_date || null,
-    scheduled_time: stop.scheduled_time || null,
-  };
+          const payload = {
+            load_id: editingLoadId,
+            stop_order: index + 1,
+            stop_type: stop.stop_type,
+            customer_name: stop.customer_name.trim() || null,
+            address: stop.address.trim() || null,
+            city: stop.city.trim(),
+            state: stop.state.trim(),
+            zip_code: stop.zip_code.trim() || null,
+            pickup_number:
+              stop.stop_type.trim().toLowerCase() === "pickup"
+                ? stop.pickup_number.trim() || null
+                : null,
+            bol_number:
+              stop.stop_type.trim().toLowerCase() === "pickup"
+                ? stop.bol_number.trim() || null
+                : null,
+            latitude: stop.latitude,
+            longitude: stop.longitude,
+            scheduled_date: stop.scheduled_date || null,
+            scheduled_time: stop.scheduled_time || null,
+          };
           if (stop.stop_number && !stop.stop_number.startsWith("stop-")) {
             const { error: stopUpdateError } = await supabase.from("load_stops").update(payload).eq("id", stop.stop_number).eq("load_id", editingLoadId);
             if (stopUpdateError) throw new Error(stopUpdateError.message);
@@ -1208,84 +1164,76 @@ for (let index = 0; index < orderedStops.length; index++) {
           }
         }
 
-        // Update the parent record only after all stop changes have been saved.
         const { error: updateError } = await supabase
           .from("loads")
           .update(loadPayload)
           .eq("id", editingLoadId);
         if (updateError) throw new Error(updateError.message);
       } else {
-      
-const { data: createdLoad, error: createError } = await supabase
-  .from("loads")
-  .insert(loadPayload)
-  .select("id, load_number, status")
-  .single();
+        const { data: createdLoad, error: createError } = await supabase
+          .from("loads")
+          .insert(loadPayload)
+          .select("id, load_number, status")
+          .single();
 
-console.log("[LOAD CREATE RESULT]", {
-  requestedStatus: loadPayload.status,
-  savedId: createdLoad?.id,
-  savedLoadNumber: createdLoad?.load_number,
-  savedStatus: createdLoad?.status,
-  createError: createError?.message ?? null,
-});
-if (createError || !createdLoad) {
- setErrorMessage(
-  createError?.message ??
-    (isES ? "No se pudo crear la carga." : "Failed to create load.")
-);
-  setSaving(false);
-  return;
-}
+        if (createError || !createdLoad) {
+          setErrorMessage(
+            createError?.message ??
+              (isES ? "No se pudo crear la carga." : "Failed to create load.")
+          );
+          setSaving(false);
+          return;
+        }
 
-const orderedStopsForNewLoad = sortStopsByOperationalSequence(geocodedStops);
+        const orderedStopsForNewLoad = sortStopsByOperationalSequence(geocodedStops);
 
-const loadStops = orderedStopsForNewLoad.map((stop, index) => ({
-  load_id: createdLoad.id,
-  stop_order: index + 1,
-  stop_type: stop.stop_type,
-  customer_name: stop.customer_name.trim() || null,
-  address: stop.address.trim() || null,
-  city: stop.city.trim(),
-  state: stop.state.trim(),
-  zip_code: stop.zip_code.trim() || null,
-  pickup_number:
-    stop.stop_type.trim().toLowerCase() === "pickup"
-      ? stop.pickup_number.trim() || null
-      : null,
-  bol_number:
-    stop.stop_type.trim().toLowerCase() === "pickup"
-      ? stop.bol_number.trim() || null
-      : null,
-  latitude: stop.latitude,
-  longitude: stop.longitude,
-  scheduled_date: stop.scheduled_date || null,
-  scheduled_time: stop.scheduled_time || null,
-  status: "pending",
-}));
+        const loadStops = orderedStopsForNewLoad.map((stop, index) => ({
+          load_id: createdLoad.id,
+          stop_order: index + 1,
+          stop_type: stop.stop_type,
+          customer_name: stop.customer_name.trim() || null,
+          address: stop.address.trim() || null,
+          city: stop.city.trim(),
+          state: stop.state.trim(),
+          zip_code: stop.zip_code.trim() || null,
+          pickup_number:
+            stop.stop_type.trim().toLowerCase() === "pickup"
+              ? stop.pickup_number.trim() || null
+              : null,
+          bol_number:
+            stop.stop_type.trim().toLowerCase() === "pickup"
+              ? stop.bol_number.trim() || null
+              : null,
+          latitude: stop.latitude,
+          longitude: stop.longitude,
+          scheduled_date: stop.scheduled_date || null,
+          scheduled_time: stop.scheduled_time || null,
+          status: "pending",
+        }));
 
         const {
-  data: insertedStops,
-  error: stopsError,
-} = await supabase
-  .from("load_stops")
-  .insert(loadStops)
-  .select("id, load_id, stop_order, stop_type");
+          data: insertedStops,
+          error: stopsError,
+        } = await supabase
+          .from("load_stops")
+          .insert(loadStops)
+          .select("id, load_id, stop_order, stop_type");
 
-if (
-  stopsError ||
-  !insertedStops ||
-  insertedStops.length !== loadStops.length
-) {
-  await supabase
-    .from("loads")
-    .delete()
-    .eq("id", createdLoad.id);
+        if (
+          stopsError ||
+          !insertedStops ||
+          insertedStops.length !== loadStops.length
+        ) {
+          await supabase
+            .from("loads")
+            .delete()
+            .eq("id", createdLoad.id);
 
-  throw new Error(
-    stopsError?.message ?? "The load stops could not be saved."
-  );
-}      }
+          throw new Error(
+            stopsError?.message ?? "The load stops could not be saved."
+          );
+        }
+      }
 
       setMessage(
         isES
@@ -1293,7 +1241,7 @@ if (
           : "Load saved successfully."
       );
 
-     setShowForm(false);
+      setShowForm(false);
       setEditingLoadId(null);
       await loadData();
     } catch (error) {
@@ -1311,220 +1259,210 @@ if (
     }
   }
 
+  async function cancelLoadFromLoads(load: Load) {
+    setMessage("");
+    setErrorMessage("");
+    setOpenStatusMenu(null);
 
+    const currentStatus = String(load.status ?? "").toLowerCase();
+    if (currentStatus === "cancelled") {
+      setErrorMessage(isES ? "Esta carga ya está cancelada." : "This load is already cancelled.");
+      return;
+    }
+    if (currentStatus === "delivered") {
+      setErrorMessage(isES ? "Una carga entregada no se puede cancelar." : "A delivered load cannot be cancelled.");
+      return;
+    }
 
-async function cancelLoadFromLoads(load: Load) {
-  setMessage("");
-  setErrorMessage("");
-  setOpenStatusMenu(null);
+    const confirmed = window.confirm(
+      isES
+        ? `¿Cancelar la carga ${load.load_number}? Se conservará en LOADS como historial y saldrá de DISPATCH.`
+        : `Cancel load ${load.load_number}? It will remain in LOADS as history and be removed from DISPATCH.`
+    );
+    if (!confirmed) return;
 
-  const currentStatus = String(load.status ?? "").toLowerCase();
-  if (currentStatus === "cancelled") {
-    setErrorMessage(isES ? "Esta carga ya está cancelada." : "This load is already cancelled.");
-    return;
+    setSaving(true);
+    try {
+      const { data: updatedLoad, error: loadCancelError } = await supabase
+        .from("loads")
+        .update({ status: "cancelled" })
+        .eq("id", load.id)
+        .neq("status", "delivered")
+        .neq("status", "cancelled")
+        .select("id, status")
+        .maybeSingle();
+
+      if (loadCancelError) throw new Error(loadCancelError.message);
+      if (!updatedLoad) {
+        throw new Error(isES ? "La carga cambió de estado. Actualiza LOADS e inténtalo de nuevo." : "The load status changed. Refresh LOADS and try again.");
+      }
+
+      const { error: stopsCancelError } = await supabase
+        .from("load_stops")
+        .update({ status: "cancelled" })
+        .eq("load_id", load.id)
+        .in("status", ["pending", "in_progress"]);
+
+      await loadData();
+
+      if (stopsCancelError) {
+        throw new Error(
+          (isES ? "La carga quedó cancelada y fuera de DISPATCH, pero no se pudieron cancelar todas las paradas pendientes: " : "The load is cancelled and removed from DISPATCH, but some pending stops could not be cancelled: ") + stopsCancelError.message
+        );
+      }
+
+      setMessage(isES ? `La carga ${load.load_number} fue cancelada. Su historial y documentos se conservaron.` : `Load ${load.load_number} was cancelled. Its history and documents were preserved.`);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : (isES ? "No se pudo cancelar la carga." : "Could not cancel the load."));
+      await loadData();
+    } finally {
+      setSaving(false);
+    }
   }
-  if (currentStatus === "delivered") {
-    setErrorMessage(isES ? "Una carga entregada no se puede cancelar." : "A delivered load cannot be cancelled.");
-    return;
-  }
 
-  const confirmed = window.confirm(
-    isES
-      ? `¿Cancelar la carga ${load.load_number}? Se conservará en LOADS como historial y saldrá de DISPATCH.`
-      : `Cancel load ${load.load_number}? It will remain in LOADS as history and be removed from DISPATCH.`
-  );
-  if (!confirmed) return;
+  async function updateLoadStatus(
+    load: Load,
+    newStatus: string
+  ) {
+    setMessage("");
+    setErrorMessage("");
+    setOpenStatusMenu(null);
 
-  setSaving(true);
-  try {
-    // LOADS is the source of truth: cancel the parent first so Dispatch
-    // immediately excludes this load, even if stop cleanup needs a retry.
-    const { data: updatedLoad, error: loadCancelError } = await supabase
+    if (load.status === "pending_review") {
+      setErrorMessage(
+        isES
+          ? "Esta carga debe liberarse a Dispatch mediante la acción de liberación."
+          : "This load must be released to Dispatch using the release action."
+      );
+      return;
+    }
+
+    const { error } = await supabase
       .from("loads")
-      .update({ status: "cancelled" })
+      .update({ status: newStatus })
+      .eq("id", load.id);
+
+    if (error) {
+      setErrorMessage(
+        isES
+          ? `No se pudo actualizar la carga: ${error.message}`
+          : `Could not update the load: ${error.message}`
+      );
+      return;
+    }
+
+    setLoads((current) =>
+      current.map((item) =>
+        item.id === load.id
+          ? {
+              ...item,
+              status: newStatus,
+            }
+          : item
+      )
+    );
+
+    setMessage(
+      `${isES ? "Carga" : "Load"} ${load.load_number} ${
+        text.loadUpdatedTo
+      } ${statusLabel(newStatus)}.`
+    );
+  }
+
+  async function releaseLoadToDispatch(load: Load) {
+    setMessage("");
+    setErrorMessage("");
+    setOpenStatusMenu(null);
+
+    if (load.status !== "pending_review") {
+      setErrorMessage(
+        isES
+          ? "Solo se pueden liberar cargas pendientes de revisión."
+          : "Only loads pending review can be released."
+      );
+      return;
+    }
+
+    const { data: stops, error: stopsError } = await supabase
+      .from("load_stops")
+      .select(
+        "stop_order, stop_type, address, city, state, latitude, longitude, scheduled_date, scheduled_time"
+      )
+      .eq("load_id", load.id)
+      .order("stop_order", { ascending: true });
+
+    if (stopsError) {
+      setErrorMessage(
+        isES
+          ? `No se pudieron verificar las paradas: ${stopsError.message}`
+          : `Could not verify stops: ${stopsError.message}`
+      );
+      return;
+    }
+
+    if (
+      !stops ||
+      stops.length < 2 ||
+      stops.some(
+        (stop) =>
+          !stop.address?.trim() ||
+          !stop.city?.trim() ||
+          !stop.state?.trim() ||
+          stop.latitude == null ||
+          stop.longitude == null
+      ) ||
+      !stops.some((stop) => stop.stop_type === "pickup") ||
+      !stops.some((stop) => stop.stop_type === "delivery")
+    ) {
+      setErrorMessage(
+        isES
+          ? "No se puede liberar: verifica las paradas, direcciones y coordenadas."
+          : "Cannot release: verify stops, addresses, and coordinates."
+      );
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from("loads")
+      .update({ status: "available" })
       .eq("id", load.id)
-      .neq("status", "delivered")
-      .neq("status", "cancelled")
-      .select("id, status")
+      .eq("status", "pending_review")
+      .select("id")
       .maybeSingle();
 
-    if (loadCancelError) throw new Error(loadCancelError.message);
-    if (!updatedLoad) {
-      throw new Error(isES ? "La carga cambió de estado. Actualiza LOADS e inténtalo de nuevo." : "The load status changed. Refresh LOADS and try again.");
-    }
-
-    const { error: stopsCancelError } = await supabase
-      .from("load_stops")
-      .update({ status: "cancelled" })
-      .eq("load_id", load.id)
-      .in("status", ["pending", "in_progress"]);
-
-    await loadData();
-
-    if (stopsCancelError) {
-      throw new Error(
-        (isES ? "La carga quedó cancelada y fuera de DISPATCH, pero no se pudieron cancelar todas las paradas pendientes: " : "The load is cancelled and removed from DISPATCH, but some pending stops could not be cancelled: ") + stopsCancelError.message
+    if (error) {
+      setErrorMessage(
+        isES
+          ? `No se pudo liberar la carga: ${error.message}`
+          : `Could not release the load: ${error.message}`
       );
+      return;
     }
 
-    setMessage(isES ? `La carga ${load.load_number} fue cancelada. Su historial y documentos se conservaron.` : `Load ${load.load_number} was cancelled. Its history and documents were preserved.`);
-  } catch (error) {
-    setErrorMessage(error instanceof Error ? error.message : (isES ? "No se pudo cancelar la carga." : "Could not cancel the load."));
-    await loadData();
-  } finally {
-    setSaving(false);
-  }
-}
+    if (!data) {
+      setErrorMessage(
+        isES
+          ? "La carga ya cambió de estado. Actualiza la lista e inténtalo de nuevo."
+          : "The load status has changed. Refresh the list and try again."
+      );
+      await loadData();
+      return;
+    }
 
-async function updateLoadStatus(
-  load: Load,
-  newStatus: string
-) {
-  setMessage("");
-  setErrorMessage("");
-  setOpenStatusMenu(null);
-
-  if (load.status === "pending_review") {
-    setErrorMessage(
-      isES
-        ? "Esta carga debe liberarse a Dispatch mediante la acción de liberación."
-        : "This load must be released to Dispatch using the release action."
+    setLoads((current) =>
+      current.map((item) =>
+        item.id === load.id
+          ? { ...item, status: "available" }
+          : item
+      )
     );
-    return;
-  }
 
-  const { error } = await supabase
-    .from("loads")
-    .update({ status: newStatus })
-    .eq("id", load.id);
-
-  if (error) {
-    setErrorMessage(
+    setMessage(
       isES
-        ? `No se pudo actualizar la carga: ${error.message}`
-        : `Could not update the load: ${error.message}`
+        ? `Carga ${load.load_number} liberada a Dispatch.`
+        : `Load ${load.load_number} released to Dispatch.`
     );
-    return;
   }
-
-  setLoads((current) =>
-    current.map((item) =>
-      item.id === load.id
-        ? {
-            ...item,
-            status: newStatus,
-          }
-        : item
-    )
-  );
-
-  setMessage(
-    `${isES ? "Carga" : "Load"} ${load.load_number} ${
-      text.loadUpdatedTo
-    } ${statusLabel(newStatus)}.`
-  );
-}
-
-
-
-
-async function releaseLoadToDispatch(load: Load) {
-  setMessage("");
-  setErrorMessage("");
-  setOpenStatusMenu(null);
-
-  if (load.status !== "pending_review") {
-    setErrorMessage(
-      isES
-        ? "Solo se pueden liberar cargas pendientes de revisión."
-        : "Only loads pending review can be released."
-    );
-    return;
-  }
-
-  const { data: stops, error: stopsError } = await supabase
-    .from("load_stops")
-    .select(
-      "stop_order, stop_type, address, city, state, latitude, longitude, scheduled_date, scheduled_time"
-    )
-    .eq("load_id", load.id)
-    .order("stop_order", { ascending: true });
-
-  if (stopsError) {
-    setErrorMessage(
-      isES
-        ? `No se pudieron verificar las paradas: ${stopsError.message}`
-        : `Could not verify stops: ${stopsError.message}`
-    );
-    return;
-  }
-
-  if (
-    !stops ||
-    stops.length < 2 ||
-    stops.some(
-      (stop) =>
-        !stop.address?.trim() ||
-        !stop.city?.trim() ||
-        !stop.state?.trim() ||
-        stop.latitude == null ||
-        stop.longitude == null
-    ) ||
-    !stops.some((stop) => stop.stop_type === "pickup") ||
-    !stops.some((stop) => stop.stop_type === "delivery")
-  ) {
-    setErrorMessage(
-      isES
-        ? "No se puede liberar: verifica las paradas, direcciones y coordenadas."
-        : "Cannot release: verify stops, addresses, and coordinates."
-    );
-    return;
-  }
-
-  const { data, error } = await supabase
-    .from("loads")
-    .update({ status: "available" })
-    .eq("id", load.id)
-    .eq("status", "pending_review")
-    .select("id")
-    .maybeSingle();
-
-  if (error) {
-    setErrorMessage(
-      isES
-        ? `No se pudo liberar la carga: ${error.message}`
-        : `Could not release the load: ${error.message}`
-    );
-    return;
-  }
-
-  if (!data) {
-    setErrorMessage(
-      isES
-        ? "La carga ya cambió de estado. Actualiza la lista e inténtalo de nuevo."
-        : "The load status has changed. Refresh the list and try again."
-    );
-    await loadData();
-    return;
-  }
-
-  setLoads((current) =>
-    current.map((item) =>
-      item.id === load.id
-        ? { ...item, status: "available" }
-        : item
-    )
-  );
-
-  setMessage(
-    isES
-      ? `Carga ${load.load_number} liberada a Dispatch.`
-      : `Load ${load.load_number} released to Dispatch.`
-  );
-}
-
-
-
 
   function toggleStatusMenu(
     loadId: string,
@@ -2120,308 +2058,380 @@ async function releaseLoadToDispatch(load: Load) {
                     "collapse",
                 }}
               >
-               <thead>
-  <tr
-    style={{
-      background: "#f8fafc",
-    }}
-  >
-    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
-      {text.load}
-    </th>
+                <thead>
+                  <tr
+                    style={{
+                      background: "#f8fafc",
+                    }}
+                  >
+                    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+                      {text.load}
+                    </th>
 
-    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
-      {text.brokerCustomer}
-    </th>
+                    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap", width: 308, minWidth: 308 }}>
+                      {text.brokerCustomer}
+                    </th>
 
-    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
-      {text.route}
-    </th>
+                    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+                      {text.route}
+                    </th>
 
+                    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+                      {text.driver}
+                    </th>
 
-    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
-      {text.driver}
-    </th>
+                    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+                      {text.truck}
+                    </th>
 
-    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
-      {text.truck}
-    </th>
+                    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+                      {text.trailer}
+                    </th>
 
-    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
-      {text.trailer}
-    </th>
+                    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+                      {text.miles}
+                    </th>
 
-    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
-      {text.miles}
-    </th>
+                    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+                      {text.rate}
+                    </th>
 
-    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
-      {text.rate}
-    </th>
+                    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+                      {text.status}
+                    </th>
 
-    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
-      {text.status}
-    </th>
+                    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
+                      {isES ? "Acciones" : "Actions"}
+                    </th>
+                  </tr>
+                </thead>
 
-    <th style={{ padding: "12px 14px", textAlign: "left", fontSize: 11, fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: 0.4, whiteSpace: "nowrap" }}>
-      {isES ? "Acciones" : "Actions"}
-    </th>
-  </tr>
-</thead>
+                <tbody>
+                  {filteredLoads.map((load) => {
+                    const style =
+                      statusStyles[load.status ?? "available"] ??
+                      statusStyles.available;
+                    const stopCustomers = Array.from(
+                      new Set(
+                        (load.stops ?? [])
+                          .filter((stop) => String(stop.status ?? "pending").toLowerCase() !== "cancelled")
+                          .map((stop) => stop.customer_name.trim())
+                          .filter(Boolean)
+                      )
+                    );
+                    const cellStyle = {
+                      ...tdStyle,
+                      whiteSpace: "nowrap" as const,
+                      paddingTop: 8,
+                      paddingBottom: 8,
+                      verticalAlign: "middle" as const,
+                    };
 
-                
-<tbody>
-  {filteredLoads.map((load) => {
-    const style =
-      statusStyles[load.status ?? "available"] ??
-      statusStyles.available;
-    const stopCustomers = Array.from(
-      new Set(
-        (load.stops ?? [])
-          .filter((stop) => String(stop.status ?? "pending").toLowerCase() !== "cancelled")
-          .map((stop) => stop.customer_name.trim())
-          .filter(Boolean)
-      )
-    );
-    const customerSummary = stopCustomers.length
-      ? stopCustomers.join(" · ")
-      : load.customer_name || text.noCustomer;
+                    const innerTextStyle = {
+                      whiteSpace: "nowrap" as const,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      maxWidth: 220,
+                    };
 
-    const cellStyle = {
-      ...tdStyle,
-      whiteSpace: "nowrap" as const,
-      paddingTop: 8,
-      paddingBottom: 8,
-      verticalAlign: "middle" as const,
-    };
+                    return (
+                      <tr
+                        key={load.id}
+                        style={{
+                          borderTop: "1px solid #eef2f7",
+                          height: 56,
+                        }}
+                      >
+                        <td style={cellStyle}>
+                          <div style={{ fontWeight: 800, color: "#0f172a" }}>
+                            {`${load.pickup_count ?? 0}-${load.delivery_count ?? 0}`}
+                          </div>
+                          <div
+                            style={{
+                              marginTop: 4,
+                              fontSize: 11,
+                              color: "#94a3b8",
+                              ...innerTextStyle,
+                            }}
+                          >
+                            {companyName(load.company_id)}
+                          </div>
+                        </td>
 
-    const innerTextStyle = {
-      whiteSpace: "nowrap" as const,
-      overflow: "hidden",
-      textOverflow: "ellipsis",
-      maxWidth: 220,
-    };
+                        {/* BROKER (izquierda) / CUSTOMER (centro) / RUTA (derecha).
+                            Broker y customer se repiten en la fila de cada dirección.
+                            Broker y customer usan el mismo tamaño de letra. */}
+                        <td colSpan={2} style={{ ...cellStyle, whiteSpace: "normal" }}>
+                          {(() => {
+                            const stopRows = load.stops ?? [];
+                            const nameStyle: CSSProperties = {
+                              fontSize: 12,
+                              fontWeight: 700,
+                              lineHeight: 1.35,
+                              color: "#0f172a",
+                              textAlign: "left",
+                              overflowWrap: "normal",
+                              wordBreak: "normal",
+                              minWidth: 0,
+                            };
 
-    return (
-      <tr
-        key={load.id}
-        style={{
-          borderTop: "1px solid #eef2f7",
-          height: 56,
-        }}
-      >
-        <td style={cellStyle}>
-          <div style={{ fontWeight: 800, color: "#0f172a" }}>
-            {`${load.pickup_count ?? 0}-${load.delivery_count ?? 0}`}
-          </div>
-          <div
-            style={{
-              marginTop: 4,
-              fontSize: 11,
-              color: "#94a3b8",
-              ...innerTextStyle,
-            }}
-          >
-            {companyName(load.company_id)}
-          </div>
-        </td>
+                            return (
+                              <div
+                                title={stopRows.map((stop) => {
+                                  const raw = stop.pickup_number?.trim() ?? "";
+                                  const pu = raw ? (/^PU/i.test(raw) ? raw.toUpperCase() : `PU${raw}`) : (isES ? "Recogida" : "Pickup");
+                                  const kind = stop.stop_type === "pickup" ? pu : (isES ? "Entrega" : "Delivery");
+                                  const cancelled = String(stop.status ?? "").trim().toLowerCase() === "cancelled";
+                                  const address = [stop.address, stop.city, stop.state, stop.zip_code].filter(Boolean).join(", ");
+                                  const scheduledDateFormatted = formatScheduledDate(stop.scheduled_date);
+                                  const dt = !cancelled ? [scheduledDateFormatted, stop.scheduled_time ? `${stop.scheduled_time} ET` : ""].filter(Boolean).join(" · ") : "";
+                                  const customer = stop.customer_name.trim();
+                                  return `${kind}${cancelled ? " — CANCELLED" : ""}${customer ? ` · ${customer}` : ""}: ${address}${dt ? ` — ${dt}` : ""}`;
+                                }).join("\n")}
+                                style={{
+                                  display: "grid",
+                                  gridTemplateColumns: "112px 10px 140px minmax(430px, 600px)",
+                                  columnGap: 6,
+                                  rowGap: 7,
+                                  alignItems: "start",
+                                  fontSize: 11,
+                                }}
+                              >
+                                {stopRows.length > 0 ? stopRows.map((stop, index) => {
+                                  const raw = stop.pickup_number?.trim() ?? "";
+                                  const pu = raw ? (/^PU/i.test(raw) ? raw.toUpperCase() : `PU${raw}`) : (isES ? "Recogida" : "Pickup");
+                                  const cancelled = String(stop.status ?? "").trim().toLowerCase() === "cancelled";
+                                  const isPickup = stop.stop_type === "pickup";
+                                  const kind = isPickup ? (isES ? "RECOGIDA" : "PICKUP") : (isES ? "ENTREGA" : "DELIVERY");
+                                  const address = [stop.address, stop.city, stop.state, stop.zip_code].filter(Boolean).join(", ");
+                                  const scheduledDateFormatted = formatScheduledDate(stop.scheduled_date);
+                                  const dateTime = !cancelled ? [scheduledDateFormatted, stop.scheduled_time ? `${stop.scheduled_time} ET` : ""].filter(Boolean).join(" · ") : "";
+                                  const customer = stop.customer_name.trim() || load.customer_name || "";
 
-        <td style={{ ...cellStyle, minWidth: 170, whiteSpace: "normal" }}>
-          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-            <span style={{ color: "#64748b", fontSize: 10, fontWeight: 800, textTransform: "uppercase" }}>Broker</span>
-            <strong style={{ color: "#0f172a", overflowWrap: "anywhere" }}>{load.broker_name || "—"}</strong>
-          </div>
-          <div style={{ height: 1, background: "#e2e8f0", margin: "7px 0" }} />
-          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-            <span style={{ color: "#64748b", fontSize: 10, fontWeight: 800, textTransform: "uppercase" }}>{isES ? "Cliente" : "Customer"}</span>
-            <strong style={{ color: "#0f172a", overflowWrap: "anywhere" }}>{customerSummary}</strong>
-          </div>
-        </td>
+                                  const rowPad = cancelled ? "6px 8px" : "4px 0";
 
-        <td style={{ ...cellStyle, minWidth: 430, maxWidth: 600, whiteSpace: "normal" }}>
-          <div
-            title={(load.stops ?? []).map((stop) => {
-              const raw = stop.pickup_number?.trim() ?? "";
-              const pu = raw ? (/^PU/i.test(raw) ? raw.toUpperCase() : `PU${raw}`) : (isES ? "Recogida" : "Pickup");
-              const kind = stop.stop_type === "pickup" ? pu : (isES ? "Entrega" : "Delivery");
-              const cancelled = String(stop.status ?? "").trim().toLowerCase() === "cancelled";
-              const address = [stop.address, stop.city, stop.state, stop.zip_code].filter(Boolean).join(", ");
-              const dt = !cancelled ? [stop.scheduled_date, stop.scheduled_time].filter(Boolean).join(" ") : "";
-              const customer = stop.customer_name.trim();
-              return `${kind}${cancelled ? " — CANCELLED" : ""}${customer ? ` · ${customer}` : ""}: ${address}${dt ? ` — ${dt}` : ""}`;
-            }).join("\n")}
-            style={{ display: "flex", flexDirection: "column", gap: 7, maxWidth: 600, whiteSpace: "normal", fontSize: 11 }}
-          >
-            {(load.stops?.length ?? 0) > 0 ? load.stops!.map((stop) => {
-              const raw = stop.pickup_number?.trim() ?? "";
-              const pu = raw ? (/^PU/i.test(raw) ? raw.toUpperCase() : `PU${raw}`) : (isES ? "Recogida" : "Pickup");
-              const cancelled = String(stop.status ?? "").trim().toLowerCase() === "cancelled";
-              const isPickup = stop.stop_type === "pickup";
-              const kind = isPickup ? (isES ? "RECOGIDA" : "PICKUP") : (isES ? "ENTREGA" : "DELIVERY");
-              const address = [stop.address, stop.city, stop.state, stop.zip_code].filter(Boolean).join(", ");
-              const dateTime = !cancelled ? [stop.scheduled_date, stop.scheduled_time].filter(Boolean).join(" ") : "";
-              const dateLabel = isPickup ? (isES ? "Fecha de recogida" : "Pickup date") : (isES ? "Fecha de entrega" : "Delivery date");
-              const customer = stop.customer_name.trim() || load.customer_name || "";
-              return (
-                <div key={stop.stop_number} style={{ display: "grid", gridTemplateColumns: "112px minmax(0, 1fr)", columnGap: 10, alignItems: "start", minWidth: 0, padding: cancelled ? "6px 8px" : "3px 0", border: cancelled ? "1px solid #dc2626" : "1px solid transparent", borderRadius: cancelled ? 5 : 0, background: cancelled ? "#fee2e2" : "transparent", color: cancelled ? "#b91c1c" : "inherit" }}>
-                  <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 4, minWidth: 0 }}>
-                    <span style={{ fontSize: 9, fontWeight: 900, letterSpacing: 0.4, color: cancelled ? "#b91c1c" : (isPickup ? "#1d4ed8" : "#047857") }}>{kind}</span>
-                    <span style={{ display: "inline-flex", justifyContent: "center", alignItems: "center", minWidth: 62, padding: "3px 7px", borderRadius: 4, background: cancelled ? "#b91c1c" : (isPickup ? "#dbeafe" : "#d1fae5"), color: cancelled ? "#ffffff" : (isPickup ? "#1d4ed8" : "#047857"), fontWeight: 900, fontSize: 10, textDecoration: cancelled ? "line-through" : "none" }}>{isPickup ? pu : (isES ? "ENTREGA" : "DELIVERY")}</span>
-                    {cancelled && <strong style={{ color: "#b91c1c", fontSize: 9, lineHeight: 1.2 }}>⛔ {isES ? "CANCELADO" : "CANCELLED"}</strong>}
-                  </div>
-                  <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 3 }}>
-                    {customer && !cancelled && <span style={{ color: "#0f172a", fontSize: 10, fontWeight: 800 }}>{isES ? "Cliente" : "Customer"}: {customer}</span>}
-                    <strong style={{ color: cancelled ? "#b91c1c" : "#334155", overflowWrap: "anywhere", textDecoration: cancelled ? "line-through" : "none", lineHeight: 1.35 }}>{address || "—"}</strong>
-                    {!cancelled && dateTime && <span style={{ color: isPickup ? "#1d4ed8" : "#047857", fontSize: 10, fontWeight: 800 }}>{dateLabel}: {formatScheduledDate(stop.scheduled_date)}{stop.scheduled_time ? ` · ${stop.scheduled_time} ET` : ""}</span>}
-                  </div>
-                </div>
-              );
-            }) : (
-              <div style={{ display: "grid", gridTemplateColumns: "112px minmax(0, 1fr)", columnGap: 10, rowGap: 5 }}>
-                <strong style={{ color: "#1d4ed8" }}>{isES ? "RECOGIDA" : "PICKUP"}</strong>
-                <div style={{ minWidth: 0, overflowWrap: "anywhere" }}>{[load.pickup_address, load.origin_city, load.origin_state].filter(Boolean).join(", ") || "—"}<div style={{ color: "#1d4ed8", fontSize: 10, fontWeight: 800 }}>{load.pickup_date ? `${isES ? "Fecha de recogida" : "Pickup date"}: ${formatDate(load.pickup_date)}` : ""}</div></div>
-                <strong style={{ color: "#047857" }}>{isES ? "ENTREGA" : "DELIVERY"}</strong>
-                <div style={{ minWidth: 0, overflowWrap: "anywhere" }}>{[load.delivery_address, load.destination_city, load.destination_state].filter(Boolean).join(", ") || "—"}<div style={{ color: "#047857", fontSize: 10, fontWeight: 800 }}>{load.delivery_date ? `${isES ? "Fecha de entrega" : "Delivery date"}: ${formatDate(load.delivery_date)}` : ""}</div></div>
-              </div>
-            )}
-          </div>
-        </td>
+                                  return [
+                                    /* BROKER repetido en cada parada */
+                                    <div
+                                      key={`${stop.stop_number}-broker`}
+                                      style={{
+                                        ...nameStyle,
+                                        gridColumn: 1,
+                                        gridRow: index + 1,
+                                        padding: rowPad,
+                                        border: "1px solid transparent",
+                                        color: cancelled ? "#b91c1c" : "#0f172a",
+                                        textDecoration: cancelled ? "line-through" : "none",
+                                      }}
+                                    >
+                                      {load.broker_name || "—"}
+                                    </div>,
+                                    <div
+                                      key={`${stop.stop_number}-slash`}
+                                      style={{ gridColumn: 2, gridRow: index + 1, padding: rowPad, border: "1px solid transparent", color: "#94a3b8", fontWeight: 700, fontSize: 12, lineHeight: 1.35 }}
+                                    >
+                                      /
+                                    </div>,
 
-        <td style={cellStyle}>
-          <div style={{ fontWeight: 700, ...innerTextStyle }}>
-            {driverName(load.driver_id)}
-          </div>
-        </td>
+                                    /* CUSTOMER de esta parada, en la misma fila que su dirección */
+                                    <div
+                                      key={`${stop.stop_number}-customer`}
+                                      style={{
+                                        ...nameStyle,
+                                        gridColumn: 3,
+                                        gridRow: index + 1,
+                                        padding: rowPad,
+                                        border: "1px solid transparent",
+                                        color: cancelled ? "#b91c1c" : "#0f172a",
+                                        textDecoration: cancelled ? "line-through" : "none",
+                                      }}
+                                    >
+                                      {customer || "—"}
+                                    </div>,
 
-        <td style={cellStyle}>
-          <div style={{ fontWeight: 700, ...innerTextStyle }}>
-            {truckName(load.truck_id)}
-          </div>
-        </td>
+                                    /* RUTA: etiqueta de la parada, dirección y fecha */
+                                    <div
+                                      key={`${stop.stop_number}-route`}
+                                      style={{ gridColumn: 4, gridRow: index + 1, display: "grid", gridTemplateColumns: "112px minmax(0, 1fr)", columnGap: 10, alignItems: "start", minWidth: 0, padding: cancelled ? "6px 8px" : "3px 0", border: cancelled ? "1px solid #dc2626" : "1px solid transparent", borderRadius: cancelled ? 5 : 0, background: cancelled ? "#fee2e2" : "transparent", color: cancelled ? "#b91c1c" : "inherit" }}
+                                    >
+                                      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 4, minWidth: 0 }}>
+                                        <span style={{ fontSize: 9, fontWeight: 900, letterSpacing: 0.4, color: cancelled ? "#b91c1c" : (isPickup ? "#1d4ed8" : "#047857") }}>{kind}</span>
+                                        <span style={{ display: "inline-flex", justifyContent: "center", alignItems: "center", minWidth: 62, padding: "3px 7px", borderRadius: 4, background: cancelled ? "#b91c1c" : (isPickup ? "#dbeafe" : "#d1fae5"), color: cancelled ? "#ffffff" : (isPickup ? "#1d4ed8" : "#047857"), fontWeight: 900, fontSize: 10, textDecoration: cancelled ? "line-through" : "none" }}>{isPickup ? pu : (isES ? "ENTREGA" : "DELIVERY")}</span>
+                                        {cancelled && <strong style={{ color: "#b91c1c", fontSize: 9, lineHeight: 1.2 }}>⛔ {isES ? "CANCELADO" : "CANCELLED"}</strong>}
+                                      </div>
+                                      <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 3 }}>
+                                        <strong style={{ color: cancelled ? "#b91c1c" : "#334155", overflowWrap: "anywhere", textDecoration: cancelled ? "line-through" : "none", lineHeight: 1.35 }}>{address || "—"}</strong>
 
-        <td style={cellStyle}>
-          <div style={{ fontWeight: 700, ...innerTextStyle }}>
-            {trailerName(load.trailer_id)}
-          </div>
-        </td>
+                                        {!cancelled && dateTime && (
+                                          <span style={{ color: isPickup ? "#1d4ed8" : "#047857", fontSize: 10, fontWeight: 800 }}>
+                                            📅 {dateTime}
+                                          </span>
+                                        )}
+                                      </div>
+                                    </div>,
+                                  ];
+                                }) : (
+                                  <>
+                                    <div style={{ ...nameStyle, gridColumn: 1, gridRow: 1, padding: "4px 0" }}>
+                                      {load.broker_name || "—"}
+                                    </div>
+                                    <div style={{ gridColumn: 2, gridRow: 1, padding: "4px 0", color: "#94a3b8", fontWeight: 700, fontSize: 12, lineHeight: 1.35 }}>/</div>
+                                    <div style={{ ...nameStyle, gridColumn: 3, gridRow: 1, padding: "4px 0" }}>
+                                      {load.customer_name || text.noCustomer}
+                                    </div>
+                                    <div style={{ gridColumn: 4, gridRow: 1, display: "grid", gridTemplateColumns: "112px minmax(0, 1fr)", columnGap: 10, rowGap: 5 }}>
+                                      <strong style={{ color: "#1d4ed8" }}>{isES ? "RECOGIDA" : "PICKUP"}</strong>
+                                      <div style={{ minWidth: 0, overflowWrap: "anywhere" }}>
+                                        {[load.pickup_address, load.origin_city, load.origin_state].filter(Boolean).join(", ") || "—"}
+                                        <div style={{ color: "#1d4ed8", fontSize: 10, fontWeight: 800 }}>
+                                          {load.pickup_date ? `📅 ${formatDate(load.pickup_date)}` : ""}
+                                        </div>
+                                      </div>
+                                      <strong style={{ color: "#047857" }}>{isES ? "ENTREGA" : "DELIVERY"}</strong>
+                                      <div style={{ minWidth: 0, overflowWrap: "anywhere" }}>
+                                        {[load.delivery_address, load.destination_city, load.destination_state].filter(Boolean).join(", ") || "—"}
+                                        <div style={{ color: "#047857", fontSize: 10, fontWeight: 800 }}>
+                                          {load.delivery_date ? `📅 ${formatDate(load.delivery_date)}` : ""}
+                                        </div>
+                                      </div>
+                                    </div>
+                                  </>
+                                )}
+                              </div>
+                            );
+                          })()}
+                        </td>
 
-        <td style={cellStyle}>
-          <strong>{formatNumber(load.miles)}</strong>
-        </td>
+                        <td style={cellStyle}>
+                          <div style={{ fontWeight: 700, ...innerTextStyle }}>
+                            {driverName(load.driver_id)}
+                          </div>
+                        </td>
 
-        <td style={cellStyle}>
-          <strong>{formatCurrency(load.rate)}</strong>
-        </td>
+                        <td style={cellStyle}>
+                          <div style={{ fontWeight: 700, ...innerTextStyle }}>
+                            {truckName(load.truck_id)}
+                          </div>
+                        </td>
 
-        <td style={cellStyle}>
-          <button
-            type="button"
-            disabled={String(load.status ?? "").toLowerCase() === "cancelled"}
-            onClick={(event) => toggleStatusMenu(load.id, event)}
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 7,
-              minWidth: 125,
-              justifyContent: "space-between",
-              padding: "7px 10px",
-              borderRadius: 999,
-              border: `1px solid ${style.border}`,
-              background: style.background,
-              color: style.color,
-              fontSize: 12,
-              fontWeight: 800,
-              cursor: String(load.status ?? "").toLowerCase() === "cancelled" ? "not-allowed" : "pointer",
-              opacity: String(load.status ?? "").toLowerCase() === "cancelled" ? 0.9 : 1,
-              whiteSpace: "nowrap",
-            }}
-          >
-            <span>{statusLabel(load.status)}</span>
-            <span style={{ fontSize: 10 }}>▾</span>
-          </button>
-        </td>
+                        <td style={cellStyle}>
+                          <div style={{ fontWeight: 700, ...innerTextStyle }}>
+                            {trailerName(load.trailer_id)}
+                          </div>
+                        </td>
 
-        <td style={cellStyle}>
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <button
-            type="button"
-            disabled={String(load.status ?? "").toLowerCase() === "cancelled"}
-            onClick={() => openEditForm(load)}
-            style={{
-              height: 34,
-              padding: "0 12px",
-              border: "1px solid #cbd5e1",
-              borderRadius: 8,
-              background: "#ffffff",
-              color: "#0f172a",
-              fontSize: 12,
-              fontWeight: 800,
-              cursor: String(load.status ?? "").toLowerCase() === "cancelled" ? "not-allowed" : "pointer",
-              opacity: String(load.status ?? "").toLowerCase() === "cancelled" ? 0.55 : 1,
-              whiteSpace: "nowrap",
-            }}
-          >
-            {text.edit}
-          </button>
-          <button
-            type="button"
-            onClick={() => void cancelLoadFromLoads(load)}
-            disabled={saving || ["cancelled", "delivered"].includes(String(load.status ?? "").toLowerCase())}
-            style={{
-              height: 34,
-              padding: "0 10px",
-              border: "1px solid #fca5a5",
-              borderRadius: 8,
-              background: ["cancelled", "delivered"].includes(String(load.status ?? "").toLowerCase()) ? "#f1f5f9" : "#fef2f2",
-              color: ["cancelled", "delivered"].includes(String(load.status ?? "").toLowerCase()) ? "#94a3b8" : "#b91c1c",
-              fontSize: 11,
-              fontWeight: 800,
-              cursor: saving || ["cancelled", "delivered"].includes(String(load.status ?? "").toLowerCase()) ? "not-allowed" : "pointer",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {isES ? "Cancelar carga" : "Cancel Load"}
-          </button>
-          </div>
-        </td>
-      </tr>
-    );
-  })}
-</tbody>
+                        <td style={cellStyle}>
+                          <strong>{formatNumber(load.miles)}</strong>
+                        </td>
 
+                        <td style={cellStyle}>
+                          <strong>{formatCurrency(load.rate)}</strong>
+                        </td>
+
+                        <td style={cellStyle}>
+                          <button
+                            type="button"
+                            disabled={String(load.status ?? "").toLowerCase() === "cancelled"}
+                            onClick={(event) => toggleStatusMenu(load.id, event)}
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              gap: 7,
+                              minWidth: 125,
+                              justifyContent: "space-between",
+                              padding: "7px 10px",
+                              borderRadius: 999,
+                              border: `1px solid ${style.border}`,
+                              background: style.background,
+                              color: style.color,
+                              fontSize: 12,
+                              fontWeight: 800,
+                              cursor: String(load.status ?? "").toLowerCase() === "cancelled" ? "not-allowed" : "pointer",
+                              opacity: String(load.status ?? "").toLowerCase() === "cancelled" ? 0.9 : 1,
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            <span>{statusLabel(load.status)}</span>
+                            <span style={{ fontSize: 10 }}>▾</span>
+                          </button>
+                        </td>
+
+                        <td style={cellStyle}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                            <button
+                              type="button"
+                              disabled={String(load.status ?? "").toLowerCase() === "cancelled"}
+                              onClick={() => openEditForm(load)}
+                              style={{
+                                height: 34,
+                                padding: "0 12px",
+                                border: "1px solid #cbd5e1",
+                                borderRadius: 8,
+                                background: "#ffffff",
+                                color: "#0f172a",
+                                fontSize: 12,
+                                fontWeight: 800,
+                                cursor: String(load.status ?? "").toLowerCase() === "cancelled" ? "not-allowed" : "pointer",
+                                opacity: String(load.status ?? "").toLowerCase() === "cancelled" ? 0.55 : 1,
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {text.edit}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void cancelLoadFromLoads(load)}
+                              disabled={saving || ["cancelled", "delivered"].includes(String(load.status ?? "").toLowerCase())}
+                              style={{
+                                height: 34,
+                                padding: "0 10px",
+                                border: "1px solid #fca5a5",
+                                borderRadius: 8,
+                                background: ["cancelled", "delivered"].includes(String(load.status ?? "").toLowerCase()) ? "#f1f5f9" : "#fef2f2",
+                                color: ["cancelled", "delivered"].includes(String(load.status ?? "").toLowerCase()) ? "#94a3b8" : "#b91c1c",
+                                fontSize: 11,
+                                fontWeight: 800,
+                                cursor: saving || ["cancelled", "delivered"].includes(String(load.status ?? "").toLowerCase()) ? "not-allowed" : "pointer",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {isES ? "Cancelar carga" : "Cancel Load"}
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
               </table>
             </div>
           )}
         </section>
 
-        
-{activeStatusLoad?.status === "pending_review" && (
-  <button
-    type="button"
-    onClick={() => {
-      if (!activeStatusLoad) return;
-      void releaseLoadToDispatch(activeStatusLoad);
-    }}
-    style={{
-      width: "100%",
-      marginTop: 6,
-      padding: "10px 8px",
-      border: "none",
-      borderRadius: 8,
-      background: "#0f766e",
-      color: "#ffffff",
-      fontSize: 12,
-      fontWeight: 800,
-      cursor: "pointer",
-      textAlign: "center",
-    }}
-  >
-    {isES ? "Liberar a Dispatch" : "Release to Dispatch"}
-  </button>
-)}
-
-
-        
+        {activeStatusLoad?.status === "pending_review" && (
+          <button
+            type="button"
+            onClick={() => {
+              if (!activeStatusLoad) return;
+              void releaseLoadToDispatch(activeStatusLoad);
+            }}
+            style={{
+              width: "100%",
+              marginTop: 6,
+              padding: "10px 8px",
+              border: "none",
+              borderRadius: 8,
+              background: "#0f766e",
+              color: "#ffffff",
+              fontSize: 12,
+              fontWeight: 800,
+              cursor: "pointer",
+              textAlign: "center",
+            }}
+          >
+            {isES ? "Liberar a Dispatch" : "Release to Dispatch"}
+          </button>
+        )}
 
         {/* CREATE LOAD MODAL */}
         {showForm && (
@@ -2530,7 +2540,6 @@ async function releaseLoadToDispatch(load: Load) {
                     fontSize: 18,
                   }}
                 >
-                  
                   ×
                 </button>
               </div>
@@ -3203,53 +3212,53 @@ async function releaseLoadToDispatch(load: Load) {
                     </div>
 
                     {/* ADD STOP */}
-<div
-  style={{
-    display: "flex",
-    justifyContent: "center",
-    gap: 10,
-    flexWrap: "wrap",
-    marginTop: 14,
-  }}
->
-  <button
-    type="button"
-    onClick={() => addStop("pickup")}
-    disabled={saving}
-    style={{
-      height: 38,
-      padding: "0 16px",
-      border: "1px solid #cbd5e1",
-      borderRadius: 9,
-      background: "#ffffff",
-      color: "#1d4ed8",
-      fontSize: 12,
-      fontWeight: 700,
-      cursor: saving ? "not-allowed" : "pointer",
-    }}
-  >
-    {isES ? "+ Agregar recogida" : "+ Add Pickup"}
-  </button>
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "center",
+                        gap: 10,
+                        flexWrap: "wrap",
+                        marginTop: 14,
+                      }}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => addStop("pickup")}
+                        disabled={saving}
+                        style={{
+                          height: 38,
+                          padding: "0 16px",
+                          border: "1px solid #cbd5e1",
+                          borderRadius: 9,
+                          background: "#ffffff",
+                          color: "#1d4ed8",
+                          fontSize: 12,
+                          fontWeight: 700,
+                          cursor: saving ? "not-allowed" : "pointer",
+                        }}
+                      >
+                        {isES ? "+ Agregar recogida" : "+ Add Pickup"}
+                      </button>
 
-  <button
-    type="button"
-    onClick={() => addStop("delivery")}
-    disabled={saving}
-    style={{
-      height: 38,
-      padding: "0 16px",
-      border: "1px solid #cbd5e1",
-      borderRadius: 9,
-      background: "#ffffff",
-      color: "#047857",
-      fontSize: 12,
-      fontWeight: 700,
-      cursor: saving ? "not-allowed" : "pointer",
-    }}
-  >
-    {isES ? "+ Agregar entrega" : "+ Add Delivery"}
-  </button>
-</div>
+                      <button
+                        type="button"
+                        onClick={() => addStop("delivery")}
+                        disabled={saving}
+                        style={{
+                          height: 38,
+                          padding: "0 16px",
+                          border: "1px solid #cbd5e1",
+                          borderRadius: 9,
+                          background: "#ffffff",
+                          color: "#047857",
+                          fontSize: 12,
+                          fontWeight: 700,
+                          cursor: saving ? "not-allowed" : "pointer",
+                        }}
+                      >
+                        {isES ? "+ Agregar entrega" : "+ Add Delivery"}
+                      </button>
+                    </div>
                   </div>
 
                   {/* MILES + RATE */}
@@ -3837,4 +3846,3 @@ const tdStyle: CSSProperties = {
   fontSize: 12,
   color: "#334155",
 };
-

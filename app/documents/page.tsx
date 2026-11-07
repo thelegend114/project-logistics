@@ -200,8 +200,12 @@ export default function DocumentsPage() {
     loadingLoads: isES ? "Cargando cargas..." : "Loading loads...",
     selectLoad: isES ? "Selecciona una carga" : "Select a load",
     pendingLoadsTitle: isES ? "Cargas operativas" : "Operational Loads",
-    pendingLoadsDescription: isES ? "Se muestran las cargas activas disponibles con paradas de recogida." : "Active available loads with pickup stops are shown here.",
-    noCurrentLoads: isES ? "No hay cargas operativas activas con paradas de recogida. Verifica las cargas y sus paradas en Supabase." : "No active operational loads with pickup stops were found. Check loads and their stops in Supabase.",
+    pendingLoadsDescription: isES
+      ? "Se muestran las cargas activas y las cargas entregadas cuyo Rate Confirmation está pendiente de aprobación humana."
+      : "Active loads and delivered loads with a Rate Confirmation awaiting human approval are shown here.",
+    noCurrentLoads: isES
+      ? "No hay cargas activas ni cargas entregadas pendientes de Confirmación de tarifa."
+      : "No active loads or delivered loads awaiting Rate Confirmation were found.",
     completedHistoryTitle: isES ? "Historial de documentos completados" : "Completed Document History",
     completedHistoryDescription: isES ? "Historial separado de las cargas vigentes. Los documentos históricos se conservan y se muestran aquí sin acciones de eliminación o aprobación." : "Separate from current loads. Historical documents are preserved here without delete or approval actions.",
     selectHistoryLoad: isES ? "Selecciona una carga del historial" : "Select a historical load",
@@ -406,6 +410,12 @@ export default function DocumentsPage() {
   };
 
   const [loads, setLoads] = useState<Load[]>([]);
+  // Lightweight status index for every company load. This lets the upload
+  // selector include delivered loads that still need a Rate Confirmation review.
+  const [allLoadDocuments, setAllLoadDocuments] = useState<
+    Pick<Document, "load_id" | "document_type" | "status">[]
+  >([]);
+  const [loadDocumentIndexReady, setLoadDocumentIndexReady] = useState(false);
   const [selectedLoadId, setSelectedLoadId] = useState("");
   const [selectedHistoryLoadId, setSelectedHistoryLoadId] = useState("");
   const [historyDocuments, setHistoryDocuments] = useState<Document[]>([]);
@@ -444,8 +454,53 @@ export default function DocumentsPage() {
   // Current work includes any active operational load with a pickup stop.
   // Las cargas vigentes incluyen cualquier carga operativa activa con una parada de recogida.
   const currentLoads = useMemo(() => {
+    const hasRateConfirmationRecord = (loadId: string) =>
+      allLoadDocuments.some((documentRow) => {
+        const documentType = String(documentRow.document_type ?? "")
+          .trim()
+          .toLowerCase()
+          .replace(/[_-]+/g, " ")
+          .replace(/\s+/g, " ");
+        return (
+          documentRow.load_id === loadId &&
+          documentType.includes("rate") &&
+          documentType.includes("confirmation")
+        );
+      });
+
+    const hasApprovedRateConfirmation = (loadId: string) =>
+      allLoadDocuments.some((documentRow) => {
+        const documentType = String(documentRow.document_type ?? "")
+          .trim()
+          .toLowerCase()
+          .replace(/[_-]+/g, " ")
+          .replace(/\s+/g, " ");
+        const status = String(documentRow.status ?? "")
+          .trim()
+          .toLowerCase()
+          .replace(/[_-]+/g, " ")
+          .replace(/\s+/g, " ");
+
+        return (
+          documentRow.load_id === loadId &&
+          documentType.includes("rate") &&
+          documentType.includes("confirmation") &&
+          ["approved", "document approved", "reviewed"].includes(status)
+        );
+      });
+
     return loads
-      .filter((load) => ACTIVE_LOAD_STATUSES.has(normalizeLoadStatus(load.status)))
+      .filter((load) => {
+        const status = normalizeLoadStatus(load.status);
+        const isOperational = ACTIVE_LOAD_STATUSES.has(status);
+        const isDeliveredAwaitingRateConfirmation =
+          loadDocumentIndexReady &&
+          ["delivered", "completed", "complete"].includes(status) &&
+          hasRateConfirmationRecord(load.id) &&
+          !hasApprovedRateConfirmation(load.id);
+
+        return isOperational || isDeliveredAwaitingRateConfirmation;
+      })
       .filter((load) =>
         loadStops.some((stop) => {
           const stopType = String(stop.stop_type ?? "")
@@ -465,7 +520,7 @@ export default function DocumentsPage() {
         const bTime = b.created_at ? new Date(b.created_at).getTime() : 0;
         return bTime - aTime;
       });
-  }, [loads, loadStops]);
+  }, [loads, loadStops, allLoadDocuments, loadDocumentIndexReady]);
 
   const currentLoadIds = useMemo(
     () => new Set(currentLoads.map((load) => load.id)),
@@ -769,12 +824,15 @@ const { data, error } = await supabase
 
   async function loadData() {
     setLoadingLoads(true);
+    setLoadDocumentIndexReady(false);
     setErrorMessage("");
 
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) {
       setLoads([]);
       setLoadStops([]);
+      setAllLoadDocuments([]);
+      setLoadDocumentIndexReady(false);
       setErrorMessage(isES ? "Inicia sesión para ver las cargas." : "Sign in to view loads.");
       setLoadingLoads(false);
       return;
@@ -789,6 +847,8 @@ const { data, error } = await supabase
     if (userError || !userData?.company_id) {
       setLoads([]);
       setLoadStops([]);
+      setAllLoadDocuments([]);
+      setLoadDocumentIndexReady(false);
       setErrorMessage(userError?.message || (isES ? "No se encontró la empresa del usuario." : "User company was not found."));
       setLoadingLoads(false);
       return;
@@ -837,6 +897,30 @@ const { data, error } = await supabase
     }));
 
     setLoads(formattedLoads);
+
+    if (formattedLoads.length === 0) {
+      setAllLoadDocuments([]);
+      setLoadDocumentIndexReady(true);
+    } else {
+      const { data: documentStatusRows, error: documentStatusError } = await supabase
+        .from("documents")
+        .select("load_id, document_type, status")
+        .in("load_id", formattedLoads.map((load) => load.id));
+
+      if (documentStatusError) {
+        console.error("DOCUMENT STATUS INDEX ERROR:", documentStatusError);
+        setAllLoadDocuments([]);
+        setLoadDocumentIndexReady(false);
+      } else {
+        setAllLoadDocuments(
+          (documentStatusRows ?? []) as Pick<
+            Document,
+            "load_id" | "document_type" | "status"
+          >[]
+        );
+        setLoadDocumentIndexReady(true);
+      }
+    }
 
     setLoadingLoads(false);
   }
@@ -1483,12 +1567,15 @@ if (insertError || !insertedDocument?.id) {
             {text.aiReview}
           </ActionButton>
 
-          <ActionButton
-            variant="danger"
-            onClick={() => deleteDocument(row)}
-          >
-            {text.delete}
-          </ActionButton>
+          {selectedLoad &&
+            !COMPLETED_LOAD_STATUSES.has(normalizeLoadStatus(selectedLoad.status)) && (
+              <ActionButton
+                variant="danger"
+                onClick={() => deleteDocument(row)}
+              >
+                {text.delete}
+              </ActionButton>
+            )}
         </div>
       ),
     },
